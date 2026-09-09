@@ -6,7 +6,10 @@ Event-driven: kqueue vnode events on the session-state directory and on the tran
 
   TURN ct=765->766 ts=<utc>                 completedTurns incremented (normal turn end)
   TURN_END ts=<utc> ct=766->766 opener=peer  the transcript shows the turn ended (final assistant text, no tool call pending)
-                                            but the counter did not move within 6 s -- seen for peer-opened (cross-session) turns
+                                            but the counter did not move within 6 s -- measured for peer-opened (cross-session)
+                                            turns, whose count arrives only with the NEXT delivered input (README, unknown 3)
+Exactly one event goes out per transcript turn; a counter bump that lands while a turn is open, or after this
+turn was already reported, is logged to stderr as a lagged count and NOT emitted.
   INTERRUPTED ts=<utc> ct=766->766          '[Request interrupted by user' marker appended (ct folded if it moved within 6 s)
   API_ERROR ts=<utc> ct=... text=<head>     assistant record with isApiErrorMessage appended
   CONTEXT_EXCEEDED cec=1->2 ct=...          contextExceededCount incremented (hard API-edge failure)
@@ -39,7 +42,8 @@ class Watch(object):
         self.pos = os.path.getsize(self.tpath); self.partial = b''
         self.stale_reported_for = None
         self.prev_pid = self._last_pid(); self.cur_opener_kind = None; self.pending_tool = False
-        self.transcript_turn_ended = False   # a TURN_END was emitted for the current transcript turn; swallow a late counter bump
+        self.turn_open = self._last_turn_open()
+        self.event_emitted_for_turn = not self.turn_open   # an event (TURN/TURN_END/...) already went out for the current transcript turn
 
     def _arm(self, path, tag):
         flags = getattr(os, 'O_EVTONLY', os.O_RDONLY)
@@ -58,6 +62,13 @@ class Watch(object):
             return turns[-1].pid if turns else None
         except Exception:
             return None
+
+    def _last_turn_open(self):
+        try:
+            _, turns = W.last_turns(self.sess, n=1)
+            return bool(turns) and turns[-1].end_state == 'open'
+        except Exception:
+            return False
 
     def _rearm_transcript(self):
         # the transcript could in principle be rotated; re-open if the inode changed
@@ -113,43 +124,41 @@ class Watch(object):
                 is_tr = bool(W._blocks(c, 'tool_result'))
                 if not is_tr and r.get('promptId') != self.prev_pid:      # a new turn opened
                     self.cur_opener_kind = (r.get('origin') or {}).get('kind') or 'other'
-                    self.transcript_turn_ended = False
+                    self.turn_open = True; self.event_emitted_for_turn = False; ended = None
                 self.prev_pid = r.get('promptId')
                 if is_tr: self.pending_tool = False
                 txt = W._text_of(c)
                 if W.MARKER in txt:
-                    out.append(('INTERRUPTED', 'ts=%s' % r.get('timestamp')))
+                    out.append(('INTERRUPTED', 'ts=%s' % r.get('timestamp'))); self.turn_open = False
             elif ty == 'assistant':
                 m = r.get('message') or {}
                 c = m.get('content')
                 if r.get('isApiErrorMessage'):
-                    out.append(('API_ERROR', 'ts=%s text=%s' % (r.get('timestamp'), W.short(W._text_of(c), 80).replace(' ', '_'))))
+                    out.append(('API_ERROR', 'ts=%s text=%s' % (r.get('timestamp'), W.short(W._text_of(c), 80).replace(' ', '_')))); self.turn_open = False
                 if W._blocks(c, 'tool_use'):
-                    self.pending_tool = True
+                    self.pending_tool = True; self.turn_open = True
                 elif m.get('stop_reason') in ('end_turn', 'stop_sequence', 'max_tokens') and W._text_of(c).strip():
-                    self.pending_tool = False
+                    self.pending_tool = False; self.turn_open = False
                     ended = r.get('timestamp')
-        if out or ended:   # fold a counter move that follows within 6 s
+        if (out or ended) and not self.event_emitted_for_turn:   # fold a counter move that follows within 6 s
             deadline = time.time() + 6
             while time.time() < deadline and st['ct'] == self.ct:
                 try: self.kq.control(None, 32, max(0.05, deadline - time.time()))
                 except OSError: pass
                 st = W.read_state(self.sess)
-        if ended and not out and st['ct'] == self.ct and not self.transcript_turn_ended:
+        if ended and not out and st['ct'] == self.ct and not self.event_emitted_for_turn:
             out.append(('TURN_END', 'ts=%s opener=%s' % (ended, self.cur_opener_kind)))
-            self.transcript_turn_ended = True
         lines = []
         if st['ct'] != self.ct:
-            if out:
-                lines.append('%s %s ct=%s->%s' % (out[0][0], out[0][1], self.ct, st['ct']))
-            elif self.transcript_turn_ended and not recs:
-                log('counter moved %s->%s after a TURN_END already reported for this turn; swallowed' % (self.ct, st['ct']))
+            if out and not self.event_emitted_for_turn:
+                lines.append('%s %s ct=%s->%s' % (out[0][0], out[0][1], self.ct, st['ct'])); self.event_emitted_for_turn = True
+            elif self.event_emitted_for_turn or self.turn_open:
+                log('counter %s->%s while %s; treated as a lagged count for an earlier turn, not an event' % (self.ct, st['ct'], 'the turn is open' if self.turn_open else 'this turn was already reported'))
             else:
-                lines.append('TURN ct=%s->%s ts=%s' % (self.ct, st['ct'], W.now_iso()))
+                lines.append('TURN ct=%s->%s ts=%s' % (self.ct, st['ct'], W.now_iso())); self.event_emitted_for_turn = True
             self.ct = st['ct']
-            if out and out[0][0] != 'TURN_END': self.transcript_turn_ended = True
-        elif out:
-            lines.append('%s %s ct=%s->%s' % (out[0][0], out[0][1], self.ct, st['ct']))
+        elif out and not self.event_emitted_for_turn:
+            lines.append('%s %s ct=%s->%s' % (out[0][0], out[0][1], self.ct, st['ct'])); self.event_emitted_for_turn = True
         if st['cec'] != self.cec:
             lines.append('CONTEXT_EXCEEDED cec=%s->%s ct=%s' % (self.cec, st['cec'], st['ct']))
             self.cec = st['cec']
@@ -169,7 +178,7 @@ def main():
     ap.add_argument('--target', required=True, help='session id (local_..), cli session id, or unique title substring')
     ap.add_argument('--state-dir', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'state'))
     ap.add_argument('--stale-after', type=int, default=3 * 3600, help='seconds of lastActivityAt silence, with work in flight, that counts as stale (0 = never)')
-    ap.add_argument('--max-wait', type=int, default=6 * 3600, help='one-shot: give up after this many seconds (exit 3); 0 = unbounded')
+    ap.add_argument('--max-wait', type=int, default=6 * 3600, help='give up after this many seconds (exit 3, prints TIMEOUT); 0 = unbounded. Applies to --follow too; the Monitor re-arm is then the session\'s job')
     ap.add_argument('--backstop', type=float, default=15.0, help='kqueue timeout in seconds (re-check cadence when no events arrive)')
     ap.add_argument('--follow', action='store_true', help='stream events forever instead of exiting after the first')
     a = ap.parse_args()
@@ -182,7 +191,7 @@ def main():
             emit(line)
             if not a.follow:
                 return 0
-        if not a.follow and a.max_wait and time.time() - t0 > a.max_wait:
+        if a.max_wait and time.time() - t0 > a.max_wait:
             idle = int(time.time() - (w.last_act or 0) / 1000.0) if w.last_act else -1
             emit('TIMEOUT idle_s=%d ct=%s' % (idle, w.ct)); return 3
 

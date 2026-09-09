@@ -456,6 +456,15 @@ def main():
         save_state(a.state_dir, state)
         print('bootstrapped: target=%s ct=%s cec=%s turns_seen=%d ledger=%s in_flight=%d' % (sess['sessionId'], st['ct'], st['cec'], len(state['seen_pids']), R['ledger_summary'], len(R['inflight'])))
         log_line(a.state_dir, '%s BOOTSTRAP ct=%s' % (W.now_iso(), st['ct'])); return 0
+    latest_done = None
+    if turns:
+        cands = turns[:-1] + ([turns[-1]] if turns[-1].end_state != 'open' else [])
+        latest_done = cands[-1] if cands else None
+    if (not replay and latest_done is not None and latest_done.pid in set(state.get('seen_pids', []))
+            and not a.trigger.startswith(('STALE', 'CONTEXT_EXCEEDED', 'manual'))):
+        print('WAKE (skipped) trigger=%s: the latest completed turn (%s, ended %s) was already analysed at an earlier wake; nothing new. stay silent' % (a.trigger, (latest_done.pid or '')[:8], latest_done.end_ts))
+        log_line(a.state_dir, '%s SKIP trigger=%s ct=%s (turn %s already seen)' % (W.now_iso(), a.trigger, st['ct'], (latest_done.pid or '')[:8]))
+        return 0
     R = analyse(a, sess, st, state, turns, a.trigger, replay=replay)
     wake_no = state['wake_count'] + 1
     for f in R['findings']:
