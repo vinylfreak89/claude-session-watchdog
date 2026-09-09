@@ -401,7 +401,7 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
     for_owner_all = for_owner; for_owner = for_owner_new
     to_wd = W.messages_to_watchdog(T, (self_sess or {}).get('sessionId')) if T else []
     bypass_hint = None
-    if for_owner_new and T and not any(W.OWNER_GATE_RE.search(m) or 'blocked' in m.lower() for _, m in to_wd):
+    if for_owner_new and T and not any(re.search(r'owner|blocked|ruling|question|decide', m, re.I) for _, m in to_wd):
         bypass_hint = 'work declared gated on the owner in this turn (%s) and no message to the watchdog session carried it (messages to watchdog this turn: %d)' % ('; '.join(sorted(set(src for src, _ in for_owner)))[:160], len(to_wd))
 
     # ---- policy
