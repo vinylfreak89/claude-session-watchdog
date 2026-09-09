@@ -7,7 +7,7 @@
 #   wd.sh veto F3 "reason"          record a veto
 #   wd.sh cost                      append this session's per-turn token cost to state/cost.tsv
 #   wd.sh status                    one-screen state summary
-#   wd.sh check <kind> [args]       verify one thing now (running | commit <sha> | file <path> [since] | task <id> | row <ID> | msg-to-watchdog [since] | dispatch <thread> | grep <path> <regex> | csv <path> <col><op><val> [idcol])
+#   wd.sh check <kind> [args]       verify one thing now (running | commit <sha> | file <path> [since] | task <id> | row <ID> | msg-to-watchdog [since] | dispatch <thread> | tree [path] | grep <path> <regex> | csv <path> <col><op><val> [idcol])
 #   wd.sh finding <class> "<quote>" check <kind> [args]   build a fixed-form finding from a check the model chose; the result text is the script's
 # Overrides: WD_STATE (state dir), WD_CONFIG (config file). Everything is read-only except the state dir.
 D="$(cd "$(dirname "$0")" && pwd)"

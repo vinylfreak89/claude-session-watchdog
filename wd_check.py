@@ -8,6 +8,7 @@
   wd_check.py --target SEL check row <ID>                   present in the ledger? its text
   wd_check.py --target SEL check msg-to-watchdog [since]    messages the target sent to the watchdog session since <iso>
   wd_check.py --target SEL check dispatch <thread>          Codex rollout state for a thread id (prefix ok)
+  wd_check.py --target SEL check tree [path]                uncommitted tracked changes, diff size, last commit, branch drift
   wd_check.py --target SEL check grep <path> <regex>        matching lines of a file (file-vs-file disagreements)
   wd_check.py --target SEL check csv <path> <col><op><val> [idcol]   rows of a CSV record matching a condition
   wd_check.py --target SEL finding <class> "<quote>" check <kind> [args...]
@@ -85,6 +86,18 @@ def check(a, sess, kind, args, state):
         ids = ('; %s = %s' % (idcol, ', '.join(str(r.get(idcol)) for r in hit[:12]))) if idcol and hit else ''
         vals = collections.Counter(r.get(col) for r in hit)
         return checked, '%d of %d rows match %s (values %s)%s' % (len(hit), len(rows), expr, dict(vals.most_common(5)), ids), dict(matched=len(hit), total=len(rows))
+    if kind == 'tree':
+        path = args[0] if args else None
+        rc, st, _ = W.git(repo, 'status', '--porcelain', *( [path] if path else [] ))
+        tracked = [l for l in st.splitlines() if not l.startswith('??')]
+        _, stat, _ = W.git(repo, 'diff', '--stat', *(['--', path] if path else []))
+        _, last, _ = W.git(repo, 'log', '-1', '--format=%h %ci %s', *(['--', path] if path else []))
+        d = W.git_branch_drift(repo)
+        checked = 'git status --porcelain%s; git diff --stat; git log -1 -- %s; branch vs origin' % ((' -- ' + path) if path else '', path or '(repo)')
+        result = '%s; diff %s; last commit touching it: %s; %s at %s, origin %s, ahead %s' % (
+            ('uncommitted tracked changes: ' + '; '.join(W.short(x, 60) for x in tracked)) if tracked else 'no uncommitted tracked changes',
+            W.short(stat.strip().splitlines()[-1] if stat.strip() else 'none', 80), W.short(last.strip(), 90), d['branch'], d['head'], d['remote_sha'], d['ahead'])
+        return checked, result, dict(dirty=len(tracked), ahead=d['ahead'])
     if kind == 'grep':
         rp = WK.resolve_path(args[0], repo); pat = args[1]
         checked = 'grep -n -i %r %s (mtime %s)' % (pat, rp, W.mtime_iso(rp))
