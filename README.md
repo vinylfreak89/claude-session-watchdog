@@ -17,6 +17,8 @@ wd_wait.py            the hook: kqueue on the session-state dir + transcript; on
                       stall, overdue reply or timeout
 wd_wake.py            one wake: latest completed turn -> claims -> checks -> findings -> policy -> report
 wd_cost.py            per-turn token cost of the watchdog session itself, from its own transcript
+wd_check.py           verification on demand (`wd.sh check …`) and model-selected, script-verified findings
+skills/watchdog/      the SKILL.md that runs the loop (symlink it into ~/.claude/skills; then /watchdog)
 config.example.json   copy to config.json: target, self, thresholds, optional ledger settings
 WATCHDOG_SESSION.md   the standing instruction for the session that runs the loop
 evidence/             the census instruments behind the measurements below
@@ -32,8 +34,8 @@ watchdog session needs the cross-session tools (`mcp__ccd_session_mgmt__send_mes
    (the watchdog session's own id, from `get_session self`). Optional: `repo` (defaults to the target's cwd),
    `ledger` (a markdown file with `| ID | … |` rows that are deleted when done), `other_ref` (a second branch
    whose commits count as backing), `perm_paths` (files whose commits back a ledger row deletion), thresholds.
-2. Open a new session, paste `WATCHDOG_SESSION.md` as its instruction, and let it run `wd.sh boot` and arm
-   `wd.sh wait`.
+2. `ln -s <repo>/skills/watchdog ~/.claude/skills/watchdog`, open the session that will run the loop, and invoke
+   `/watchdog`. It boots the state and arms `wd.sh wait`.
 
 ## The loop
 
@@ -84,9 +86,14 @@ redirect targets, task notifications; from the assistant's own text: sentences w
 | `announced_nothing_running` | the final text announces an unconditional next action and nothing launched in that turn is alive |
 | `task_dead` / `codex_turn_silent` | in-flight work with no exit marker, no notification, no live process / no rollout event |
 | `reply_overdue` | the one poke |
+| `protocol_bypass` | work declared gated on the owner (in the turn or the ledger) while no message to the watchdog carried it |
 | `context_exceeded` | `contextExceededCount` moved |
 
-Everything without a checkable referent is dropped. Policy: `held:own-turn` (turn-derived findings on a turn
+The scripts do not judge language. The wake prints every assistant text of the turn in full, every message the
+turn sent to the watchdog, the ledger diff in lines, and a `FOR THE OWNER` section with every declaration that
+work is gated on the owner; the model reads all of it and, for anything it decides to raise, `wd.sh finding
+<class> "<its words>" check <kind>` runs the measurement and writes the message from the check's own output.
+Regex claim hints are hints only. Policy: `held:own-turn` (turn-derived findings on a turn
 the watchdog's own message opened), `held:dup` (same key and evidence hash as a sent finding), `held:quiet`
 (a human message in the target within `quiet_min`), else `send`. The acceptance log `state/findings.md` records
 every finding, sent or held; the owner marks each SENT row TRUE or FALSE, and precision on the first 20 is the

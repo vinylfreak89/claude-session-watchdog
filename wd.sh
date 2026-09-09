@@ -7,6 +7,8 @@
 #   wd.sh veto F3 "reason"          record a veto
 #   wd.sh cost                      append this session's per-turn token cost to state/cost.tsv
 #   wd.sh status                    one-screen state summary
+#   wd.sh check <kind> [args]       verify one thing now (running | commit <sha> | file <path> [since] | task <id> | row <ID> | msg-to-watchdog [since] | dispatch <thread>)
+#   wd.sh finding <class> "<quote>" check <kind> [args]   build a fixed-form finding from a check the model chose; the result text is the script's
 # Overrides: WD_STATE (state dir), WD_CONFIG (config file). Everything is read-only except the state dir.
 D="$(cd "$(dirname "$0")" && pwd)"
 S="${WD_STATE:-$D/state}"
@@ -23,6 +25,10 @@ WAKE_ARGS=(--target "$TARGET" --state-dir "$S" --quiet-min "$(cfg quiet_min 10)"
 [ -n "$(cfg other_ref)" ] && WAKE_ARGS+=(--other-ref "$(cfg other_ref)")
 [ -n "$(cfg perm_paths)" ] && WAKE_ARGS+=(--perm-paths "$(cfg perm_paths)")
 WAIT_ARGS=(--target "$TARGET" --state-dir "$S" --stale-after "$(cfg stale_after_s 1800)" --stall-min "$(cfg stall_min 20)")
+CHECK_ARGS=(--target "$TARGET" --state-dir "$S" --quiet-min "$(cfg quiet_min 10)" --row-pattern "$(cfg row_pattern '[A-Z]{1,2}\d{1,3}')")
+[ -n "$SELF" ] && [ "${SELF#<}" = "$SELF" ] && CHECK_ARGS+=(--self "$SELF")
+[ -n "$(cfg repo)" ] && CHECK_ARGS+=(--repo "$(cfg repo)")
+[ -n "$(cfg ledger)" ] && CHECK_ARGS+=(--ledger "$(cfg ledger)")
 [ -n "$SELF" ] && [ "${SELF#<}" = "$SELF" ] && WAIT_ARGS+=(--self "$SELF")
 cmd=$1; shift
 case "$cmd" in
@@ -32,6 +38,8 @@ case "$cmd" in
   sent)   ids=$1; mid=$2; exec $PY "$D/wd_wake.py" --state-dir "$S" --reply-min "$(cfg reply_min 20)" --sent "$ids" --message-id "${mid:-}" ;;
   veto)   id=$1; shift; exec $PY "$D/wd_wake.py" --state-dir "$S" --veto "$id" --reason "$*" ;;
   cost)   [ -n "$SELF" ] || { echo "config.json: 'self' is not set" >&2; exit 2; }; exec $PY "$D/wd_cost.py" --self "$SELF" --state-dir "$S" "$@" ;;
+  check)  exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" check "$@" ;;
+  finding) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" finding "$@" ;;
   status) $PY - "$S" <<'PYS'
 import json,sys,os
 p=os.path.join(sys.argv[1],'state.json'); d=json.load(open(p)) if os.path.exists(p) else {}

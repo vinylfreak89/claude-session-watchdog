@@ -439,7 +439,7 @@ SENT_SPLIT = re.compile(r'(?<=[.!?])\s+(?=[A-Z\[`*\d])|\n+')
 PATH_RE = re.compile(r'(?<![\w/])((?:/|~/)[\w.@+-]+(?:/[\w.@+-]+)*|[\w.-]+/[\w./-]+\.[A-Za-z0-9]{1,5}|[\w-]+\.(?:py|c|h|md|csv|tpc|mp4|mov|sh|json|txt|log|cap6))\b')
 SHA_RE = re.compile(r'(?<![\w/])([0-9a-f]{7,40})(?![\w/])')
 ROWID_RE = re.compile(r'\b([A-Z]{1,2}\d{1,3})\b')
-ANNOUNCE_RE = re.compile(r"(?:^|[.;:]\s+|\*\*\s*)(?:(?:I'll|I will|I'm going to|I am going to|Let me|Now I(?:'ll| will)?|Next I(?:'ll| will)?|Then I(?:'ll| will)?)\s+(?:now\s+|then\s+|go\s+(?:and\s+)?|also\s+|just\s+)?(render|dispatch|run|re-?run|launch|build|commit|push|write|replay|measure|re-?measure|merge|fix|implement|send|score|cut|re-?cut|verify|check|watch|hook|burn|encode|generate|produce|start|kick|retry|re-?try|rebuild|re-?render|re-?dispatch|queue|steer)\w*|(Launching|Dispatching|Kicking off|Starting|Re-?running|Rendering|Running|Sending|Retrying|Queuing|Queueing)\b)", re.I)
+ANNOUNCE_RE = re.compile(r"(?:^|[.;:]\s+|\*\*\s*)(?:(?:I'll|I will|I'm going to|I am going to|Let me|Now I(?:'ll| will)?|Next I(?:'ll| will)?|Then I(?:'ll| will)?)\s+(?:now\s+|then\s+|go\s+(?:and\s+)?|also\s+|just\s+)?(render|dispatch|run|re-?run|launch|build|commit|push|write|replay|measure|re-?measure|merge|fix|implement|send|score|cut|re-?cut|verify|check|watch|hook|burn|encode|generate|produce|start|kick|retry|re-?try|rebuild|re-?render|re-?dispatch|queue|steer)\w*|(Launching|Dispatching|Kicking off|Starting|Re-?running|Rendering|Running|Sending|Retrying|Queuing|Queueing|Building|Fixing|Writing|Measuring|Testing|Merging|Committing|Pushing|Re-?cutting|Scoring|Checking|Rebuilding|Implementing|Wiring)\b)", re.I)
 ACTION_VERB_RE = re.compile(r'\b(render|dispatch|run|re-?run|launch|build|commit|push|write|replay|measure|re-?measure|merge|fix|implement|send|score|cut|re-?cut|verify|check|watch|hook|burn|encode|generate|produce|start|kick)\w*\b', re.I)
 CONDITIONAL_RE = re.compile(r"\b(if|once|when|after you|unless|let me know|want me|should I|shall I|your call|you decide|await|waiting for)\b|\?\s*$", re.I)
 DISPATCH_CLAIM_RE = re.compile(r'\b(dispatch(?:ed|ing)?|sent (?:it |that |this |the \w+ )?to codex|codex is (?:now )?(?:running|working|on it)|queued (?:to|for|on) codex|handed (?:it |this )?(?:off )?to codex|codex-run (?:task|send|say|queue|steer))\b', re.I)
@@ -574,7 +574,8 @@ def parse_ledger(path):
             order.append(rid)
     recon = _grab(r'Last reconciled ([^.\n]+)', text)
     return dict(exists=True, dataless=False, rows=rows, order=order, mtime=mtime_iso(path), reconciled=recon,
-                sections={k: h('\n'.join(v)) for k, v in sections.items()}, size=len(text))
+                sections={k: h('\n'.join(v)) for k, v in sections.items()}, section_text={k: '\n'.join(v) for k, v in sections.items()},
+                text=text, size=len(text))
 
 # ----------------------------------------------------------------------------- world: tasks & codex
 EXIT_RE = re.compile(r'\[exited with code (\d+)\]')
@@ -615,8 +616,10 @@ def codex_thread_state(thread_id, tail_bytes=1024 * 1024):
                 last_started=started, last_complete=complete, in_flight=in_flight, last_agent_message=last_msg, last_event=last_evt)
 
 def live_children(sess):
-    procs = process_table()
-    return descendants(procs, session_pids(sess))
+    """Processes running UNDER the session's claude process(es): background tasks, watchers, dispatches.
+    The session's own claude/wrapper processes are excluded."""
+    procs = process_table(); roots = set(session_pids(sess))
+    return [p for p in descendants(procs, roots) if p['pid'] not in roots]
 
 def proc_matches(command, procs):
     """Live processes whose command line shares a distinctive token (path-like, >= 12 chars) with `command`."""
@@ -650,6 +653,25 @@ def load_config(path):
     if not path or not os.path.exists(path): return {}
     d = read_json_retry(path) or {}
     return {k: v for k, v in d.items() if not k.startswith('_')}
+
+OWNER_GATE_RE = re.compile(r"(blocked on (?:the )?owner|blocked on you|gated on (?:the )?owner|owner(?:'s)? (?:ruling|decision|answer|call)|awaiting (?:the )?owner|needs? (?:the )?owner|to put to the owner|for the owner|questions? for you|\bowner ruling owed|owner decision owed|ask(?:ed)? (?:the )?owner|your (?:ruling|decision|answer|call))", re.I)
+
+def owner_gate_hints(text):
+    """Sentences/lines that declare work gated on the owner. Hints for the model, never a verdict."""
+    out = []
+    for sent in sentences(text or ''):
+        if OWNER_GATE_RE.search(sent): out.append(sent.strip())
+    return out
+
+def messages_to_watchdog(turn, self_session_id=None):
+    """Messages this turn sent to the watchdog session (send_message tool inputs): [(ts, text)]."""
+    out = []
+    for tu in turn.tool_uses:
+        if tu['name'].endswith('send_message'):
+            inp = tu['input'] or {}
+            if not self_session_id or inp.get('session_id') == self_session_id:
+                out.append((tu['ts'], inp.get('message', '')))
+    return out
 
 def watchdog_self_session():
     """The session running this code, if any (env var set by the wake wrapper), else None."""

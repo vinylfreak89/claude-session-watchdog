@@ -235,6 +235,17 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
         removed = [r for r in prev_rows if r not in rows_now]
         added = [r for r in rows_now if r not in prev_rows]
         changed = [r for r in rows_now if r in prev_rows and rows_now[r]['hash'] != prev_rows[r]['hash']]
+        prev_sections = (prev or {}).get('sections', {}) or {}
+        ledger_diff = []
+        for r in added: ledger_diff.append('+ row %s: %s' % (r, rows_now[r]['text']))
+        for r in removed: ledger_diff.append('- row %s: %s' % (r, prev_rows[r].get('text', '')))
+        for r in changed: ledger_diff.append('~ row %s\n    was: %s\n    now: %s' % (r, prev_rows[r].get('text', ''), rows_now[r]['text']))
+        for name, hh in L['sections'].items():
+            if prev_sections.get(name) != hh and not name.startswith(('A.', 'B.')):
+                body = L['section_text'].get(name, '')
+                ledger_diff.append('%s section "%s":\n%s' % ('+' if name not in prev_sections else '~', name, '\n'.join('    ' + ln for ln in body.splitlines()[:80])))
+        for name in prev_sections:
+            if name not in L['sections']: ledger_diff.append('- section "%s" removed' % name)
         ledger_summary = '%d rows (mtime %s; +%d -%d ~%d since last wake; reconciled: %s)' % (len(rows_now), L['mtime'], len(added), len(removed), len(changed), W.short(L.get('reconciled') or '?', 40))
         since = (prev or {}).get('snapshot_ts') or state.get('bootstrap_ts') or W.iso_from_epoch(now - 86400)
         for c in [c for c in claims if c['kind'] == 'ledger' and c.get('rows')]:
@@ -290,7 +301,7 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
                                     '%d turns, %d matching dispatch(es), commits touching its paths: HEAD %s, %s %s' % (ct - lc, len(mentions), commits_head[:3] or 'none', a.other_ref or '-', commits_eng[:3] or 'none'), turn_label, end_ts))
         new_ledger = dict(rows=snap_rows, order=L['order'], sections=L['sections'], snapshot_ts=W.now_iso(), snapshot_ct=ct, mtime=L['mtime'], reconciled=L.get('reconciled'))
     else:
-        new_ledger = prev
+        new_ledger = prev; ledger_diff = []
         ledger_summary = 'DATALESS placeholder (iCloud); not read' if L.get('dataless') else ('missing at %s' % ledger_path if ledger_path else 'not configured')
         if ledger_path: observations.append('ledger ' + ledger_summary)
 
@@ -376,6 +387,20 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
             reply = dict(ts=got[-1][0], text=got[-1][1], message_id=aw.get('message_id'))
             observations.append('REPLY from the target at %s to message %s: %s' % (reply['ts'], aw.get('message_id'), W.short(reply['text'], 300)))
 
+    # ---- for the owner: declarations that work is gated on the owner, wherever they appear
+    for_owner = []
+    if T:
+        for ts, txt in T.assistant_texts:
+            for hnt in W.owner_gate_hints(txt): for_owner.append(('turn text %s' % (ts or '')[11:19], hnt))
+    if L.get('exists') and not L.get('dataless'):
+        for name, body in (L.get('section_text') or {}).items():
+            if W.OWNER_GATE_RE.search(name) or name.lower().startswith(('e.', 'e ')):
+                for_owner.append(('ledger section "%s"' % name, body.strip()))
+    to_wd = W.messages_to_watchdog(T, (self_sess or {}).get('sessionId')) if T else []
+    bypass_hint = None
+    if for_owner and T and not any(W.OWNER_GATE_RE.search(m) or 'blocked' in m.lower() for _, m in to_wd):
+        bypass_hint = 'work declared gated on the owner in this turn (%s) and no message to the watchdog session carried it (messages to watchdog this turn: %d)' % ('; '.join(sorted(set(src for src, _ in for_owner)))[:160], len(to_wd))
+
     # ---- policy
     raised = state.get('raised', {})
     for pid_, p_ in state.get('proposed', {}).items():      # unmarked proposals from earlier wakes count as raised (rule 2 safety)
@@ -384,7 +409,7 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
                     'file_claim_missing', 'file_claim_stale', 'ledger_close_not_applied', 'ledger_close_unbacked', 'announced_nothing_running')
     for f in findings:
         prev_r = raised.get(f['key'])
-        if own_turn and f['cls'] in TURN_CLASSES: f['status'] = 'held:own-turn'
+        if own_turn and f['cls'] in TURN_CLASSES and f['quote'] and f['quote'][:60] in (T.opener_text or ''): f['status'] = 'held:own-turn'   # only our own words coming back
         elif prev_r and prev_r.get('evidence_hash') == f['evidence_hash']: f['status'] = 'held:dup(%s)' % prev_r.get('finding_id')
         elif owner_active and f['severity'] != 'destructive-risk': f['status'] = 'held:quiet'
         else: f['status'] = 'send'
@@ -397,7 +422,8 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
     return dict(T=T, ct=ct, turn_label=turn_label, end_ts=end_ts, owner_active=owner_active, last_human=last_human, last_human_age=last_human_age,
                 own_turn=own_turn, open_turn=open_turn, digest=digest, claims=claims, findings=findings, observations=observations,
                 ledger_summary=ledger_summary, new_ledger=new_ledger, inflight=still, disp_records=disp_records, notified=sorted(notified)[-500:],
-                new_pids=[t.pid for t in new_turns if t.pid], drift=drift, commits=commits, pushes=pushes, launches=launches, reply=reply)
+                new_pids=[t.pid for t in new_turns if t.pid], drift=drift, commits=commits, pushes=pushes, launches=launches, reply=reply,
+                ledger_diff=ledger_diff, for_owner=for_owner, to_wd=to_wd, bypass_hint=bypass_hint)
 
 def print_report(a, sess, st, state, R, trigger, wall, bytes_read):
     T = R['T']
@@ -411,14 +437,25 @@ def print_report(a, sess, st, state, R, trigger, wall, bytes_read):
     print('--- tool digest (%d) ---' % len(R['digest']))
     for d in R['digest'][:a.max_digest]: print('  ' + d)
     if len(R['digest']) > a.max_digest: print('  ... %d more' % (len(R['digest']) - a.max_digest))
-    print('--- final text (head) ---'); print('  ' + W.short(T.final_text if T else '', 400))
-    print('--- claims (%d) ---' % len(R['claims']))
+    print('--- assistant texts, ALL, IN FULL (%d) --- read every line; the scripts do not judge language ---' % len(T.assistant_texts if T else []))
+    for ts, txt in (T.assistant_texts if T else []):
+        print('[%s]' % (ts or '')[11:19]); print(txt.rstrip()); print()
+    if R['to_wd']:
+        print('--- messages this turn sent to the watchdog (%d), IN FULL ---' % len(R['to_wd']))
+        for ts, m in R['to_wd']: print('[%s]' % (ts or '')[11:19]); print(m.rstrip()); print()
+    print('--- claim hints (%d) -- regex hints only; the model decides ---' % len(R['claims']))
     for c in R['claims']: print('  %s%s: %s' % (c['kind'], ' [conditional]' if c.get('conditional') else '', W.short(c['sentence'], 150)))
     if R['drift']: print('--- git: branch %(branch)s head %(head)s remote %(remote_sha)s ahead=%(ahead)s behind=%(behind)s (%(source)s) dirty=%(dirty)s' % R['drift'])
     if R['disp_records']:
         print('--- dispatches this wake ---')
         for d in R['disp_records']: print('  %s codex-run %s thread=%s brief=%s -> %s%s thread_state=%s' % (d['ts'], d['verb'], (d['thread'] or '-')[:8], d['brief_path'], d['outcome'], ' FAILED' if d['failed'] else '', d['thread_state']))
     print('--- ledger: %s' % R['ledger_summary'])
+    if R.get('ledger_diff'):
+        print('--- ledger diff since last wake ---')
+        for d in R['ledger_diff']: print('  ' + d.replace('\n', '\n  '))
+    print('=== FOR THE OWNER (%d) -- relay verbatim to the owner before anything else ===' % len(R['for_owner']))
+    for src, txt in R['for_owner']: print('  [%s] %s' % (src, txt.replace('\n', '\n      ')))
+    if R.get('bypass_hint'): print('  PROTOCOL BYPASS HINT: %s' % R['bypass_hint'])
     aw = state.get('awaiting_reply')
     if aw: print('--- awaiting reply to message %s sent %s (deadline %s, poked=%s)%s' % (aw.get('message_id'), aw.get('sent_ts'), aw.get('deadline'), aw.get('poked'), ' -- REPLY RECEIVED, see observations' if R.get('reply') else ''))
     print('--- in flight (%d) ---' % len(R['inflight']))
