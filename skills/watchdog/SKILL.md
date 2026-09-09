@@ -116,6 +116,21 @@ Escalate only what the record genuinely does not contain, and bring it with the 
 recommendation. "The target says this is gated on the owner" is a claim to check, exactly like every other
 claim it makes.
 
+## Relay a ruling with provenance the target can check, never a bare quote
+
+When you settle a question from the owner's own words, the target cannot see your transcript. It will grep the
+repo, fail to find the quote, and be right to refuse it: under a process where the contract carries the owner's
+words with their provenance, an unsourceable quote is not provenance. It may then escalate to the owner anyway,
+which is the thing you relayed the ruling to prevent.
+
+So a relay carries the record, not just the sentence. Extract the owner's messages in full to a file the target
+can read, each with its transcript path, JSONL line number, record uuid and timestamp, and give it the one-line
+command to reproduce any of them itself. Say which records are `type: user` with `isMeta` unset, so it can tell
+the owner typing from tool output or a peer relay. Warn it where a compaction summary re-quotes an earlier
+message, or it will count one ruling twice and read agreement into a single source.
+
+Verified provenance is what converts a claim into something it can act on without waking anyone.
+
 ## Grade a finding after the target answers it
 
 `wd.sh outcome <id> accepted|partly|wrong "<why>"` writes the verdict into the acceptance log. A finding the
