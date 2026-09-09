@@ -438,7 +438,7 @@ def files_written_in(turn):
 SENT_SPLIT = re.compile(r'(?<=[.!?])\s+(?=[A-Z\[`*\d])|\n+')
 PATH_RE = re.compile(r'(?<![\w/])((?:/|~/)[\w.@+-]+(?:/[\w.@+-]+)*|[\w.-]+/[\w./-]+\.[A-Za-z0-9]{1,5}|[\w-]+\.(?:py|c|h|md|csv|tpc|mp4|mov|sh|json|txt|log|cap6))\b')
 SHA_RE = re.compile(r'(?<![\w/])([0-9a-f]{7,40})(?![\w/])')
-ROWID_RE = re.compile(r'\b([A-F]\d{1,2})\b')
+ROWID_RE = re.compile(r'\b([A-Z]{1,2}\d{1,3})\b')
 ANNOUNCE_RE = re.compile(r"(?:^|[.;:]\s+|\*\*\s*)(?:(?:I'll|I will|I'm going to|I am going to|Let me|Now I(?:'ll| will)?|Next I(?:'ll| will)?|Then I(?:'ll| will)?)\s+(?:now\s+|then\s+|go\s+(?:and\s+)?|also\s+|just\s+)?(render|dispatch|run|re-?run|launch|build|commit|push|write|replay|measure|re-?measure|merge|fix|implement|send|score|cut|re-?cut|verify|check|watch|hook|burn|encode|generate|produce|start|kick|retry|re-?try|rebuild|re-?render|re-?dispatch|queue|steer)\w*|(Launching|Dispatching|Kicking off|Starting|Re-?running|Rendering|Running|Sending|Retrying|Queuing|Queueing)\b)", re.I)
 ACTION_VERB_RE = re.compile(r'\b(render|dispatch|run|re-?run|launch|build|commit|push|write|replay|measure|re-?measure|merge|fix|implement|send|score|cut|re-?cut|verify|check|watch|hook|burn|encode|generate|produce|start|kick)\w*\b', re.I)
 CONDITIONAL_RE = re.compile(r"\b(if|once|when|after you|unless|let me know|want me|should I|shall I|your call|you decide|await|waiting for)\b|\?\s*$", re.I)
@@ -543,8 +543,15 @@ def git_log_grep_since(repo, since_iso, pattern, ref='--all'):
     return [short(x, 90) for x in out.splitlines()] if rc == 0 else []
 
 # ----------------------------------------------------------------------------- world: ledger
-ROW_RE = re.compile(r'^\|\s*([A-F]\d{1,2})\s*\|(.*)\|\s*$')
+DEFAULT_ROW_PATTERN = r'[A-Z]{1,2}\d{1,3}'
+ROW_RE = re.compile(r'^\|\s*(%s)\s*\|(.*)\|\s*$' % DEFAULT_ROW_PATTERN)
 TICK_RE = re.compile(r'`([^`]+)`')
+
+def set_row_pattern(pat):
+    """Ledger row ids (e.g. A15) are matched with this pattern, in the ledger table and in prose claims."""
+    global ROW_RE, ROWID_RE
+    ROW_RE = re.compile(r'^\|\s*(%s)\s*\|(.*)\|\s*$' % pat)
+    ROWID_RE = re.compile(r'\b(%s)\b' % pat)
 
 def parse_ledger(path):
     if not os.path.exists(path): return dict(exists=False)
@@ -606,6 +613,35 @@ def codex_thread_state(thread_id, tail_bytes=1024 * 1024):
     in_flight = bool(started) and (not complete or complete < started)
     return dict(found=True, thread=thread_id, rollout=f, mtime=iso_from_epoch(st.st_mtime), size=st.st_size,
                 last_started=started, last_complete=complete, in_flight=in_flight, last_agent_message=last_msg, last_event=last_evt)
+
+def live_children(sess):
+    procs = process_table()
+    return descendants(procs, session_pids(sess))
+
+def proc_matches(command, procs):
+    """Live processes whose command line shares a distinctive token (path-like, >= 12 chars) with `command`."""
+    toks = [t for t in re.findall(r'[\w./@+-]{12,}', command or '') if '/' in t or '-' in t or '_' in t]
+    return [p for p in procs if any(t in p['command'] for t in toks[:12])]
+
+def peer_replies(sess, from_session_id, after_ts):
+    """Cross-session messages received by `sess` from `from_session_id` after `after_ts` (ISO): [(ts, body)]."""
+    path = transcript_path(sess)
+    if not os.path.exists(path): return []
+    _, recs = read_tail_turns(path, need_turns=6)
+    out = []
+    for r in recs:
+        if r.get('type') != 'user': continue
+        o = r.get('origin') or {}
+        if o.get('kind') == 'peer' and o.get('from') == from_session_id and (r.get('timestamp') or '') > (after_ts or ''):
+            txt = _text_of((r.get('message') or {}).get('content'))
+            body = _grab(r'<cross-session-message[^>]*>\s*(.*?)\s*</cross-session-message>', txt) or txt
+            out.append((r.get('timestamp'), body))
+    return out
+
+def load_config(path):
+    if not path or not os.path.exists(path): return {}
+    d = read_json_retry(path) or {}
+    return {k: v for k, v in d.items() if not k.startswith('_')}
 
 def watchdog_self_session():
     """The session running this code, if any (env var set by the wake wrapper), else None."""
