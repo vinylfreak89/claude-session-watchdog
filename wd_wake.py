@@ -375,6 +375,14 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
         observations.append('ANNOUNCE HINT%s: "%s" -- at turn end: %d live process(es), %d item(s) from this turn still in flight. If this is a commitment to act, raise it: wd.sh finding announced_nothing_running "<sentence>" check running' % (
             ' [conditional]' if c.get('conditional') else '', W.short(c['sentence'], 160), len(procs), len(this_turn_live)))
 
+    # ---- did the target reply to a question we asked?
+    reply = None
+    if aw and self_sess:
+        got = W.peer_replies(self_sess, sess['sessionId'], aw.get('sent_ts'))
+        if got:
+            reply = dict(ts=got[-1][0], text=got[-1][1], message_id=aw.get('message_id'))
+            observations.append('REPLY from the target at %s to message %s: %s' % (reply['ts'], aw.get('message_id'), W.short(reply['text'], 300)))
+
     # ---- policy
     raised = state.get('raised', {})
     for pid_, p_ in state.get('proposed', {}).items():      # unmarked proposals from earlier wakes count as raised (rule 2 safety)
