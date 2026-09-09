@@ -433,6 +433,11 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
 
 def print_report(a, sess, st, state, R, trigger, wall, bytes_read):
     T = R['T']
+    q = state.get('owner_queue') or []
+    if q:
+        print('=== OWNER ITEMS QUEUED (%d) -- send these with this wake, as ONE message with any findings ===' % len(q))
+        for it in q: print('  %s [%s]%s %s' % (it['id'], it['ts'], ' URGENT' if it.get('urgent') else '', it['text']))
+        print('  (after sending: wd.sh queue clear <message_id>)')
     print('WAKE #%d  trigger=%s  target="%s" (%s)  ct=%s cec=%s' % (state['wake_count'], trigger, sess['title'], sess['sessionId'], st['ct'], st['cec']))
     if T:
         print('turn: opener=%s start=%s end=%s end_state=%s tools=%d notifications=%d api_errors=%d markers=%d' % (T.opener_kind, T.start_ts, T.end_ts, T.end_state, len(T.tool_uses), len(T.notifications), len(T.api_errors), len(T.markers)))
@@ -493,11 +498,28 @@ def main():
     ap.add_argument('--max-digest', type=int, default=30); ap.add_argument('--bootstrap', action='store_true'); ap.add_argument('--replay', type=int, default=0)
     ap.add_argument('--no-state', action='store_true'); ap.add_argument('--json', action='store_true')
     ap.add_argument('--sent'); ap.add_argument('--message-id', default=''); ap.add_argument('--veto'); ap.add_argument('--reason', default='')
+    ap.add_argument('--queue-add'); ap.add_argument('--queue-urgent', action='store_true'); ap.add_argument('--queue-list', action='store_true'); ap.add_argument('--queue-clear')
     a = ap.parse_args()
     a.perm_paths = [x.strip() for x in a.perm_paths.split(',') if x.strip()]
     W.set_row_pattern(a.row_pattern)
     os.makedirs(a.state_dir, exist_ok=True)
     state = load_state(a.state_dir)
+    if a.queue_add or a.queue_list or a.queue_clear:
+        q = state.setdefault('owner_queue', [])
+        if a.queue_add:
+            q.append(dict(id='Q%d' % (len(q) + len(state.get('owner_queue_sent') or []) + 1), ts=W.now_iso(),
+                          urgent=bool(a.queue_urgent), text=a.queue_add))
+            save_state(a.state_dir, state); print('queued %s%s' % (q[-1]['id'], ' URGENT' if q[-1]['urgent'] else ''))
+        if a.queue_clear:
+            sent = state.setdefault('owner_queue_sent', [])
+            for it in list(q):
+                sent.append(dict(it, sent_ts=W.now_iso(), message_id=a.queue_clear)); q.remove(it)
+            save_state(a.state_dir, state); log_line(a.state_dir, '%s OWNER-QUEUE delivered %s' % (W.now_iso(), a.queue_clear))
+            print('queue cleared into message %s' % a.queue_clear)
+        if a.queue_list or a.queue_add:
+            for it in q: print('%s [%s]%s %s' % (it['id'], it['ts'], ' URGENT' if it.get('urgent') else '', W.short(it['text'], 200)))
+            if not q: print('(owner queue empty)')
+        return 0
     if a.sent or a.veto:
         ids = [x.strip() for x in (a.sent or a.veto).split(',') if x.strip()]
         for fid in ids:

@@ -47,6 +47,18 @@ Findings the wake itself produced from tool facts appear in the report already w
 5. Stay silent while the owner is actively conversing with the target (`held:quiet`).
 6. One message per wake, the `MESSAGE`/finding lines verbatim, nothing composed by you.
 
+## The owner's items are queued HERE, not in the target's inbox
+
+When the owner gives you something for the target, hold it: `wd.sh queue add "<his words>"`. Do NOT send it on
+arrival. Every wake prints the queue at the top of the report, and you send the held items together with that
+wake's findings as ONE message, then `wd.sh queue clear <message_id>`. Sending on the owner's cadence fragments
+the target's work: each message opens or queues a turn there, so a run of small relays interrupts it repeatedly
+and fills its context with your messages instead of the job.
+
+The exception is an item that changes what the target is doing RIGHT NOW — a wrong direction it is actively
+working from, or a destructive risk. Queue that with `--urgent`, send it immediately, and say why it could not
+wait. Nothing else earns an immediate send.
+
 ## FOR THE OWNER — the state channel
 
 The report's `=== FOR THE OWNER ===` section holds every declaration that work is gated on the owner: sentences

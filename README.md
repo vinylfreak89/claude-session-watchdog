@@ -11,7 +11,7 @@ never asserts anything it did not check. The message text is produced by the scr
 session running the loop may only veto a line, never write one. The original brief is `docs/BRIEF.md`.
 
 ```
-wd.sh                 the watchdog session's commands: boot | wait | wake | sent | veto | cost | status
+wd.sh                 the watchdog session's commands: boot | wait | wake | check | finding | queue | sent | veto | cost | status
 wd_lib.py             session discovery, transcript turn model, claim extraction, read-only world checks
 wd_wait.py            the hook: kqueue on the session-state dir + transcript; one event line per turn end,
                       stall, overdue reply or timeout
@@ -55,6 +55,10 @@ Exactly one event per transcript turn. While the target is silent, the hook inte
 itself every 15 s (output growth, live child processes of the session, Codex rollout events) and says nothing
 as long as it progresses. `wd.sh wake --trigger '<line>'` then analyses; the session sends the `MESSAGE` block
 verbatim (one message), records `wd.sh sent`, logs `wd.sh cost`, and re-arms `wd.sh wait`.
+
+Items the owner sends for the target are held on the watchdog's side (`wd.sh queue add`), printed at the top of
+every wake, and delivered as one message with that wake's findings. Relaying on the owner's cadence instead
+fragments the target's work, since each message opens or queues a turn there.
 
 A confirmed stall is the one question the watchdog asks: the message ends with a request to confirm whether it is
 a stall, reconcile it against the contract, and reply to the watchdog session. The reply arrives as a

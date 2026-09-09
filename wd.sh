@@ -6,6 +6,8 @@
 #   wd.sh sent F1,F2 <message_id>   record that findings were sent (opens the reply window when one asked for a reply)
 #   wd.sh veto F3 "reason"          record a veto
 #   wd.sh cost                      append this session's per-turn token cost to state/cost.tsv
+#   wd.sh queue add "<text>"        hold an owner item until the next wake (add --urgent to send at once)
+#   wd.sh queue list | clear <id>   show held items; clear them once delivered in a message
 #   wd.sh status                    one-screen state summary
 #   wd.sh check <kind> [args]       verify one thing now (running | commit <sha> | file <path> [since] | task <id> | row <ID> | msg-to-watchdog [since] | dispatch <thread> | tree [path] | grep <path> <regex> | csv <path> <col><op><val> [idcol])
 #   wd.sh finding <class> "<quote>" check <kind> [args]   build a fixed-form finding from a check the model chose; the result text is the script's
@@ -40,6 +42,14 @@ case "$cmd" in
   cost)   [ -n "$SELF" ] || { echo "config.json: 'self' is not set" >&2; exit 2; }; exec $PY "$D/wd_cost.py" --self "$SELF" --state-dir "$S" "$@" ;;
   check)  exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" check "$@" ;;
   finding) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" finding "$@" ;;
+  queue)  sub=$1; shift
+          case "$sub" in
+            add)   urgent=""; [ "$1" = "--urgent" ] && { urgent="--queue-urgent"; shift; }
+                   exec $PY "$D/wd_wake.py" --state-dir "$S" --queue-add "$*" $urgent ;;
+            list)  exec $PY "$D/wd_wake.py" --state-dir "$S" --queue-list ;;
+            clear) exec $PY "$D/wd_wake.py" --state-dir "$S" --queue-clear "$1" ;;
+            *) echo "wd.sh queue add [--urgent] \"<owner's words>\" | list | clear <message_id>" >&2; exit 2 ;;
+          esac ;;
   status) $PY - "$S" <<'PYS'
 import json,sys,os
 p=os.path.join(sys.argv[1],'state.json'); d=json.load(open(p)) if os.path.exists(p) else {}
