@@ -18,7 +18,9 @@ every wake); --follow streams.
                                                      no work in flight and no reply owed. The wake decides whether that
                                                      contradicts a standing instruction; the hook only spots the state.
   REPLY_OVERDUE message_id=<id> sent=<ts>            the target has not replied to the watchdog's question within its deadline
-  TIMEOUT idle_s=<n> ct=<n>                          --max-wait reached (exit 3)
+  HEARTBEAT idle_min=<n> ct=<n> inflight=<k>          --max-wait reached with nothing to report: still watching,
+                                                     re-arm. Default 60s, so the loop comes back every minute
+                                                     rather than blocking for hours and losing a turn end.
 
 Exactly one event per transcript turn: a counter bump that lands while a turn is open, or after the turn was
 already reported, is logged to stderr as a lagged count and NOT emitted. Silent interrogation: while the target
@@ -278,7 +280,8 @@ def main():
             if not a.follow: return 0
         if a.max_wait and time.time() - t0 > a.max_wait:
             idle = int(time.time() - (w.last_act or 0) / 1000.0) if w.last_act else -1
-            emit('TIMEOUT idle_s=%d ct=%s' % (idle, w.ct)); return 3
+            st_ = w.state_json()
+            emit('HEARTBEAT idle_min=%d ct=%s inflight=%d' % (idle / 60.0, w.ct, len(st_.get('in_flight') or []))); return 3
 
 if __name__ == '__main__':
     sys.exit(main())
