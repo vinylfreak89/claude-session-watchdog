@@ -209,20 +209,14 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
             findings.append(finding('dispatch_claim_no_call', 'dispatch_claim_no_call:%s' % W.h(c['sentence']), dict(sentence=c['sentence']), c['sentence'],
                                     'codex-run task/send/say/queue/steer tool calls in the last 3 turns', 'none', turn_label, end_ts))
 
-    # ---- file claims
+    # ---- file claims: HINTS for the model (paths are regex-extracted and can be wrong, e.g. "25.0/25.3")
     for c in [c for c in claims if c['kind'] == 'file']:
-        for p in c['paths']:
+        facts = []
+        for p in c['paths'][:4]:
             rp = resolve_path(p, repo)
-            if p in written or rp in written: continue
-            if not os.path.exists(rp):
-                if not any(rp.endswith(x) for x in ('.py', '.c', '.h', '.sh')) or c.get('verb') in ('wrote', 'written', 'saved', 'created'):
-                    findings.append(finding('file_claim_missing', 'file_claim_missing:%s:%s' % (W.h(rp), T.pid[:8]), dict(path=rp), c['sentence'],
-                                            'os.path.exists(%s)' % rp, 'no such file', turn_label, end_ts))
-                continue
-            mt = os.path.getmtime(rp)
-            if T.start_ts and mt < (W.epoch_from_iso(T.start_ts) or 0) - 60 and c.get('verb') in ('wrote', 'written', 'saved', 'created', 'rendered', 'produced', 'generated', 'dumped', 'published'):
-                findings.append(finding('file_claim_stale', 'file_claim_stale:%s:%s' % (W.h(rp), T.pid[:8]), dict(path=rp, mtime=W.iso_from_epoch(mt)), c['sentence'],
-                                        'mtime of %s vs turn start %s' % (rp, T.start_ts), 'last modified %s, before this turn began' % W.iso_from_epoch(mt), turn_label, end_ts))
+            if p in written or rp in written: facts.append('%s: written by a tool call this turn' % p); continue
+            facts.append('%s: %s' % (p, ('exists, mtime %s' % W.mtime_iso(rp)) if os.path.exists(rp) else 'no such file'))
+        observations.append('FILE HINT: "%s" -- %s. If this claims a file was produced and it was not, raise: wd.sh finding file_claim_missing "<sentence>" check file <path>' % (W.short(c['sentence'], 140), '; '.join(facts)))
 
     # ---- ledger
     ledger_path = os.path.join(repo, a.ledger) if a.ledger else None
