@@ -141,7 +141,12 @@ def main():
     elif age <= a.quiet_min: f['status'] = 'held:quiet'
     else: f['status'] = 'send'
     state['finding_counter'] += 1; f['id'] = 'F%d' % state['finding_counter']
-    if f['status'] == 'send': state['proposed'][f['id']] = dict(key=f['key'], evidence_hash=f['evidence_hash'], ts=W.now_iso(), asks_reply=False, is_poke=False)
+    # Every finding is OWED until it is sent or vetoed. A held one is not a dropped one: 'held' says
+    # not-this-second, never not-at-all, and a finding that leaves the delivery path is a finding lost.
+    if not f['status'].startswith('held:dup'):
+        state['proposed'][f['id']] = dict(key=f['key'], evidence_hash=f['evidence_hash'], ts=W.now_iso(),
+                                          asks_reply=False, is_poke=False,
+                                          held=(None if f['status'] == 'send' else f['status']))
     WK.append_findings_md(a.state_dir, [dict(id=f['id'], wake=state.get('wake_count'), wake_ts=W.now_iso(), turn_ct=st['ct'], cls=cls, status=f['status'], message=f['message'])])
     WK.log_line(a.state_dir, '%s FINDING %s %s %s (model-selected, script-verified)' % (W.now_iso(), f['id'], cls, f['status']))
     WK.save_state(a.state_dir, state)

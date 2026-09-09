@@ -454,10 +454,15 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
 def print_report(a, sess, st, state, R, trigger, wall, bytes_read):
     T = R['T']
     q = state.get('owner_queue') or []
-    if q:
-        print('=== OWNER ITEMS QUEUED (%d) -- send these with this wake, as ONE message with any findings ===' % len(q))
-        for it in q: print('  %s [%s]%s %s' % (it['id'], it['ts'], ' URGENT' if it.get('urgent') else '', it['text']))
+    sendable = [it for it in q if not it.get('hold_until')]
+    held = [it for it in q if it.get('hold_until')]
+    if sendable:
+        print('=== OWNER ITEMS, SENDABLE NOW (%d) -- send with this wake, as ONE message with any findings ===' % len(sendable))
+        for it in sendable: print('  %s [%s]%s %s' % (it['id'], it['ts'], ' URGENT' if it.get('urgent') else '', it['text']))
         print('  (after sending: wd.sh queue clear <message_id>)')
+    if held:
+        print('=== OWNER ITEMS, HELD (%d) -- do NOT send; each waits on the work named ===' % len(held))
+        for it in held: print('  %s HELD UNTIL: %s\n      %s' % (it['id'], it['hold_until'], it['text']))
     print('WAKE #%d  trigger=%s  target="%s" (%s)  ct=%s cec=%s' % (state['wake_count'], trigger, sess['title'], sess['sessionId'], st['ct'], st['cec']))
     if T:
         print('turn: opener=%s start=%s end=%s end_state=%s tools=%d notifications=%d api_errors=%d markers=%d' % (T.opener_kind, T.start_ts, T.end_ts, T.end_state, len(T.tool_uses), len(T.notifications), len(T.api_errors), len(T.markers)))
@@ -521,7 +526,7 @@ def main():
     ap.add_argument('--max-digest', type=int, default=30); ap.add_argument('--bootstrap', action='store_true'); ap.add_argument('--replay', type=int, default=0)
     ap.add_argument('--no-state', action='store_true'); ap.add_argument('--json', action='store_true')
     ap.add_argument('--sent'); ap.add_argument('--message-id', default=''); ap.add_argument('--veto'); ap.add_argument('--reason', default='')
-    ap.add_argument('--queue-add'); ap.add_argument('--queue-urgent', action='store_true'); ap.add_argument('--queue-list', action='store_true'); ap.add_argument('--queue-clear')
+    ap.add_argument('--queue-add'); ap.add_argument('--queue-urgent', action='store_true'); ap.add_argument('--queue-list', action='store_true'); ap.add_argument('--queue-clear'); ap.add_argument('--queue-hold'); ap.add_argument('--hold-until', default='')
     ap.add_argument('--due', action='store_true')
     ap.add_argument('--owe-add'); ap.add_argument('--gated-on', default=''); ap.add_argument('--owe-list', action='store_true')
     ap.add_argument('--owe-clear'); ap.add_argument('--owe-ungate')
@@ -560,13 +565,37 @@ def main():
             for _ts, _txt in t.assistant_texts: openq += W.owner_gate_hints(_txt)
         idle_min = (time.time() - (st['lastActivityAt'] or 0) / 1000.0) / 60.0
         receptive = (not procs) and (not infl) and idle_min > 0.5
-        print('UNDELIVERED owner items: %d' % len(q))
-        for it in q: print('  %s%s %s' % (it['id'], ' URGENT' if it.get('urgent') else '', W.short(it['text'], 220)))
+        sendable = [it for it in q if not it.get('hold_until')]
+        held = [it for it in q if it.get('hold_until')]
+        print('OWNER ITEMS SENDABLE NOW: %d' % len(sendable))
+        for it in sendable: print('  %s%s %s' % (it['id'], ' URGENT' if it.get('urgent') else '', W.short(it['text'], 220)))
+        print('OWNER ITEMS HELD: %d' % len(held))
+        for it in held: print('  %s waits on: %s' % (it['id'], it['hold_until']))
         print('UNDELIVERED findings: %d' % len(prop))
         for fid, pr in prop.items(): print('  %s (%s, proposed %s)' % (fid, pr.get('key', '').split(':')[0], pr.get('ts')))
         print('target: %d live process(es), %d in flight, idle %.1f min -> %s' % (len(procs), len(infl), idle_min,
-              'RECEPTIVE: its loop looks closed, deliver as ONE message' if receptive else 'BUSY: hold, it is mid-work'))
+              'not mid-turn' if receptive else 'BUSY: mid-work'))
+        # An idle target is not the gate. The gate is the CURRENT WORK SET: everything it is doing plus
+        # every finding still owed to it. A queued item goes only when that set is finished.
+        if prop:
+            print('GATE: %d finding(s) still owed to it. Those are part of tonight\'s work set -- they go FIRST,'
+                  ' and the sendable queue goes only once the work they name is done.' % len(prop))
+        elif not sendable:
+            print('GATE: nothing sendable.')
+        elif receptive:
+            print('GATE: work set looks closed and nothing is owed -> deliver the sendable items as ONE message.')
+        else:
+            print('GATE: it is mid-work -> hold.')
         if openq: print('note: it has a question outstanding to the owner (%s) -- it is waiting, not stopped' % W.short(openq[-1], 90))
+        return 0
+    if a.queue_hold:
+        q = state.setdefault('owner_queue', [])
+        hit = [it for it in q if it['id'] == a.queue_hold]
+        if not hit: raise SystemExit('no queued item %r' % a.queue_hold)
+        if a.hold_until: hit[0]['hold_until'] = a.hold_until
+        else: hit[0].pop('hold_until', None)
+        save_state(a.state_dir, state)
+        print('%s %s' % (hit[0]['id'], ('HELD UNTIL: ' + a.hold_until) if a.hold_until else 'released -- sendable now'))
         return 0
     if a.queue_add or a.queue_list or a.queue_clear:
         q = state.setdefault('owner_queue', [])
@@ -577,6 +606,7 @@ def main():
         if a.queue_clear:
             sent = state.setdefault('owner_queue_sent', [])
             for it in list(q):
+                if it.get('hold_until'): continue   # a held item was never in the message; it stays queued
                 sent.append(dict(it, sent_ts=W.now_iso(), message_id=a.queue_clear)); q.remove(it)
             save_state(a.state_dir, state); log_line(a.state_dir, '%s OWNER-QUEUE delivered %s' % (W.now_iso(), a.queue_clear))
             print('queue cleared into message %s' % a.queue_clear)

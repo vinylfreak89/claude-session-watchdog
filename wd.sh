@@ -51,6 +51,7 @@ case "$cmd" in
                    exec $PY "$D/wd_wake.py" --state-dir "$S" --queue-add "$*" $urgent ;;
             list)  exec $PY "$D/wd_wake.py" --state-dir "$S" --queue-list ;;
             clear) exec $PY "$D/wd_wake.py" --state-dir "$S" --queue-clear "$1" ;;
+            hold)  id=$1; shift; exec $PY "$D/wd_wake.py" --state-dir "$S" --queue-hold "$id" --hold-until "$*" ;;
             *) echo "wd.sh queue add [--urgent] \"<owner's words>\" | list | clear <message_id>" >&2; exit 2 ;;
           esac ;;
   due)    exec $PY "$D/wd_wake.py" --state-dir "$S" --target "$TARGET" --due ;;

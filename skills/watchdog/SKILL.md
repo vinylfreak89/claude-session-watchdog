@@ -100,6 +100,40 @@ of what REMAINS after a partial result, work named as still running that no long
 Read that paragraph as the thing you are checking, not as a status line. If it names work left undone against a
 standing ruling, that is the finding for this wake, and it outranks anything the regex hints offered.
 
+## Two kinds of owner input, and only one of them is a message
+
+When the owner talks to you, sort every sentence before it touches the queue. Most of what he says is not
+addressed to the target at all.
+
+- **A message** is his words the target must have to do its work correctly: a ruling on a question it asked, a
+  correction to something it believes, a decision only he can make. That goes in the queue.
+- **A marching order** is how YOU are to run tonight: what gates what, what order the work goes in, how long he is
+  away, what to do when something finishes. It is not a message and it never enters the queue. It belongs in
+  `standing_instruction` in `config.json`, and it is the thing you are measuring the target against.
+
+The tell is simple: if the sentence tells you when or whether to send something, it is yours. A gate is never
+delivered — a gate is the reason the thing behind it has not been delivered yet.
+
+Queueing your own orders is not a harmless filing error. It hands the target your job, it dumps ordering decisions
+on a session that cannot see the other track, and it produces exactly the send the owner has to stop. This
+happened: four items were queued, three of them were his instructions to the orchestrator, and only one was
+ever a message.
+
+**A queued item can have a hold.** `wd.sh queue hold <id> "<what must finish first>"` names the work it waits on;
+a held item is never sent, and `wd.sh due` prints what each one waits on. An item with no hold can go with the
+next message.
+
+## What "deliver" waits for is the WORK SET, never an idle target
+
+An idle target is not a receptive target. The gate is the current set of work: everything the session is doing
+now, plus every finding you still owe it. Findings go first, because they change what the work is. The queue
+goes only once that whole set is finished. A session that has just gone quiet with a finding still undelivered
+is a session in the middle of tonight's work, and dropping the queue into it reorders the very thing you are
+supposed to be protecting.
+
+Held is never dropped. A finding held for quiet is still owed, still counted by `wd.sh due`, and still goes.
+Only a veto ends a finding.
+
 **Findings are HELD, not sent.** A finding is queued the moment it is made. Deliver it with the owner's queued
 items, as ONE message, when `wd.sh due` says the target is receptive: nothing running, nothing in flight, and no
 question of its own outstanding. A target mid-work is not a target that should be interrupted, and idle is not
