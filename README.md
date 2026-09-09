@@ -23,6 +23,8 @@ config.example.json   copy to config.json: target, self, thresholds, optional le
 WATCHDOG_SESSION.md   the standing instruction for the session that runs the loop
 evidence/             the census instruments behind the measurements below
 state/                (gitignored) state.json, findings.md, wake.log, cost.tsv, wait_memory.json
+                      Nothing here is loaded by anything. A lesson written into state/ enforces nothing;
+                      rules belong in skills/watchdog/SKILL.md, which the session running the loop reads.
 ```
 
 Requires macOS (kqueue), the Claude desktop app's Code tab, `/usr/bin/python3` (3.9 is enough), git. The

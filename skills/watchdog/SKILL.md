@@ -126,6 +126,32 @@ Stalls: `STALL` → the wake's message asks the target to confirm the stall, rec
 reply to your session; `wd.sh sent` opens the reply window. The reply arrives as a user turn here: run
 `wd.sh wake --trigger REPLY`, relay it to the owner, re-verify. `REPLY_OVERDUE` → the one poke. `TIMEOUT` → re-arm.
 
+## Every wake runs BOTH directions, and these are the ways this loop has actually failed
+
+A wake with no finding is not a wake with no action. Ask both questions every time: what does the target need
+from the owner, and what does the owner have for the target. Narrating the target to the owner while sending
+nothing back is the failure that hides longest, because the hooks keep firing and everything looks alive.
+
+Each line below is a failure this loop actually had, in one evening, every one caught by the owner rather than
+by the tool:
+
+- **Compressing the report before deciding.** Twice: reading only the head of the final text, then later grepping
+  the report down to its decision lines. Read the turn's texts in full, first, every time.
+- **Deferring a check to a moment that has already passed.** "I will check at the turn's end" written in the wake
+  that WAS the turn's end. Anything needing verification is verified in that wake.
+- **Doing the target's work.** Running the project's own census and analysis instead of relaying the question.
+  Relay questions about the project's measurements; run something yourself only to verify a specific claim
+  already made, and keep it to one command.
+- **Asserting an inference as a finding.** A finding's result half comes from a script; its PREMISE can still be
+  yours and wrong. Check that every definition it leans on is the project's, not one you supplied.
+- **Leaving a proposed finding unmarked**, which silently suppresses its whole class at the next wake through
+  dedupe. Mark every proposal sent or vetoed in the same turn.
+- **Never checking what the tool never checked.** Branch divergence between two agents went unmeasured for hours
+  because no check existed. When the owner asks something the checks do not cover, add the check.
+- **Delivering to a busy target, or holding from an idle one.** `wd.sh due` decides; idle is not finished, and a
+  session waiting on a decision is waiting.
+- **Presenting a gated decision as pending on the owner.** See the section above.
+
 ## Out of scope
 
 Premise errors, wrong measurements, bad instruments, whether a change is correct.
