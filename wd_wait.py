@@ -265,15 +265,28 @@ def main():
     ap.add_argument('--stale-after', type=int, default=1800, help='seconds of target silence before in-flight work is interrogated (0 = never)')
     ap.add_argument('--stall-min', type=float, default=20.0, help='minutes without progress that make an in-flight item a STALL')
     ap.add_argument('--idle-after', type=float, default=0, help='seconds of silence with NOTHING running that emit IDLE (0 = never)')
-    ap.add_argument('--max-wait', type=int, default=6 * 3600, help='give up after this many seconds (exit 3, prints TIMEOUT); 0 = unbounded')
+    ap.add_argument('--max-wait', type=int, default=60, help='return after this many seconds with nothing to report (exit 3, prints HEARTBEAT) so the loop re-arms and cannot lose a turn end; 0 = unbounded')
     ap.add_argument('--backstop', type=float, default=15.0, help='kqueue timeout in seconds (re-check cadence when no events arrive)')
     ap.add_argument('--follow', action='store_true', help='stream events instead of exiting after the first')
+    ap.add_argument('--audit', action='store_true', help='backstop mode: ignore the event stream, wait --max-wait, then report the target state whatever it is (a second hook that cannot be lost)')
     a = ap.parse_args()
     sess = W.find_session(a.target)
     self_sess = W.find_session(a.self_sel) if a.self_sel else None
     w = Watch(sess, a.state_dir, a.stale_after, a.stall_min, self_sess, idle_after=a.idle_after)
     log('watching %s (%s) ct=%s cec=%s stale_after=%ss stall_min=%s idle_after=%ss' % (sess['title'], sess['sessionId'], w.ct, w.cec, a.stale_after, a.stall_min, a.idle_after))
     t0 = time.time()
+    if a.audit:
+        # a slow, dumb second hook: sleep out the window, then report state unconditionally. It shares none of
+        # the event logic, so a bug or a wrong assumption in that logic cannot silence it.
+        while time.time() - t0 < a.max_wait:
+            try: w.kq.control(None, 1, min(30.0, a.max_wait - (time.time() - t0)))
+            except OSError: pass
+        st = W.read_state(sess); sj = w.state_json()
+        idle = (time.time() - (st['lastActivityAt'] or 0) / 1000.0) / 60.0
+        try: procs = len(W.live_children(sess))
+        except Exception: procs = -1
+        emit('AUDIT ct=%s idle_min=%d live=%d inflight=%d cec=%s' % (st['ct'], idle, procs, len(sj.get('in_flight') or []), st['cec']))
+        return 0
     while True:
         for line in w.poll(a.backstop):
             emit(line)

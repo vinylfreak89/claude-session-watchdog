@@ -87,8 +87,17 @@ the same as finished — a session waiting on the owner's decision is waiting, n
 
 ## The loop
 
-Startup (once): `get_session self` → `self` in `config.json`; `wd.sh boot` if `state/state.json` is absent; arm
-the hook with Bash `run_in_background`: `wd.sh wait`. End the turn.
+Startup (once): `get_session self` → `self` in `config.json`; `wd.sh boot` if `state/state.json` is absent, then
+arm BOTH hooks as persistent Monitors and end the turn:
+
+- the stream — `wd.sh wait --follow --max-wait 0` — one event line per turn end, stall, idle or context failure.
+- the backstop — `while true; do wd.sh wait --audit --max-wait 1200; done` — every 20 minutes it reports the
+  target's state unconditionally: counter, idle minutes, live processes, in-flight count. It shares none of the
+  event logic, so a bug or a wrong assumption there cannot silence it. Treat an AUDIT line as a prompt to check
+  the queue and the target, not as an event in itself.
+
+Re-arming by hand is not part of the loop: a hook that has to be restarted every wake is a step that will be
+forgotten, and it was.
 
 On every event line (`TURN`, `TURN_END`, `INTERRUPTED`, `API_ERROR`, `CONTEXT_EXCEEDED`, `STALL`,
 `REPLY_OVERDUE`, `TIMEOUT`):
