@@ -58,16 +58,22 @@ no allow/deny rule for it in `~/.claude/settings.json`) it returned 5 of 6,124 m
 description limits prompting to managed deployments. The watchdog still reads the transcript file directly:
 cheaper, complete (tool inputs and outputs), and independent of any prompt.
 
-**3. Does your own message increment the target's `completedTurns`?** Yes, but late. Two live sends to an
-idle session (`ToS GPU usage optimization`, counter 10):
-- send 1 delivered 10:27:13Z, target's turn ended 10:27:38Z with a final text; counter still 10 at 10:29:52Z.
-- send 2 delivered 10:30:49Z; the counter moved 10→11 at 10:30:52Z — with the DELIVERY of the second message,
-  before the second turn ended at 10:30:55Z; still 11 at 10:31:32Z.
-So on a peer-opened turn the count arrives only with the next delivered input. Consequences built in: the
-watcher wakes on the transcript's end-of-turn for such turns (`TURN_END`), and a counter bump that lands while a
-turn is open, or after the turn was already reported, is logged as a lagged count and not emitted; the wake
-marks a turn opened by the watchdog's own message `own-turn` (by `origin.from` = the watchdog's session id, or
-the `[watchdog]` tag) and holds every finding on it — that is rule 4 of the speaking rules.
+**3. Does your own message increment the target's `completedTurns`?** Yes, but not when the turn ends. Three
+live sends to an idle session (`ToS GPU usage optimization`, counter 10, transcript 2.5 MB, each reply `ACK`):
+- send 1 delivered 10:27:13Z; the target's turn ended 10:27:38Z; counter still 10 at 10:29:52Z and at 10:30:49Z.
+- send 2 delivered 10:30:49Z; counter 10→11 at 10:30:52Z (3 s after delivery, 3 s BEFORE this turn ended at
+  10:30:55Z); still 11 at 10:31:32Z and at 10:34:15Z.
+- send 3 delivered 10:34:15Z; the turn ended 10:34:17Z; counter 11→13 at 10:34:18Z (3 s after delivery, 1 s
+  after the end — both outstanding turns counted at once).
+Reading: a delivery makes the app recount that session about 3 s later; a turn that completes with nothing
+delivered afterwards stays uncounted for minutes. (UI-driven turns in the focused working session count ~2 s
+after their end — measured on turn 771→772 at 10:32:10Z — so the difference is whether the app is attached to
+the session, not the turn's origin as such.) Consequences built in: the watcher wakes on the transcript's own
+end-of-turn (`TURN_END`) when the counter is late, folds a counter move that follows within 6 s into the same
+event, and logs — never emits — a counter bump that lands while a turn is open or after the turn was already
+reported; so each turn produces exactly one event. The wake marks a turn opened by the watchdog's own message
+`own-turn` (by `origin.from` = the watchdog's session id, or the `[watchdog]` tag) and holds every finding on
+it — that is rule 4 of the speaking rules. The three test messages are still in that idle session's transcript.
 
 ## Triggers (`wd_wait.py`; one line per event)
 
