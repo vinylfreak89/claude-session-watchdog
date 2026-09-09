@@ -377,7 +377,10 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
     if L.get('exists') and not L.get('dataless'):
         for name, body in (L.get('section_text') or {}).items():
             if W.OWNER_GATE_RE.search(name) or name.lower().startswith(('e.', 'e ')):
-                for_owner.append(('ledger section "%s"' % name, body.strip()))
+                # only OPEN items count: drop struck-through lines and lines recording an answer
+                live = [ln for ln in body.splitlines() if ln.strip() and not ln.strip().startswith('~~') and not re.search(r'ANSWERED|CONFIRMED and corrected|RULED', ln)]
+                if any(re.match(r'\s*(\d+\.|[-*])\s', ln) for ln in live):
+                    for_owner.append(('ledger section "%s"' % name, '\n'.join(live).strip()))
     seen_fo = set(state.get('for_owner_seen') or [])
     for_owner_new = [(src, txt) for src, txt in for_owner if W.h(txt) not in seen_fo]
     for_owner_all = for_owner; for_owner = for_owner_new
