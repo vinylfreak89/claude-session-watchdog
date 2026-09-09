@@ -242,11 +242,12 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
             if name not in L['sections']: ledger_diff.append('- section "%s" removed' % name)
         ledger_summary = '%d rows (mtime %s; +%d -%d ~%d since last wake; reconciled: %s)' % (len(rows_now), L['mtime'], len(added), len(removed), len(changed), W.short(L.get('reconciled') or '?', 40))
         since = (prev or {}).get('snapshot_ts') or state.get('bootstrap_ts') or W.iso_from_epoch(now - 86400)
+        # ledger close claims are HINTS: whether a sentence claims a row closed is language, not measurement
         for c in [c for c in claims if c['kind'] == 'ledger' and c.get('rows')]:
             for rid in c['rows']:
-                if rid in rows_now and rid in prev_rows and re.search(r'\b(delet|clos|remov|dropp|struck|retir)', c['sentence'], re.I):
-                    findings.append(finding('ledger_close_not_applied', 'ledger_close_not_applied:%s:%s' % (rid, rows_now[rid]['hash']), dict(row=rows_now[rid]['hash']), c['sentence'],
-                                            '%s at %s' % (a.ledger, L['mtime']), 'row %s still present: %s' % (rid, W.short(rows_now[rid]['text'], 140)), turn_label, end_ts))
+                if rid in rows_now:
+                    observations.append('LEDGER HINT: "%s" -- row %s is still present: %s. If that sentence claims the row closed, raise it: wd.sh finding ledger_close_not_applied "<sentence>" check row %s' % (
+                        W.short(c['sentence'], 140), rid, W.short(rows_now[rid]['text'], 120), rid))
         for rid in removed:
             backing_paths = token_paths(prev_rows[rid].get('tokens', []), repo, files)
             mention = W.git_log_grep_since(repo, since, r'\b' + rid + r'\b')

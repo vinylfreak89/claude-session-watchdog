@@ -448,7 +448,7 @@ COMMIT_CLAIM_RE = re.compile(r'\b(committed|commit(?:ted)? (?:as|at|in)|landed (
 FILE_CLAIM_RE = re.compile(r'\b(wrote|written|saved|created|rendered|produced|generated|emitted|dumped|published|appended)\b', re.I)
 LEDGER_CLAIM_RE = re.compile(r'\b(delet\w*|clos\w*|remov\w*|reconcil\w*|dropp\w*|struck|retir\w*)\b', re.I)
 LEDGER_WORD_RE = re.compile(r'\b(row|rows|ledger|tracker|pending)\b', re.I)
-NEG_RE = re.compile(r"\b(not|never|no|didn't|did not|failed|cannot|can't|unable|haven't|hasn't|without)\b", re.I)
+NEG_RE = re.compile(r"\b(not|never|no|n't|did not|failed|cannot|unable|without|instead of|rather than)\b|\w+n't\b", re.I)
 
 def sentences(text):
     text = re.sub(r'```.*?```', ' ', text or '', flags=re.S)
