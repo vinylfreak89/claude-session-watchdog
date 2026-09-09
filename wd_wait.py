@@ -20,7 +20,8 @@ every wake); --follow streams.
 Exactly one event per transcript turn: a counter bump that lands while a turn is open, or after the turn was
 already reported, is logged to stderr as a lagged count and NOT emitted. Silent interrogation: while the target
 is idle past --stale-after and state.json lists in-flight work, every backstop tick re-checks each item's
-progress and says nothing until one stalls. Read-only on everything.
+progress and says nothing until one stalls. Read-only on everything except its own memory file,
+state/wait_memory.json (which stalls and overdue replies it has already reported, so a re-armed hook stays quiet).
 """
 import os, sys, json, time, select, argparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -49,6 +50,18 @@ class Watch(object):
         self.prog = {}          # in-flight item id -> (signature, last_change_epoch)
         self.stalled = set()    # item ids already reported this episode
         self.overdue_emitted = None
+        self.mem_path = os.path.join(state_dir, 'wait_memory.json')   # the hook's own memory across re-arms (its only write)
+        self.mem = (W.read_json_retry(self.mem_path) if os.path.exists(self.mem_path) else None) or {}
+        self.stalled = set(self.mem.get('stalled', {}).keys()); self.overdue_emitted = self.mem.get('overdue_emitted')
+
+    def _save_mem(self):
+        try:
+            os.makedirs(self.state_dir, exist_ok=True)
+            tmp = self.mem_path + '.tmp'
+            with open(tmp, 'w') as f: json.dump(self.mem, f, indent=1)
+            os.replace(tmp, self.mem_path)
+        except OSError as e:
+            log('cannot save hook memory: %s' % e)
 
     def _arm(self, path, tag):
         flags = getattr(os, 'O_EVTONLY', os.O_RDONLY)
@@ -121,6 +134,9 @@ class Watch(object):
             live_ids.add(iid)
             sig, alive, assessable, detail = self._progress(it)
             prev = self.prog.get(iid)
+            if prev is None and iid in self.stalled and self.mem.get('stalled', {}).get(iid) == list(sig or []):
+                self.prog[iid] = (sig, 0)   # already reported in an earlier run with this very signature; do not re-emit
+                continue
             if prev is None or prev[0] != sig:
                 # first sight: date the item by its own artefact age, not by when we first looked
                 if prev is None:
@@ -131,7 +147,8 @@ class Watch(object):
                     self.prog[iid] = (sig, max(mt or 0, age_ref) if mt else age_ref)
                 else:
                     self.prog[iid] = (sig, now)
-                if iid in self.stalled: self.stalled.discard(iid)
+                if iid in self.stalled:
+                    self.stalled.discard(iid); self.mem.setdefault('stalled', {}).pop(iid, None); self._save_mem()
                 if prev is not None: continue
             last_change = self.prog[iid][1]
             idle_min = (now - last_change) / 60.0
@@ -139,13 +156,15 @@ class Watch(object):
             if it.get('kind') == 'codex' and assessable and sig and not sig[2]:
                 stalled = False   # the codex turn finished; the target's own notification will wake it
             if stalled and iid not in self.stalled:
-                self.stalled.add(iid)
+                self.stalled.add(iid); self.mem.setdefault('stalled', {})[iid] = list(sig or []); self._save_mem()
                 if it.get('kind') == 'bg':
                     out.append('STALL kind=bg id=%s idle_min=%d reason=%s' % (iid, idle_min, detail.replace(' ', '_')))
                 else:
                     out.append('STALL kind=codex thread=%s idle_min=%d reason=%s' % (iid, idle_min, detail.replace(' ', '_')))
         for iid in list(self.prog):
-            if iid not in live_ids: self.prog.pop(iid, None); self.stalled.discard(iid)
+            if iid not in live_ids:
+                self.prog.pop(iid, None); self.stalled.discard(iid)
+                if iid in self.mem.get('stalled', {}): self.mem['stalled'].pop(iid, None); self._save_mem()
         return out
 
     def reply_check(self):
@@ -155,7 +174,7 @@ class Watch(object):
         if time.time() < (W.epoch_from_iso(aw.get('deadline')) or 0): return []
         if self.overdue_emitted == aw.get('message_id'): return []
         if W.peer_replies(self.self_sess, self.sess['sessionId'], aw.get('sent_ts')): return []
-        self.overdue_emitted = aw.get('message_id')
+        self.overdue_emitted = aw.get('message_id'); self.mem['overdue_emitted'] = self.overdue_emitted; self._save_mem()
         return ['REPLY_OVERDUE message_id=%s sent=%s' % (aw.get('message_id'), aw.get('sent_ts'))]
 
     def poll(self, timeout):

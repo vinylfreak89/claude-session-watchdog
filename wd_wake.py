@@ -335,7 +335,7 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
             still.append(i)
 
     # ---- stall confirmation request (owner's loop): on a STALL trigger the dead/silent findings ask for a reply
-    if trigger.startswith('STALL') and a.self_sel:
+    if a.self_sel:
         me = self_sess['sessionId'] if self_sess else a.self_sel
         for f in findings:
             if f['cls'] in ('task_dead', 'codex_turn_silent'):
@@ -374,9 +374,11 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
     raised = state.get('raised', {})
     for pid_, p_ in state.get('proposed', {}).items():      # unmarked proposals from earlier wakes count as raised (rule 2 safety)
         raised.setdefault(p_['key'], dict(evidence_hash=p_['evidence_hash'], finding_id=pid_, ts=p_.get('ts'), note='assumed sent (never marked)'))
+    TURN_CLASSES = ('commit_missing', 'push_not_on_remote', 'push_drift', 'dispatch_failed', 'dispatch_no_turn', 'dispatch_claim_no_call',
+                    'file_claim_missing', 'file_claim_stale', 'ledger_close_not_applied', 'ledger_close_unbacked', 'announced_nothing_running')
     for f in findings:
         prev_r = raised.get(f['key'])
-        if own_turn: f['status'] = 'held:own-turn'
+        if own_turn and f['cls'] in TURN_CLASSES: f['status'] = 'held:own-turn'
         elif prev_r and prev_r.get('evidence_hash') == f['evidence_hash']: f['status'] = 'held:dup(%s)' % prev_r.get('finding_id')
         elif owner_active and f['severity'] != 'destructive-risk': f['status'] = 'held:quiet'
         else: f['status'] = 'send'
