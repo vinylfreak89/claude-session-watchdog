@@ -28,7 +28,7 @@ a declaration that work is gated on the owner, or nothing. Never skim a head; th
 
 For anything you decide to raise, the scripts verify and word it:
 
-    wd.sh check running | commit <sha> | file <path> [since] | task <id> | row <ID> | msg-to-watchdog [since] | dispatch <thread>
+    wd.sh check running | commit <sha> | file <path> [since] | task <id> | row <ID> | msg-to-watchdog [since] | dispatch <thread> | grep <path> <regex>
     wd.sh finding <class> "<its exact words>" check <kind> [args]
 
 `finding` runs the check, writes the fixed-form line from the check's own output, applies dedupe and the quiet

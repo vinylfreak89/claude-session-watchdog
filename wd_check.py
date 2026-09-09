@@ -8,6 +8,7 @@
   wd_check.py --target SEL check row <ID>                   present in the ledger? its text
   wd_check.py --target SEL check msg-to-watchdog [since]    messages the target sent to the watchdog session since <iso>
   wd_check.py --target SEL check dispatch <thread>          Codex rollout state for a thread id (prefix ok)
+  wd_check.py --target SEL check grep <path> <regex>        matching lines of a file (file-vs-file disagreements)
   wd_check.py --target SEL finding <class> "<quote>" check <kind> [args...]
         runs the check, builds the fixed-form message from ITS output (the model supplies class and quote only),
         applies dedupe and the quiet rule, logs it to findings.md and proposes it. Then: wd.sh sent Fn <message_id>.
@@ -61,6 +62,13 @@ def check(a, sess, kind, args, state):
         msgs = [(ts, m) for t in turns for ts, m in W.messages_to_watchdog(t, me) if (ts or '') > since]
         checked = "send_message tool calls to session %s in the target's last %d turns since %s" % (me, len(turns), since or 'start of window')
         return checked, ('%d message(s): %s' % (len(msgs), '; '.join('%s "%s"' % ((ts or '')[11:19], W.short(m, 80)) for ts, m in msgs)) if msgs else 'none'), dict(count=len(msgs))
+    if kind == 'grep':
+        rp = WK.resolve_path(args[0], repo); pat = args[1]
+        checked = 'grep -n -i %r %s (mtime %s)' % (pat, rp, W.mtime_iso(rp))
+        if not os.path.exists(rp): return checked, 'no such file', dict(exists=False)
+        import re as _re
+        hits = [(i + 1, ln.strip()) for i, ln in enumerate(open(rp, errors='replace').read().splitlines()) if _re.search(pat, ln, _re.I)]
+        return checked, ('%d line(s): %s' % (len(hits), '; '.join('L%d: %s' % (n, W.short(t, 120)) for n, t in hits[:4])) if hits else 'no line matches'), dict(hits=len(hits))
     if kind == 'dispatch':
         fs = glob.glob(os.path.join(W.CODEX_SESSIONS, '*', '*', '*', 'rollout-*-%s*.jsonl' % args[0]))
         if not fs: return 'Codex rollouts for thread %s*' % args[0], 'no rollout found', dict(found=False)
