@@ -91,6 +91,15 @@ Every miss this tool has had came from the same place: the report printed what w
 its decision lines — the full text IS the instrument, and the findings are only hints from it. If the report is
 long, read it anyway; that is the job.
 
+**Nothing goes out until you have read the target's last COMPLETED turn.** Not the report's summary of it, and
+not the turn that is currently open — the last one that finished, in full, with `wd.sh wake --replay <n>
+--no-state`. Two of the loop's worst sends went out without it: owner items delivered against work the target had
+already moved past, and a finding raised on a peer being idle when the target's own last message said why. The
+target's closing paragraph is where its pauses live, and it states them plainly rather than flagging them: a list
+of what REMAINS after a partial result, work named as still running that no longer is, a ruling half-applied.
+Read that paragraph as the thing you are checking, not as a status line. If it names work left undone against a
+standing ruling, that is the finding for this wake, and it outranks anything the regex hints offered.
+
 **Findings are HELD, not sent.** A finding is queued the moment it is made. Deliver it with the owner's queued
 items, as ONE message, when `wd.sh due` says the target is receptive: nothing running, nothing in flight, and no
 question of its own outstanding. A target mid-work is not a target that should be interrupted, and idle is not
