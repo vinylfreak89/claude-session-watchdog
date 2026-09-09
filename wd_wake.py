@@ -550,9 +550,9 @@ def main():
         ready = [d for d in owe.values() if not d.get('gated_on')]
         gated = [d for d in owe.values() if d.get('gated_on')]
         print('READY for the owner — he can answer these now: %d' % len(ready))
-        for d in ready: print('  %s %s' % (d['id'], W.short(d['text'], 220)))
+        for d in ready: print('  %s %s' % (d.get('id', '?'), W.short(d.get('text', ''), 220)))
         print('GATED — do not put these to him yet: %d' % len(gated))
-        for d in gated: print('  %s %s\n      gated behind: %s' % (d['id'], W.short(d['text'], 200), d['gated_on']))
+        for d in gated: print('  %s %s\n      gated behind: %s' % (d.get('id', '?'), W.short(d.get('text', ''), 200), d['gated_on']))
         return 0
     if a.due:
         if not a.target: ap.error('--due needs --target')
