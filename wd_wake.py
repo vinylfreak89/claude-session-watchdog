@@ -464,6 +464,12 @@ def print_report(a, sess, st, state, R, trigger, wall, bytes_read):
         print('=== OWNER ITEMS, HELD (%d) -- do NOT send; each waits on the work named ===' % len(held))
         for it in held: print('  %s HELD UNTIL: %s\n      %s' % (it['id'], it['hold_until'], it['text']))
     print('WAKE #%d  trigger=%s  target="%s" (%s)  ct=%s cec=%s' % (state['wake_count'], trigger, sess['title'], sess['sessionId'], st['ct'], st['cec']))
+    # An IDLE/STALL/manual wake deliberately reports even when the turn was already read, so that "has it
+    # stopped?" can be answered. Say so loudly: an unlabelled repeat reads exactly like a fresh turn, and
+    # reporting one as new is how a stale account reaches the owner.
+    if T is not None and T.pid and T.pid in set(state.get('seen_pids', [])):
+        print('*** ALREADY ANALYSED — the turn below was read at an earlier wake. Nothing here is new. ***')
+        print('*** Report it as new ONLY if you have re-verified it. Check the OPEN turn for what changed. ***')
     if T:
         print('turn: opener=%s start=%s end=%s end_state=%s tools=%d notifications=%d api_errors=%d markers=%d' % (T.opener_kind, T.start_ts, T.end_ts, T.end_state, len(T.tool_uses), len(T.notifications), len(T.api_errors), len(T.markers)))
         print('opener text: %s' % W.short(T.opener_text, 200))
