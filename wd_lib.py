@@ -439,7 +439,15 @@ SENT_SPLIT = re.compile(r'(?<=[.!?])\s+(?=[A-Z\[`*\d])|\n+')
 PATH_RE = re.compile(r'(?<![\w/])((?:/|~/)[A-Za-z_][\w.@+-]*(?:/[\w.@+-]+)*|[A-Za-z_][\w.-]*/[\w./-]*[A-Za-z][\w./-]*\.[A-Za-z0-9]{1,5}|[A-Za-z_][\w-]*\.(?:py|c|h|md|csv|tpc|mp4|mov|sh|json|txt|log|cap6))\b')
 SHA_RE = re.compile(r'(?<![\w/])([0-9a-f]{7,40})(?![\w/])')
 ROWID_RE = re.compile(r'\b([A-Z]{1,2}\d{1,3})\b')
-ANNOUNCE_RE = re.compile(r"(?:^|[.;:]\s+|\*\*\s*)(?:(?:I'll|I will|I'm going to|I am going to|Let me|Now I(?:'ll| will)?|Next I(?:'ll| will)?|Then I(?:'ll| will)?)\s+(?:now\s+|then\s+|go\s+(?:and\s+)?|also\s+|just\s+)?(render|dispatch|run|re-?run|launch|build|commit|push|write|replay|measure|re-?measure|merge|fix|implement|send|score|cut|re-?cut|verify|check|watch|hook|burn|encode|generate|produce|start|kick|retry|re-?try|rebuild|re-?render|re-?dispatch|queue|steer)\w*|(Launching|Dispatching|Kicking off|Starting|Re-?running|Rendering|Running|Sending|Retrying|Queuing|Queueing|Building|Fixing|Writing|Measuring|Testing|Merging|Committing|Pushing|Re-?cutting|Scoring|Checking|Rebuilding|Implementing|Wiring)\b)", re.I)
+ANNOUNCE_RE = re.compile(
+    # first person: "I'll dispatch ...", "Let me run ...", "Now I will re-render ..."
+    r"(?:^|[.;:]\s+|\*\*\s*)(?:(?:I'll|I will|I'm going to|I am going to|Let me|Now I(?:'ll| will)?|Next I(?:'ll| will)?|Then I(?:'ll| will)?)\s+(?:now\s+|then\s+|go\s+(?:and\s+)?|also\s+|just\s+)?(render|dispatch|run|re-?run|launch|build|commit|push|write|replay|measure|re-?measure|merge|fix|implement|send|score|cut|re-?cut|verify|check|watch|hook|burn|encode|generate|produce|start|kick|retry|re-?try|rebuild|re-?render|re-?dispatch|queue|steer)\w*"
+    # sentence-initial gerund: "Dispatching ...", "Re-rendering ..."
+    r"|(Launching|Dispatching|Kicking off|Starting|Re-?running|Rendering|Running|Sending|Retrying|Queuing|Queueing|Building|Fixing|Writing|Measuring|Testing|Merging|Committing|Pushing|Re-?cutting|Scoring|Checking|Rebuilding|Implementing|Wiring|Dispatching)\b"
+    # declarative intent with no first-person verb: "that's the next move", "the next move is Codex",
+    # "next up is the comb", "that comes next" -- the F11/F19 class, twice missed
+    r"|((?:that(?:'s| is)|this is|which is|the) (?:the )?next (?:move|step|thing)|next (?:up|move|step) is|comes next|is what(?:'s| is) next|remains? to (?:be )?(?:done|dispatched)|still to (?:do|dispatch|run)))",
+    re.I)
 ACTION_VERB_RE = re.compile(r'\b(render|dispatch|run|re-?run|launch|build|commit|push|write|replay|measure|re-?measure|merge|fix|implement|send|score|cut|re-?cut|verify|check|watch|hook|burn|encode|generate|produce|start|kick)\w*\b', re.I)
 CONDITIONAL_RE = re.compile(r"\b(if|once|when|after you|unless|let me know|want me|should I|shall I|your call|you decide|await|waiting for)\b|\?\s*$", re.I)
 DISPATCH_CLAIM_RE = re.compile(r'\b(dispatch(?:ed|ing)?|sent (?:it |that |this |the \w+ )?to codex|codex is (?:now )?(?:running|working|on it)|queued (?:to|for|on) codex|handed (?:it |this )?(?:off )?to codex|codex-run (?:task|send|say|queue|steer))\b', re.I)
