@@ -59,6 +59,11 @@ a stall, reconcile it against the contract, and reply to the watchdog session. T
 cross-session message; `wd.sh wake --trigger 'REPLY'` records it and re-verifies the in-flight work. If no reply
 comes within `reply_min`, the hook emits `REPLY_OVERDUE` and the wake proposes exactly one poke.
 
+Two-way talkback, measured: a target session can answer with `mcp__ccd_session_mgmt__send_message` (it may have
+to load the tool by that exact name first; the test session's first attempt looked for a differently named tool
+and gave up). If the watchdog is mid-turn the reply is `queued` and shows nowhere in the watchdog's transcript
+until its turn ends, when it arrives as the next user turn — so the watchdog must end each wake promptly.
+
 ## What a wake checks
 
 Tool calls first, prose second. From the latest completed turn: `git commit` results, `git push` calls,
