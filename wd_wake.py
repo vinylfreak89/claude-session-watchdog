@@ -188,7 +188,7 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
         if not failed and tail and FAIL_SIG.search(tail): failed = True
         rec.update(outcome=outcome, failed=failed)
         thread_state = W.codex_thread_state(d['thread']) if d['thread'] else None
-        rec['thread_state'] = {k: thread_state[k] for k in ('found', 'in_flight', 'last_started', 'last_complete', 'mtime')} if thread_state else None
+        rec['thread_state'] = {k: thread_state.get(k) for k in ('found', 'in_flight', 'last_started', 'last_complete', 'mtime')} if thread_state else None
         disp_records.append(rec)
         quote = 'tool call at %s: `codex-run %s %s`' % (d['ts'], d['verb'], W.short(d['inline'], 90))
         dc = next((c for c in claims if c['kind'] == 'dispatch'), None)

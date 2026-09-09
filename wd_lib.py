@@ -603,7 +603,10 @@ def task_output_status(output_file):
 
 def codex_thread_state(thread_id, tail_bytes=1024 * 1024):
     files = glob.glob(os.path.join(CODEX_SESSIONS, '*', '*', '*', 'rollout-*-%s.jsonl' % thread_id))
-    if not files: return dict(found=False, thread=thread_id)
+    if not files:
+        # every caller may read the same keys whether or not a rollout exists
+        return dict(found=False, thread=thread_id, rollout=None, mtime=None, size=None, last_started=None,
+                    last_complete=None, in_flight=False, last_agent_message=None, last_event=None)
     f = max(files, key=os.path.getmtime)
     st = os.stat(f)
     with open(f, 'rb') as fh:
