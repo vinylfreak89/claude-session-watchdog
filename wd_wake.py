@@ -62,12 +62,18 @@ def log_line(d, s):
     with open(os.path.join(d, 'wake.log'), 'a') as f: f.write(s + '\n')
 
 # ----------------------------------------------------------------------------- helpers
-def msg(turn_label, end_ts, quote, checked, result):
+PLAIN_CLASSES = ('task_dead', 'codex_turn_silent', 'reply_overdue', 'context_exceeded', 'ledger_stale_row')
+
+def msg(turn_label, end_ts, quote, checked, result, plain=False):
+    """Fixed message form. Turn-derived findings quote the turn; state-derived ones (a dead job, a stale row,
+    an overdue reply) state the fact instead of putting words in the turn's mouth."""
+    if plain:
+        return '%s %s | checked: %s | result: %s' % (W.WATCHDOG_TAG, W.short(quote, 200), W.short(checked, 260), W.short(result, 320))
     return '%s turn %s (%s) said "%s" | checked: %s | result: %s' % (W.WATCHDOG_TAG, turn_label, end_ts or '?', W.short(quote, 170).replace('"', "'"), W.short(checked, 260), W.short(result, 320))
 
 def finding(cls, key, evidence, quote, checked, result, turn_label, end_ts, severity='normal'):
     return dict(cls=cls, key=key, evidence_hash=W.h(json.dumps(evidence, sort_keys=True, default=str)), evidence=evidence,
-                quote=quote, checked=checked, result=result, severity=severity, message=msg(turn_label, end_ts, quote, checked, result))
+                quote=quote, checked=checked, result=result, severity=severity, message=msg(turn_label, end_ts, quote, checked, result, plain=cls in PLAIN_CLASSES))
 
 def resolve_path(p, repo):
     p = os.path.expanduser(p)
