@@ -396,9 +396,12 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
         for name, body in (L.get('section_text') or {}).items():
             if W.OWNER_GATE_RE.search(name) or name.lower().startswith(('e.', 'e ')):
                 for_owner.append(('ledger section "%s"' % name, body.strip()))
+    seen_fo = set(state.get('for_owner_seen') or [])
+    for_owner_new = [(src, txt) for src, txt in for_owner if W.h(txt) not in seen_fo]
+    for_owner_all = for_owner; for_owner = for_owner_new
     to_wd = W.messages_to_watchdog(T, (self_sess or {}).get('sessionId')) if T else []
     bypass_hint = None
-    if for_owner and T and not any(W.OWNER_GATE_RE.search(m) or 'blocked' in m.lower() for _, m in to_wd):
+    if for_owner_new and T and not any(W.OWNER_GATE_RE.search(m) or 'blocked' in m.lower() for _, m in to_wd):
         bypass_hint = 'work declared gated on the owner in this turn (%s) and no message to the watchdog session carried it (messages to watchdog this turn: %d)' % ('; '.join(sorted(set(src for src, _ in for_owner)))[:160], len(to_wd))
 
     # ---- policy
@@ -423,7 +426,7 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
                 own_turn=own_turn, open_turn=open_turn, digest=digest, claims=claims, findings=findings, observations=observations,
                 ledger_summary=ledger_summary, new_ledger=new_ledger, inflight=still, disp_records=disp_records, notified=sorted(notified)[-500:],
                 new_pids=[t.pid for t in new_turns if t.pid], drift=drift, commits=commits, pushes=pushes, launches=launches, reply=reply,
-                ledger_diff=ledger_diff, for_owner=for_owner, to_wd=to_wd, bypass_hint=bypass_hint)
+                ledger_diff=ledger_diff, for_owner=for_owner, for_owner_all=for_owner_all, to_wd=to_wd, bypass_hint=bypass_hint)
 
 def print_report(a, sess, st, state, R, trigger, wall, bytes_read):
     T = R['T']
@@ -453,7 +456,7 @@ def print_report(a, sess, st, state, R, trigger, wall, bytes_read):
     if R.get('ledger_diff'):
         print('--- ledger diff since last wake ---')
         for d in R['ledger_diff']: print('  ' + d.replace('\n', '\n  '))
-    print('=== FOR THE OWNER (%d) -- relay verbatim to the owner before anything else ===' % len(R['for_owner']))
+    print('=== FOR THE OWNER (%d new; %d standing) -- relay the NEW ones verbatim to the owner before anything else ===' % (len(R['for_owner']), len(R.get('for_owner_all') or [])))
     for src, txt in R['for_owner']: print('  [%s] %s' % (src, txt.replace('\n', '\n      ')))
     if R.get('bypass_hint'): print('  PROTOCOL BYPASS HINT: %s' % R['bypass_hint'])
     aw = state.get('awaiting_reply')
@@ -545,6 +548,7 @@ def main():
         state['wake_count'] = wake_no
         state['seen_pids'] = (state['seen_pids'] + R['new_pids'])[-40:]
         state['ledger'] = R['new_ledger']; state['in_flight'] = R['inflight']; state['notified'] = R['notified']
+        state['for_owner_seen'] = sorted(set(state.get('for_owner_seen') or []) | set(W.h(t) for _, t in (R.get('for_owner_all') or [])))[-400:]
         state['last_ct'] = st['ct']; state['last_cec'] = st['cec']; state['last_wake_ts'] = W.now_iso()
         state['dispatch_log'] = (state.get('dispatch_log') or [])[-300:] + [dict(ts=r['ts'], ct=st['ct'], verb=r['verb'], thread=r['thread'], brief_path=r['brief_path'], inline=r['inline']) for r in R['disp_records']]
         for f in R['findings']:
