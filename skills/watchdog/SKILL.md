@@ -73,6 +73,18 @@ it), raise `protocol_bypass` and attach it to the next message you send: that na
 target acknowledged (reply to the watchdog so the owner is asked) and what it did. It is evidence, not a nudge to
 work.
 
+## Read before you decide, and never compress the report first
+
+Every miss this tool has had came from the same place: the report printed what was needed and it was skimmed.
+**Read the turn's texts in full before looking at the findings.** Do not grep, filter or tail the report down to
+its decision lines — the full text IS the instrument, and the findings are only hints from it. If the report is
+long, read it anyway; that is the job.
+
+**Findings are HELD, not sent.** A finding is queued the moment it is made. Deliver it with the owner's queued
+items, as ONE message, when `wd.sh due` says the target is receptive: nothing running, nothing in flight, and no
+question of its own outstanding. A target mid-work is not a target that should be interrupted, and idle is not
+the same as finished — a session waiting on the owner's decision is waiting, not stopped.
+
 ## The loop
 
 Startup (once): `get_session self` → `self` in `config.json`; `wd.sh boot` if `state/state.json` is absent; arm
@@ -80,11 +92,15 @@ the hook with Bash `run_in_background`: `wd.sh wait`. End the turn.
 
 On every event line (`TURN`, `TURN_END`, `INTERRUPTED`, `API_ERROR`, `CONTEXT_EXCEEDED`, `STALL`,
 `REPLY_OVERDUE`, `TIMEOUT`):
-1. `wd.sh wake --trigger '<the line verbatim>'`. Read all of it.
+1. `wd.sh wake --trigger '<the line verbatim>'`. Read ALL of it, texts first, before the findings.
 2. Relay FOR THE OWNER to the owner if non-empty.
-3. Decide what to raise; `wd.sh finding …` for each; veto nothing you did not misread.
-4. Send the `[send]` lines as ONE `mcp__ccd_session_mgmt__send_message` to the target; `wd.sh sent F… <message_id>`.
-5. `wd.sh cost`; re-arm `wd.sh wait`; end the turn.
+3. Decide what to raise; `wd.sh finding …` for each; veto only what you misread.
+4. `wd.sh due`. If it says BUSY, hold everything and go to 5. If RECEPTIVE, send the held findings and the
+   owner's queued items as ONE message, then `wd.sh sent F…  <message_id>` and `wd.sh queue clear <message_id>`.
+5. `wd.sh cost`; re-arm `wd.sh wait` in the background — every wake, without exception; end the turn.
+
+The hook returns every 60 seconds with a HEARTBEAT when nothing happened. That is normal: re-arm and end the
+turn. It exists so a turn end cannot be lost while this session is busy talking to the owner.
 
 Stalls: `STALL` → the wake's message asks the target to confirm the stall, reconcile against the contract, and
 reply to your session; `wd.sh sent` opens the reply window. The reply arrives as a user turn here: run

@@ -500,10 +500,12 @@ def print_report(a, sess, st, state, R, trigger, wall, bytes_read):
         print('--- observations (not findings) ---')
         for o in R['observations']: print('  ' + o)
     to_send = [f for f in R['findings'] if f['status'] == 'send']
-    print('--- to send: %d finding(s)%s' % (len(to_send), '' if to_send else ' -- stay silent'))
+    print('--- HELD for delivery: %d finding(s)%s' % (len(to_send), '' if to_send else ' -- nothing to say'))
     if to_send:
-        print('MESSAGE (send verbatim, one message, then: wd_wake.py --sent %s):' % ','.join(f['id'] for f in to_send))
-        print('\n'.join(f['message'] for f in to_send))
+        print('    (do NOT send now unless it is urgent: deliver with `wd.sh due` when the target\'s loop is closed)')
+        for f in to_send: print('    %s: %s' % (f['id'], f['message']))
+    print('NEXT: wd.sh due   (what is undelivered, and whether the target is receptive)')
+    print('      wd.sh wait  (re-arm the hook -- run it in the background every single wake)')
     print('cost: scripts %.1f s wall, %.1f MB transcript read' % (wall, bytes_read / 1e6))
 
 def main():
@@ -520,11 +522,31 @@ def main():
     ap.add_argument('--no-state', action='store_true'); ap.add_argument('--json', action='store_true')
     ap.add_argument('--sent'); ap.add_argument('--message-id', default=''); ap.add_argument('--veto'); ap.add_argument('--reason', default='')
     ap.add_argument('--queue-add'); ap.add_argument('--queue-urgent', action='store_true'); ap.add_argument('--queue-list', action='store_true'); ap.add_argument('--queue-clear')
+    ap.add_argument('--due', action='store_true')
     a = ap.parse_args()
     a.perm_paths = [x.strip() for x in a.perm_paths.split(',') if x.strip()]
     W.set_row_pattern(a.row_pattern)
     os.makedirs(a.state_dir, exist_ok=True)
     state = load_state(a.state_dir)
+    if a.due:
+        if not a.target: ap.error('--due needs --target')
+        sess = W.find_session(a.target); st = W.read_state(sess)
+        q = state.get('owner_queue') or []; prop = state.get('proposed') or {}
+        procs = W.live_children(sess); infl = state.get('in_flight') or []
+        _, turns = W.last_turns(sess, n=3)
+        openq = []
+        for t in turns[-3:]:
+            for _ts, _txt in t.assistant_texts: openq += W.owner_gate_hints(_txt)
+        idle_min = (time.time() - (st['lastActivityAt'] or 0) / 1000.0) / 60.0
+        receptive = (not procs) and (not infl) and idle_min > 0.5
+        print('UNDELIVERED owner items: %d' % len(q))
+        for it in q: print('  %s%s %s' % (it['id'], ' URGENT' if it.get('urgent') else '', W.short(it['text'], 220)))
+        print('UNDELIVERED findings: %d' % len(prop))
+        for fid, pr in prop.items(): print('  %s (%s, proposed %s)' % (fid, pr.get('key', '').split(':')[0], pr.get('ts')))
+        print('target: %d live process(es), %d in flight, idle %.1f min -> %s' % (len(procs), len(infl), idle_min,
+              'RECEPTIVE: its loop looks closed, deliver as ONE message' if receptive else 'BUSY: hold, it is mid-work'))
+        if openq: print('note: it has a question outstanding to the owner (%s) -- it is waiting, not stopped' % W.short(openq[-1], 90))
+        return 0
     if a.queue_add or a.queue_list or a.queue_clear:
         q = state.setdefault('owner_queue', [])
         if a.queue_add:
