@@ -352,9 +352,13 @@ def split_turns(records):
             cur.records.append(r)
     return turns
 
+LAST_TAIL_BYTES = 0
+
 def last_turns(sess, n=3):
+    global LAST_TAIL_BYTES
     path = transcript_path(sess)
     off, recs = read_tail_turns(path, need_turns=n)
+    LAST_TAIL_BYTES = os.path.getsize(path) - off
     turns = split_turns(recs)
     # the first turn in the chunk may be partial unless the chunk starts at 0
     if off > 0 and turns: turns = turns[1:]

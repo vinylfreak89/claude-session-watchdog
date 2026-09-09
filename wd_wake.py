@@ -444,7 +444,7 @@ def main():
     sess = W.find_session(a.target)
     st = W.read_state(sess)
     path, turns = W.last_turns(sess, n=max(a.turns, a.replay + 2))
-    bytes_read = os.path.getsize(path)
+    bytes_read = W.LAST_TAIL_BYTES
     if a.replay:
         turns = turns[:len(turns) - a.replay + 1] if a.replay > 1 else turns
         a.no_state = True
