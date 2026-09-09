@@ -1,0 +1,7 @@
+# runtime state of a running watchdog (dedupe memory, acceptance log, cost log)
+state/
+# local configuration: which session to watch, ledger path, thresholds
+config.json
+__pycache__/
+*.pyc
+.DS_Store
