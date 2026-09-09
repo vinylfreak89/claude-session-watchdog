@@ -369,43 +369,11 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
                                 'no reply by %s (deadline %s); reply to session %s' % (W.now_iso(), aw.get('deadline'), (self_sess or {}).get('sessionId') or a.self_sel), turn_label, end_ts))
         findings[-1]['asks_reply'] = True; findings[-1]['is_poke'] = True
 
-    # ---- announcements at turn end
+    # ---- announcements at turn end: HINTS for the model, never findings (the scripts do not judge language)
     for c in [c for c in claims if c['kind'] == 'announce']:
-        if c.get('conditional'): observations.append('conditional announcement, not checked: %s' % W.short(c['sentence'], 100)); continue
         this_turn_live = [i for i in still if i.get('turn_ct') == ct and i.get('launched_ts', '') >= (T.start_ts or '')]
-        if this_turn_live: continue
-        path_facts = []
-        for p in c.get('paths', [])[:3]:
-            rp = resolve_path(p, repo)
-            path_facts.append('%s mtime %s' % (rp, W.mtime_iso(rp) or 'missing'))
-        findings.append(finding('announced_nothing_running', 'announced:%s:%s' % (T.pid[:8], W.h(c['sentence'])), dict(sentence=c['sentence']), c['sentence'],
-                                'background tasks and codex dispatches launched in this turn and still alive; Agent calls without result; %s' % ('; '.join(path_facts) if path_facts else 'no path in the sentence'),
-                                'the turn ended with nothing running (%d live child process(es) under the session)' % len(procs), turn_label, end_ts))
-
-    # ---- did the target reply to a question we asked?
-    reply = None
-    if aw and self_sess:
-        got = W.peer_replies(self_sess, sess['sessionId'], aw.get('sent_ts'))
-        if got:
-            reply = dict(ts=got[-1][0], text=got[-1][1], message_id=aw.get('message_id'))
-            observations.append('REPLY from the target at %s to message %s: %s' % (reply['ts'], aw.get('message_id'), W.short(reply['text'], 300)))
-
-    # ---- for the owner: declarations that work is gated on the owner, wherever they appear
-    for_owner = []
-    if T:
-        for ts, txt in T.assistant_texts:
-            for hnt in W.owner_gate_hints(txt): for_owner.append(('turn text %s' % (ts or '')[11:19], hnt))
-    if L.get('exists') and not L.get('dataless'):
-        for name, body in (L.get('section_text') or {}).items():
-            if W.OWNER_GATE_RE.search(name) or name.lower().startswith(('e.', 'e ')):
-                for_owner.append(('ledger section "%s"' % name, body.strip()))
-    seen_fo = set(state.get('for_owner_seen') or [])
-    for_owner_new = [(src, txt) for src, txt in for_owner if W.h(txt) not in seen_fo]
-    for_owner_all = for_owner; for_owner = for_owner_new
-    to_wd = W.messages_to_watchdog(T, (self_sess or {}).get('sessionId')) if T else []
-    bypass_hint = None
-    if for_owner_new and T and not any(re.search(r'owner|blocked|ruling|question|decide', m, re.I) for _, m in to_wd):
-        bypass_hint = 'work declared gated on the owner in this turn (%s) and no message to the watchdog session carried it (messages to watchdog this turn: %d)' % ('; '.join(sorted(set(src for src, _ in for_owner)))[:160], len(to_wd))
+        observations.append('ANNOUNCE HINT%s: "%s" -- at turn end: %d live process(es), %d item(s) from this turn still in flight. If this is a commitment to act, raise it: wd.sh finding announced_nothing_running "<sentence>" check running' % (
+            ' [conditional]' if c.get('conditional') else '', W.short(c['sentence'], 160), len(procs), len(this_turn_live)))
 
     # ---- policy
     raised = state.get('raised', {})
