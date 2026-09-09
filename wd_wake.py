@@ -389,11 +389,26 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
             for _ts, _txt in _t.assistant_texts: gate_hints += W.owner_gate_hints(_txt)
         open_rows = len((L.get('rows') or {})) if L.get('exists') and not L.get('dataless') else None
         idle_min = re.search(r'idle_min=(\d+)', trigger)
-        if gate_hints:
+        # A stop is a SUSTAINED absence of work, never a gap between jobs. The IDLE trigger fires after one
+        # minute by design, which is short enough to land between a job exiting and the next turn opening; two
+        # findings were raised that way while the target had work in flight seconds either side. Require the
+        # idleness to have lasted, and require nothing running RIGHT NOW.
+        # 3 minutes, set from evidence rather than taste: the one REAL stop tonight was caught at 3.3 min
+        # idle with nothing running, and the two false ones fired at 1 min between jobs. A longer floor would
+        # have let the real one sit for a quarter of an hour.
+        min_stop = 3.0
+        idled = float(idle_min.group(1)) if idle_min else 0.0
+        if idled < min_stop or procs or still:
+            observations.append('IDLE %.0f min but not a stop: %d live process(es), %d in flight, and a stop needs %.0f min of nothing.'
+                                % (idled, len(procs), len(still), min_stop))
+        elif gate_hints:
             observations.append('IDLE, but a recent turn named a blocker or a question for the owner, so it is waiting rather than stopped: %s' % W.short(gate_hints[0], 160))
         else:
             findings.append(finding('idle_no_blocker', 'idle_no_blocker:%s' % (T.pid[:8] if T else ct), dict(ct=ct, open_rows=open_rows),
-                                    "the owner's standing instruction: %s" % a.standing_instruction,
+                                    # The standing instruction is the ORCHESTRATOR'S orders, not the target's: pasting it
+                                    # into a message to the target sends it text addressed to someone else. State the
+                                    # fact instead and let the model write what the target should do about it.
+                                    "you have stopped with work remaining and nothing named as blocking you",
                                     'live child processes of the session pid(s) %s; in-flight items; the turn text for a named blocker or a question for the owner; %s' % (W.session_pids(sess), a.ledger or 'no ledger configured'),
                                     'nothing running, nothing in flight, no blocker or question named in the last turn, idle %s min%s' % (
                                         idle_min.group(1) if idle_min else '?', ('; %d open rows remain in %s' % (open_rows, a.ledger)) if open_rows else ''),
