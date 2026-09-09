@@ -116,6 +116,22 @@ Escalate only what the record genuinely does not contain, and bring it with the 
 recommendation. "The target says this is gated on the owner" is a claim to check, exactly like every other
 claim it makes.
 
+## Quote, never paraphrase — a paraphrase resolves the pronouns
+
+The owner writes the way people talk, with "it" and "that" and "the lack of one" pointing back at something a
+clause earlier. A quote carries the ambiguity intact and lets the target resolve it against its own code. A
+paraphrase silently picks a referent, and the pick is invisible: it reads as a clean summary of what he said.
+
+Measured cost: relaying "the lack of one doesn't make the head switch invalid. It just means to hold its bounds"
+as "a box makes the switch hold its bounds" moved the trigger from the absence of a lift-off point onto boxing.
+Same words, different rule, and it would have produced wrong behaviour on an unboxed source with no lift-off
+point. The target's reviewer caught it, not the target and not me.
+
+So relay his sentences verbatim and let the target read them. Where you must gloss, mark the gloss as yours and
+name the referent you chose so someone can disagree with it. And treat a quote that ASKS something as a
+question, never as a definition: a line where he is interrogating the harness is not him writing a rule, and
+converting it into one manufactures a ruling he never made.
+
 ## You are a source, not the authority
 
 Holding the owner's whole conversation makes you the best available source of what he decided. It does not make
