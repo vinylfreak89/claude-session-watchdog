@@ -628,14 +628,22 @@ def peer_replies(sess, from_session_id, after_ts):
     path = transcript_path(sess)
     if not os.path.exists(path): return []
     _, recs = read_tail_turns(path, need_turns=6)
-    out = []
+    out, seen = [], set()
     for r in recs:
-        if r.get('type') != 'user': continue
-        o = r.get('origin') or {}
-        if o.get('kind') == 'peer' and o.get('from') == from_session_id and (r.get('timestamp') or '') > (after_ts or ''):
-            txt = _text_of((r.get('message') or {}).get('content'))
-            body = _grab(r'<cross-session-message[^>]*>\s*(.*?)\s*</cross-session-message>', txt) or txt
-            out.append((r.get('timestamp'), body))
+        ts = r.get('timestamp') or ''
+        if ts <= (after_ts or ''): continue
+        if r.get('type') == 'user':
+            o = r.get('origin') or {}
+            if o.get('kind') == 'peer' and o.get('from') == from_session_id:
+                txt = _text_of((r.get('message') or {}).get('content'))
+                body = _grab(r'<cross-session-message[^>]*>\s*(.*?)\s*</cross-session-message>', txt) or txt
+                out.append((ts, body)); seen.add(body)
+        elif r.get('type') == 'queue-operation' and r.get('operation') == 'enqueue':
+            # a reply delivered while this session was busy sits in the queue first; it is a reply already
+            txt = r.get('content') or ''
+            if ('<cross-session-message from="%s"' % from_session_id) in txt:
+                body = _grab(r'<cross-session-message[^>]*>\s*(.*?)\s*</cross-session-message>', txt) or txt
+                if body not in seen: out.append((ts, body)); seen.add(body)
     return out
 
 def load_config(path):
