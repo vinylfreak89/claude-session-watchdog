@@ -429,7 +429,7 @@ SENT_SPLIT = re.compile(r'(?<=[.!?])\s+(?=[A-Z\[`*\d])|\n+')
 PATH_RE = re.compile(r'(?<![\w/])((?:/|~/)[\w.@+-]+(?:/[\w.@+-]+)*|[\w.-]+/[\w./-]+\.[A-Za-z0-9]{1,5}|[\w-]+\.(?:py|c|h|md|csv|tpc|mp4|mov|sh|json|txt|log|cap6))\b')
 SHA_RE = re.compile(r'(?<![\w/])([0-9a-f]{7,40})(?![\w/])')
 ROWID_RE = re.compile(r'\b([A-F]\d{1,2})\b')
-ANNOUNCE_RE = re.compile(r"\b(?:I'll|I will|I'm going to|I am going to|Next(?:,| I)|Now I(?:'ll)?|Launching|Dispatching|Kicking off|Starting|Re-?running|Rendering|Running|Sending)\b", re.I)
+ANNOUNCE_RE = re.compile(r"(?:^|[.;:]\s+|\*\*\s*)(?:(?:I'll|I will|I'm going to|I am going to|Let me|Now I(?:'ll| will)?|Next I(?:'ll| will)?|Then I(?:'ll| will)?)\s+(?:now\s+|then\s+|go\s+(?:and\s+)?|also\s+|just\s+)?(render|dispatch|run|re-?run|launch|build|commit|push|write|replay|measure|re-?measure|merge|fix|implement|send|score|cut|re-?cut|verify|check|watch|hook|burn|encode|generate|produce|start|kick|retry|re-?try|rebuild|re-?render|re-?dispatch|queue|steer)\w*|(Launching|Dispatching|Kicking off|Starting|Re-?running|Rendering|Running|Sending|Retrying|Queuing|Queueing)\b)", re.I)
 ACTION_VERB_RE = re.compile(r'\b(render|dispatch|run|re-?run|launch|build|commit|push|write|replay|measure|re-?measure|merge|fix|implement|send|score|cut|re-?cut|verify|check|watch|hook|burn|encode|generate|produce|start|kick)\w*\b', re.I)
 CONDITIONAL_RE = re.compile(r"\b(if|once|when|after you|unless|let me know|want me|should I|shall I|your call|you decide|await|waiting for)\b|\?\s*$", re.I)
 DISPATCH_CLAIM_RE = re.compile(r'\b(dispatch(?:ed|ing)?|sent (?:it |that |this |the \w+ )?to codex|codex is (?:now )?(?:running|working|on it)|queued (?:to|for|on) codex|handed (?:it |this )?(?:off )?to codex|codex-run (?:task|send|say|queue|steer))\b', re.I)
@@ -464,12 +464,16 @@ def extract_claims(turn):
                 claims.append(dict(kind='commit', sentence=s, shas=shas, ts=ts, final=is_final))
             if DISPATCH_CLAIM_RE.search(s) and not s_neg:
                 claims.append(dict(kind='dispatch', sentence=s, ts=ts, final=is_final, threads=THREAD_RE.findall(s), paths=paths))
-            if FILE_CLAIM_RE.search(s) and paths and not s_neg:
-                claims.append(dict(kind='file', sentence=s, paths=paths, ts=ts, final=is_final))
+            fm = FILE_CLAIM_RE.search(s)
+            if fm and paths and not s_neg:
+                after = [p for p in paths if s.find(p) > fm.start()]
+                if after:
+                    claims.append(dict(kind='file', sentence=s, paths=after, verb=fm.group(1).lower(), ts=ts, final=is_final))
             if LEDGER_CLAIM_RE.search(s) and (LEDGER_WORD_RE.search(s) or rows) and not s_neg:
                 claims.append(dict(kind='ledger', sentence=s, rows=rows, ts=ts, final=is_final))
-            if is_final and ANNOUNCE_RE.search(s) and ACTION_VERB_RE.search(s):
-                claims.append(dict(kind='announce', sentence=s, paths=paths, ts=ts, final=True,
+            am = ANNOUNCE_RE.search(s) if is_final else None
+            if am:
+                claims.append(dict(kind='announce', sentence=s, paths=paths, ts=ts, final=True, verb=(am.group(1) or am.group(2) or '').lower(),
                                    conditional=bool(CONDITIONAL_RE.search(s)), threads=THREAD_RE.findall(s)))
     return claims
 
