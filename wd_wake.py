@@ -89,19 +89,8 @@ def token_paths(tokens, repo, files):
         out.extend(hits[:3])
     return sorted(set(out))
 
-def live_children(sess):
-    procs = W.process_table()
-    return W.descendants(procs, W.session_pids(sess))
-
-def proc_matches(command, procs):
-    toks = [t for t in re.findall(r'[\w./@+-]{12,}', command or '') if '/' in t or '-' in t or '_' in t]
-    hits = []
-    for p in procs:
-        if any(t in p['command'] for t in toks[:12]): hits.append(p)
-    return hits
-
 # ----------------------------------------------------------------------------- the wake
-def analyse(a, sess, st, state, turns, trigger, replay=False):
+def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
     repo = a.repo or sess['cwd']
     now = time.time()
     findings, observations = [], []
@@ -169,7 +158,7 @@ def analyse(a, sess, st, state, turns, trigger, replay=False):
         observations.append('ls-remote failed (%s); drift measured against last-fetched origin/%s' % (drift['ls_remote_error'], drift['branch']))
 
     # ---- dispatches (tool facts) and dispatch claims (prose)
-    procs = live_children(sess)
+    procs = W.live_children(sess)
     disp_records = []
     for d in dispatches:
         rec = dict(ts=d['ts'], verb=d['verb'], thread=d['thread'], brief_path=d['brief_path'], turn_ct=ct, task_id=(d['background'] or {}).get('task_id'),
@@ -230,8 +219,8 @@ def analyse(a, sess, st, state, turns, trigger, replay=False):
                                         'mtime of %s vs turn start %s' % (rp, T.start_ts), 'last modified %s, before this turn began' % W.iso_from_epoch(mt), turn_label, end_ts))
 
     # ---- ledger
-    ledger_path = os.path.join(repo, a.ledger)
-    L = W.parse_ledger(ledger_path)
+    ledger_path = os.path.join(repo, a.ledger) if a.ledger else None
+    L = W.parse_ledger(ledger_path) if ledger_path else dict(exists=False)
     prev = state.get('ledger')
     ledger_summary = 'missing'
     if L.get('exists') and not L.get('dataless'):
@@ -250,13 +239,13 @@ def analyse(a, sess, st, state, turns, trigger, replay=False):
         for rid in removed:
             backing_paths = token_paths(prev_rows[rid].get('tokens', []), repo, files)
             mention = W.git_log_grep_since(repo, since, r'\b' + rid + r'\b')
-            perm = W.git_log_paths_since(repo, since, ['CLAUDE.md', 'LEARNINGS.md', 'docs'])
+            perm = W.git_log_paths_since(repo, since, a.perm_paths) if a.perm_paths else []
             touch = W.git_log_paths_since(repo, since, backing_paths) if backing_paths else []
             said = next((c['sentence'] for c in claims if c['kind'] == 'ledger' and rid in c.get('rows', [])), None)
             if not mention and not touch and not perm:
                 findings.append(finding('ledger_close_unbacked', 'ledger_close_unbacked:%s:%s' % (rid, prev_rows[rid]['hash']), dict(row=prev_rows[rid]['hash'], since=since),
                                         said or ('row %s deleted from %s this turn (not mentioned in the turn text)' % (rid, a.ledger)),
-                                        'git log --since=%s: --grep %s; -- CLAUDE.md LEARNINGS.md docs; -- %s' % (since, rid, ' '.join(backing_paths) or '(no paths in row)'),
+                                        'git log --since=%s: --grep %s; -- %s; -- %s' % (since, rid, ' '.join(a.perm_paths) or '(no permanent paths configured)', ' '.join(backing_paths) or '(no paths in row)'),
                                         'no commit since %s mentions %s, touches the permanent files, or touches its paths; row text was: %s' % (since, rid, W.short(prev_rows[rid]['text'], 120)), turn_label, end_ts))
             else:
                 observations.append('row %s removed; backing: grep=%s perm=%s paths=%s' % (rid, len(mention), len(perm), len(touch)))
@@ -296,8 +285,8 @@ def analyse(a, sess, st, state, turns, trigger, replay=False):
         new_ledger = dict(rows=snap_rows, order=L['order'], sections=L['sections'], snapshot_ts=W.now_iso(), snapshot_ct=ct, mtime=L['mtime'], reconciled=L.get('reconciled'))
     else:
         new_ledger = prev
-        ledger_summary = 'DATALESS placeholder (iCloud); not read' if L.get('dataless') else 'missing at %s' % ledger_path
-        observations.append('ledger ' + ledger_summary)
+        ledger_summary = 'DATALESS placeholder (iCloud); not read' if L.get('dataless') else ('missing at %s' % ledger_path if ledger_path else 'not configured')
+        if ledger_path: observations.append('ledger ' + ledger_summary)
 
     # ---- context exceeded
     if state.get('last_cec') is not None and st['cec'] is not None and st['cec'] > state['last_cec']:
@@ -323,7 +312,7 @@ def analyse(a, sess, st, state, turns, trigger, replay=False):
             s_ = W.task_output_status(i.get('output_file'))
             done = s_.get('exit_code') is not None or i['id'] in notified
             if done: continue
-            hits = proc_matches(i.get('command', ''), procs)
+            hits = W.proc_matches(i.get('command', ''), procs)
             age_min = (now - (W.epoch_from_iso(i['launched_ts']) or now)) / 60.0
             mt_age = (now - (W.epoch_from_iso(s_['mtime']) or now)) / 60.0 if s_.get('mtime') else None
             i['status'] = 'alive(%d proc)' % len(hits) if hits else ('no process; output mtime %s' % s_.get('mtime'))
@@ -345,6 +334,21 @@ def analyse(a, sess, st, state, turns, trigger, replay=False):
                                         'the thread rollout %s' % ts_.get('rollout'), 'task_started %s with no task_complete; no rollout event for %.0f min (last %s)' % (ts_.get('last_started'), quiet_min, ts_.get('last_event')), turn_label, end_ts))
             still.append(i)
 
+    # ---- stall confirmation request (owner's loop): on a STALL trigger the dead/silent findings ask for a reply
+    if trigger.startswith('STALL') and a.self_sel:
+        me = self_sess['sessionId'] if self_sess else a.self_sel
+        for f in findings:
+            if f['cls'] in ('task_dead', 'codex_turn_silent'):
+                f['asks_reply'] = True
+                f['message'] += ' | confirm to the watchdog whether you consider this a stall, reconcile it against the contract, and reply to session %s' % me
+    aw = state.get('awaiting_reply')
+    if trigger.startswith('REPLY_OVERDUE') and aw and not aw.get('poked'):
+        findings.append(finding('reply_overdue', 'reply_overdue:%s' % aw.get('message_id'), dict(message_id=aw.get('message_id')),
+                                'watchdog message %s sent %s asked you to confirm a stall and reply' % (aw.get('message_id'), aw.get('sent_ts')),
+                                'this session\'s transcript for a cross-session message from you after %s' % aw.get('sent_ts'),
+                                'no reply by %s (deadline %s); reply to session %s' % (W.now_iso(), aw.get('deadline'), (self_sess or {}).get('sessionId') or a.self_sel), turn_label, end_ts))
+        findings[-1]['asks_reply'] = True; findings[-1]['is_poke'] = True
+
     # ---- announcements at turn end
     for c in [c for c in claims if c['kind'] == 'announce']:
         if c.get('conditional'): observations.append('conditional announcement, not checked: %s' % W.short(c['sentence'], 100)); continue
@@ -357,6 +361,14 @@ def analyse(a, sess, st, state, turns, trigger, replay=False):
         findings.append(finding('announced_nothing_running', 'announced:%s:%s' % (T.pid[:8], W.h(c['sentence'])), dict(sentence=c['sentence']), c['sentence'],
                                 'background tasks and codex dispatches launched in this turn and still alive; Agent calls without result; %s' % ('; '.join(path_facts) if path_facts else 'no path in the sentence'),
                                 'the turn ended with nothing running (%d live child process(es) under the session)' % len(procs), turn_label, end_ts))
+
+    # ---- did the target reply to a question we asked?
+    reply = None
+    if aw and self_sess:
+        got = W.peer_replies(self_sess, sess['sessionId'], aw.get('sent_ts'))
+        if got:
+            reply = dict(ts=got[-1][0], text=got[-1][1], message_id=aw.get('message_id'))
+            observations.append('REPLY from the target at %s to message %s: %s' % (reply['ts'], aw.get('message_id'), W.short(reply['text'], 300)))
 
     # ---- policy
     raised = state.get('raised', {})
@@ -377,7 +389,7 @@ def analyse(a, sess, st, state, turns, trigger, replay=False):
     return dict(T=T, ct=ct, turn_label=turn_label, end_ts=end_ts, owner_active=owner_active, last_human=last_human, last_human_age=last_human_age,
                 own_turn=own_turn, open_turn=open_turn, digest=digest, claims=claims, findings=findings, observations=observations,
                 ledger_summary=ledger_summary, new_ledger=new_ledger, inflight=still, disp_records=disp_records, notified=sorted(notified)[-500:],
-                new_pids=[t.pid for t in new_turns if t.pid], drift=drift, commits=commits, pushes=pushes, launches=launches)
+                new_pids=[t.pid for t in new_turns if t.pid], drift=drift, commits=commits, pushes=pushes, launches=launches, reply=reply)
 
 def print_report(a, sess, st, state, R, trigger, wall, bytes_read):
     T = R['T']
@@ -399,6 +411,8 @@ def print_report(a, sess, st, state, R, trigger, wall, bytes_read):
         print('--- dispatches this wake ---')
         for d in R['disp_records']: print('  %s codex-run %s thread=%s brief=%s -> %s%s thread_state=%s' % (d['ts'], d['verb'], (d['thread'] or '-')[:8], d['brief_path'], d['outcome'], ' FAILED' if d['failed'] else '', d['thread_state']))
     print('--- ledger: %s' % R['ledger_summary'])
+    aw = state.get('awaiting_reply')
+    if aw: print('--- awaiting reply to message %s sent %s (deadline %s, poked=%s)%s' % (aw.get('message_id'), aw.get('sent_ts'), aw.get('deadline'), aw.get('poked'), ' -- REPLY RECEIVED, see observations' if R.get('reply') else ''))
     print('--- in flight (%d) ---' % len(R['inflight']))
     for i in R['inflight']: print('  %s %s launched %s (turn %s) status=%s' % (i['kind'], i.get('id') or i.get('thread', '')[:8], i.get('launched_ts'), i.get('turn_ct'), i.get('status')))
     print('--- findings (%d) ---' % len(R['findings']))
@@ -419,13 +433,18 @@ def print_report(a, sess, st, state, R, trigger, wall, bytes_read):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--target'); ap.add_argument('--state-dir', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'state'))
-    ap.add_argument('--repo'); ap.add_argument('--ledger', default='docs/v10_pending.md'); ap.add_argument('--engine-ref', default='origin/v10-engine')
+    ap.add_argument('--self', dest='self_sel', help='the watchdog session itself (for reply tracking)')
+    ap.add_argument('--repo'); ap.add_argument('--ledger', default=None, help='ledger file relative to the repo (optional)'); ap.add_argument('--engine-ref', default=None, help='a second ref whose commits also count as backing (e.g. the other agent\'s branch)')
+    ap.add_argument('--perm-paths', default='', help='comma-separated repo paths whose commits back a ledger row deletion')
+    ap.add_argument('--row-pattern', default=W.DEFAULT_ROW_PATTERN); ap.add_argument('--reply-min', type=float, default=20.0)
     ap.add_argument('--trigger', default='manual'); ap.add_argument('--quiet-min', type=float, default=10.0); ap.add_argument('--stale-turns', type=int, default=5)
     ap.add_argument('--dead-min', type=float, default=10.0); ap.add_argument('--codex-quiet-min', type=float, default=30.0); ap.add_argument('--turns', type=int, default=6)
     ap.add_argument('--max-digest', type=int, default=30); ap.add_argument('--bootstrap', action='store_true'); ap.add_argument('--replay', type=int, default=0)
     ap.add_argument('--no-state', action='store_true'); ap.add_argument('--json', action='store_true')
     ap.add_argument('--sent'); ap.add_argument('--message-id', default=''); ap.add_argument('--veto'); ap.add_argument('--reason', default='')
     a = ap.parse_args()
+    a.perm_paths = [x.strip() for x in a.perm_paths.split(',') if x.strip()]
+    W.set_row_pattern(a.row_pattern)
     os.makedirs(a.state_dir, exist_ok=True)
     state = load_state(a.state_dir)
     if a.sent or a.veto:
@@ -434,6 +453,11 @@ def main():
             p = state['proposed'].pop(fid, None)
             if a.sent:
                 if p: state['raised'][p['key']] = dict(evidence_hash=p['evidence_hash'], finding_id=fid, ts=W.now_iso(), message_id=a.message_id)
+                if p and p.get('is_poke') and state.get('awaiting_reply'):
+                    state['awaiting_reply']['poked'] = True; state['awaiting_reply']['poke_message_id'] = a.message_id
+                elif p and p.get('asks_reply'):
+                    now_ = time.time()
+                    state['awaiting_reply'] = dict(message_id=a.message_id, sent_ts=W.now_iso(), deadline=W.iso_from_epoch(now_ + 60 * a.reply_min), findings=[fid], poked=False)
                 rewrite_status(a.state_dir, fid, 'sent', a.message_id)
                 log_line(a.state_dir, '%s SENT %s %s' % (W.now_iso(), fid, a.message_id))
             else:
@@ -443,6 +467,7 @@ def main():
     if not a.target: ap.error('--target is required')
     t0 = time.time()
     sess = W.find_session(a.target)
+    self_sess = W.find_session(a.self_sel) if a.self_sel else None
     st = W.read_state(sess)
     path, turns = W.last_turns(sess, n=max(a.turns, a.replay + 2))
     bytes_read = W.LAST_TAIL_BYTES
@@ -451,7 +476,7 @@ def main():
         a.no_state = True
     replay = bool(a.replay)
     if a.bootstrap:
-        R = analyse(a, sess, st, state, turns, 'bootstrap')
+        R = analyse(a, sess, st, state, turns, 'bootstrap', self_sess=self_sess)
         state.update(seen_pids=[t.pid for t in turns if t.pid][-40:], ledger=R['new_ledger'], in_flight=R['inflight'], notified=R['notified'], last_ct=st['ct'], last_cec=st['cec'],
                      bootstrap_ts=W.now_iso(), last_wake_ts=W.now_iso(), dispatch_log=(state.get('dispatch_log') or []))
         save_state(a.state_dir, state)
@@ -462,11 +487,11 @@ def main():
         cands = turns[:-1] + ([turns[-1]] if turns[-1].end_state != 'open' else [])
         latest_done = cands[-1] if cands else None
     if (not replay and latest_done is not None and latest_done.pid in set(state.get('seen_pids', []))
-            and not a.trigger.startswith(('STALE', 'CONTEXT_EXCEEDED', 'manual'))):
+            and not a.trigger.startswith(('STALE', 'STALL', 'REPLY', 'CONTEXT_EXCEEDED', 'manual'))):
         print('WAKE (skipped) trigger=%s: the latest completed turn (%s, ended %s) was already analysed at an earlier wake; nothing new. stay silent' % (a.trigger, (latest_done.pid or '')[:8], latest_done.end_ts))
         log_line(a.state_dir, '%s SKIP trigger=%s ct=%s (turn %s already seen)' % (W.now_iso(), a.trigger, st['ct'], (latest_done.pid or '')[:8]))
         return 0
-    R = analyse(a, sess, st, state, turns, a.trigger, replay=replay)
+    R = analyse(a, sess, st, state, turns, a.trigger, replay=replay, self_sess=self_sess)
     wake_no = state['wake_count'] + 1
     for f in R['findings']:
         state['finding_counter'] += 1; f['id'] = 'F%d' % state['finding_counter']
@@ -478,7 +503,9 @@ def main():
         state['last_ct'] = st['ct']; state['last_cec'] = st['cec']; state['last_wake_ts'] = W.now_iso()
         state['dispatch_log'] = (state.get('dispatch_log') or [])[-300:] + [dict(ts=r['ts'], ct=st['ct'], verb=r['verb'], thread=r['thread'], brief_path=r['brief_path'], inline=r['inline']) for r in R['disp_records']]
         for f in R['findings']:
-            if f['status'] == 'send': state['proposed'][f['id']] = dict(key=f['key'], evidence_hash=f['evidence_hash'], ts=W.now_iso())
+            if f['status'] == 'send': state['proposed'][f['id']] = dict(key=f['key'], evidence_hash=f['evidence_hash'], ts=W.now_iso(), asks_reply=bool(f.get('asks_reply')), is_poke=bool(f.get('is_poke')))
+        if R.get('reply'):
+            state['last_reply'] = R['reply']; state['awaiting_reply'] = None
         append_findings_md(a.state_dir, [dict(id=f['id'], wake=wake_no, wake_ts=W.now_iso(), turn_ct=st['ct'], cls=f['cls'], status=f['status'], message=f['message']) for f in R['findings']])
         log_line(a.state_dir, '%s WAKE %d trigger=%s ct=%s findings=%d send=%d owner_active=%s own_turn=%s wall=%.1fs' % (W.now_iso(), wake_no, a.trigger, st['ct'], len(R['findings']), sum(1 for f in R['findings'] if f['status'] == 'send'), R['owner_active'], R['own_turn'], wall))
         save_state(a.state_dir, state)
