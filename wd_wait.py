@@ -14,6 +14,9 @@ every wake); --follow streams.
   STALL kind=bg id=<taskid> idle_min=<n> reason=<r>  after --stale-after of silence, an in-flight item (from state/state.json)
   STALL kind=codex thread=<id> idle_min=<n> reason=<r>   has shown no progress for --stall-min: no live process and no output
                                                      growth (bg), or no rollout event (codex). One line per item per episode.
+  IDLE idle_min=<n> ct=<n>                           the target stopped: silent past --idle-after with NOTHING running,
+                                                     no work in flight and no reply owed. The wake decides whether that
+                                                     contradicts a standing instruction; the hook only spots the state.
   REPLY_OVERDUE message_id=<id> sent=<ts>            the target has not replied to the watchdog's question within its deadline
   TIMEOUT idle_s=<n> ct=<n>                          --max-wait reached (exit 3)
 
@@ -34,8 +37,9 @@ def emit(line):
     sys.stdout.write(line + '\n'); sys.stdout.flush()
 
 class Watch(object):
-    def __init__(self, sess, state_dir, stale_after, stall_min, self_sess=None):
+    def __init__(self, sess, state_dir, stale_after, stall_min, self_sess=None, idle_after=0):
         self.sess = sess; self.state_dir = state_dir; self.stale_after = stale_after; self.stall_min = stall_min
+        self.idle_after = idle_after; self.idle_reported_for = None
         self.self_sess = self_sess
         self.tpath = W.transcript_path(sess)
         self.kq = select.kqueue(); self.fds = {}
@@ -231,7 +235,25 @@ class Watch(object):
         if self.stale_after and self.last_act and (time.time() - self.last_act / 1000.0) > self.stale_after:
             lines.extend(self.interrogate())
         lines.extend(self.reply_check())
+        lines.extend(self.idle_check())
         return lines
+
+    def idle_check(self):
+        """The target stopped: silent past --idle-after, nothing running, nothing in flight, no reply owed.
+        The hook only reports the STATE; whether it contradicts a standing instruction is the wake's call."""
+        if not self.idle_after or not self.last_act: return []
+        idle = time.time() - self.last_act / 1000.0
+        if idle < self.idle_after: return []
+        if self.idle_reported_for == self.last_act: return []
+        st = self.state_json()
+        if st.get('in_flight'): return []
+        if (st.get('awaiting_reply') or {}) and not (st.get('awaiting_reply') or {}).get('poked'): return []
+        try:
+            if W.live_children(self.sess): return []
+        except Exception:
+            return []
+        self.idle_reported_for = self.last_act
+        return ['IDLE idle_min=%d ct=%s' % (idle / 60.0, self.ct)]
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -240,14 +262,15 @@ def main():
     ap.add_argument('--state-dir', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'state'))
     ap.add_argument('--stale-after', type=int, default=1800, help='seconds of target silence before in-flight work is interrogated (0 = never)')
     ap.add_argument('--stall-min', type=float, default=20.0, help='minutes without progress that make an in-flight item a STALL')
+    ap.add_argument('--idle-after', type=float, default=0, help='seconds of silence with NOTHING running that emit IDLE (0 = never)')
     ap.add_argument('--max-wait', type=int, default=6 * 3600, help='give up after this many seconds (exit 3, prints TIMEOUT); 0 = unbounded')
     ap.add_argument('--backstop', type=float, default=15.0, help='kqueue timeout in seconds (re-check cadence when no events arrive)')
     ap.add_argument('--follow', action='store_true', help='stream events instead of exiting after the first')
     a = ap.parse_args()
     sess = W.find_session(a.target)
     self_sess = W.find_session(a.self_sel) if a.self_sel else None
-    w = Watch(sess, a.state_dir, a.stale_after, a.stall_min, self_sess)
-    log('watching %s (%s) ct=%s cec=%s stale_after=%ss stall_min=%s' % (sess['title'], sess['sessionId'], w.ct, w.cec, a.stale_after, a.stall_min))
+    w = Watch(sess, a.state_dir, a.stale_after, a.stall_min, self_sess, idle_after=a.idle_after)
+    log('watching %s (%s) ct=%s cec=%s stale_after=%ss stall_min=%s idle_after=%ss' % (sess['title'], sess['sessionId'], w.ct, w.cec, a.stale_after, a.stall_min, a.idle_after))
     t0 = time.time()
     while True:
         for line in w.poll(a.backstop):

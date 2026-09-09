@@ -62,7 +62,7 @@ def log_line(d, s):
     with open(os.path.join(d, 'wake.log'), 'a') as f: f.write(s + '\n')
 
 # ----------------------------------------------------------------------------- helpers
-PLAIN_CLASSES = ('task_dead', 'codex_turn_silent', 'reply_overdue', 'context_exceeded', 'ledger_stale_row')
+PLAIN_CLASSES = ('task_dead', 'codex_turn_silent', 'reply_overdue', 'context_exceeded', 'ledger_stale_row', 'idle_no_blocker')
 
 def msg(turn_label, end_ts, quote, checked, result, plain=False):
     """Fixed message form. Turn-derived findings quote the turn; state-derived ones (a dead job, a stale row,
@@ -379,6 +379,24 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
         observations.append('ANNOUNCE HINT%s: "%s" -- at turn end: %d live process(es), %d item(s) from this turn still in flight. If this is a commitment to act, raise it: wd.sh finding announced_nothing_running "<sentence>" check running' % (
             ' [conditional]' if c.get('conditional') else '', W.short(c['sentence'], 160), len(procs), len(this_turn_live)))
 
+    # ---- the target simply stopped, against a standing instruction to continue (owner's rule: report the
+    # contradiction when it stopped without saying why; stay quiet when it named a blocker or a question)
+    if trigger.startswith('IDLE') and a.standing_instruction:
+        gate_hints = []
+        if T:
+            for _ts, _txt in T.assistant_texts: gate_hints += W.owner_gate_hints(_txt)
+        open_rows = len((L.get('rows') or {})) if L.get('exists') and not L.get('dataless') else None
+        idle_min = re.search(r'idle_min=(\d+)', trigger)
+        if gate_hints:
+            observations.append('IDLE, but the turn named a blocker or a question for the owner, so it is waiting rather than stopped: %s' % W.short(gate_hints[0], 160))
+        else:
+            findings.append(finding('idle_no_blocker', 'idle_no_blocker:%s' % (T.pid[:8] if T else ct), dict(ct=ct, open_rows=open_rows),
+                                    "the owner's standing instruction: %s" % a.standing_instruction,
+                                    'live child processes of the session pid(s) %s; in-flight items; the turn text for a named blocker or a question for the owner; %s' % (W.session_pids(sess), a.ledger or 'no ledger configured'),
+                                    'nothing running, nothing in flight, no blocker or question named in the last turn, idle %s min%s' % (
+                                        idle_min.group(1) if idle_min else '?', ('; %d open rows remain in %s' % (open_rows, a.ledger)) if open_rows else ''),
+                                    turn_label, end_ts))
+
     # ---- for the owner: declarations that work is gated on the owner, wherever they appear
     for_owner = []
     if T:
@@ -493,6 +511,7 @@ def main():
     ap.add_argument('--repo'); ap.add_argument('--ledger', default=None, help='ledger file relative to the repo (optional)'); ap.add_argument('--other-ref', default=None, help='a second ref whose commits also count as backing (e.g. the other agent\'s branch)')
     ap.add_argument('--perm-paths', default='', help='comma-separated repo paths whose commits back a ledger row deletion')
     ap.add_argument('--row-pattern', default=W.DEFAULT_ROW_PATTERN); ap.add_argument('--reply-min', type=float, default=20.0)
+    ap.add_argument('--standing-instruction', default='', help="the owner's standing instruction to keep working; an idle turn that names no blocker contradicts it")
     ap.add_argument('--trigger', default='manual'); ap.add_argument('--quiet-min', type=float, default=10.0); ap.add_argument('--stale-turns', type=int, default=5)
     ap.add_argument('--dead-min', type=float, default=10.0); ap.add_argument('--codex-quiet-min', type=float, default=30.0); ap.add_argument('--turns', type=int, default=6)
     ap.add_argument('--max-digest', type=int, default=30); ap.add_argument('--bootstrap', action='store_true'); ap.add_argument('--replay', type=int, default=0)
@@ -560,7 +579,7 @@ def main():
         cands = turns[:-1] + ([turns[-1]] if turns[-1].end_state != 'open' else [])
         latest_done = cands[-1] if cands else None
     if (not replay and latest_done is not None and latest_done.pid in set(state.get('seen_pids', []))
-            and not a.trigger.startswith(('STALE', 'STALL', 'REPLY', 'CONTEXT_EXCEEDED', 'manual'))):
+            and not a.trigger.startswith(('STALE', 'STALL', 'REPLY', 'IDLE', 'CONTEXT_EXCEEDED', 'manual'))):
         print('WAKE (skipped) trigger=%s: the latest completed turn (%s, ended %s) was already analysed at an earlier wake; nothing new. stay silent' % (a.trigger, (latest_done.pid or '')[:8], latest_done.end_ts))
         log_line(a.state_dir, '%s SKIP trigger=%s ct=%s (turn %s already seen)' % (W.now_iso(), a.trigger, st['ct'], (latest_done.pid or '')[:8]))
         return 0
