@@ -9,11 +9,12 @@
   wd_check.py --target SEL check msg-to-watchdog [since]    messages the target sent to the watchdog session since <iso>
   wd_check.py --target SEL check dispatch <thread>          Codex rollout state for a thread id (prefix ok)
   wd_check.py --target SEL check grep <path> <regex>        matching lines of a file (file-vs-file disagreements)
+  wd_check.py --target SEL check csv <path> <col><op><val> [idcol]   rows of a CSV record matching a condition
   wd_check.py --target SEL finding <class> "<quote>" check <kind> [args...]
         runs the check, builds the fixed-form message from ITS output (the model supplies class and quote only),
         applies dedupe and the quiet rule, logs it to findings.md and proposes it. Then: wd.sh sent Fn <message_id>.
 The model does the reading; this does the measuring and the wording. It cannot emit a result it did not compute."""
-import os, sys, json, argparse, glob, time
+import os, sys, json, argparse, glob, time, collections
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wd_lib as W
 import wd_wake as WK
@@ -62,6 +63,28 @@ def check(a, sess, kind, args, state):
         msgs = [(ts, m) for t in turns for ts, m in W.messages_to_watchdog(t, me) if (ts or '') > since]
         checked = "send_message tool calls to session %s in the target's last %d turns since %s" % (me, len(turns), since or 'start of window')
         return checked, ('%d message(s): %s' % (len(msgs), '; '.join('%s "%s"' % ((ts or '')[11:19], W.short(m, 80)) for ts, m in msgs)) if msgs else 'none'), dict(count=len(msgs))
+    if kind == 'csv':
+        rp = WK.resolve_path(args[0], repo); expr = args[1]; idcol = args[2] if len(args) > 2 else None
+        checked = 'rows of %s matching %s (file mtime %s)' % (rp, expr, W.mtime_iso(rp))
+        if not os.path.exists(rp): return checked, 'no such file', dict(exists=False)
+        import csv as _csv, re as _re
+        m = _re.match(r'\s*([\w.]+)\s*(==|!=|>=|<=|>|<)\s*(.+?)\s*$', expr)
+        if not m: raise SystemExit('csv check: expression must be <column><op><value>, e.g. applied_d2!=0')
+        col, op, val = m.group(1), m.group(2), m.group(3)
+        rows = list(_csv.DictReader(open(rp, errors='replace')))
+        if rows and col not in rows[0]: return checked, 'no column %r in the file (columns: %s)' % (col, ', '.join(list(rows[0])[:8]) + '…'), dict(column_missing=True)
+        def num(x):
+            try: return float(x)
+            except (TypeError, ValueError): return None
+        def keep(r):
+            a, b = num(r.get(col)), num(val)
+            if a is None or b is None:
+                return (r.get(col) == val) if op == '==' else ((r.get(col) != val) if op == '!=' else False)
+            return {'==': a == b, '!=': a != b, '>': a > b, '<': a < b, '>=': a >= b, '<=': a <= b}[op]
+        hit = [r for r in rows if keep(r)]
+        ids = ('; %s = %s' % (idcol, ', '.join(str(r.get(idcol)) for r in hit[:12]))) if idcol and hit else ''
+        vals = collections.Counter(r.get(col) for r in hit)
+        return checked, '%d of %d rows match %s (values %s)%s' % (len(hit), len(rows), expr, dict(vals.most_common(5)), ids), dict(matched=len(hit), total=len(rows))
     if kind == 'grep':
         rp = WK.resolve_path(args[0], repo); pat = args[1]
         checked = 'grep -n -i %r %s (mtime %s)' % (pat, rp, W.mtime_iso(rp))
