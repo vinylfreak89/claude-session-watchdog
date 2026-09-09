@@ -174,6 +174,24 @@ gets skimmed too.
 
 The file system tells you what is true right now. The open turn tells you whether anyone already knows.
 
+## Do not relay a result the target is still adjudicating
+
+Reading a finished job's output file the moment it exits feels like being ahead. It is not: the target has the
+context to know whether its own instrument was sound, and it routinely finds within minutes that the run was a
+no-op, measured the wrong population, or was blind to half the phenomenon. Relaying the raw numbers first means
+the owner gets a result and then a retraction, and each retraction costs more trust than the early number ever
+bought.
+
+Measured, in one night: a box join whose denominator gave away that it measured unboxed picture; a census that
+printed a header and no rows because the walk was never called; and a census that tested for a leading blank run
+when most partial rows on that capture carry the blanking mid-row. All three were caught by the target, two of
+them by their own denominators, within minutes of finishing. Numbers from the first and third reached the owner
+through me before that happened.
+
+So a job's output file is for CHECKING the target's account, never for getting ahead of it. Relay a measurement
+once the target has said what it means, or label it unambiguously as unadjudicated and say what would falsify it.
+The exception is a job that failed or died, which is a fact about the world and yours to report immediately.
+
 ## Verifying a number is not verifying what it means
 
 You can reproduce a figure exactly and still pass on a false conclusion, because the figure and the claim it is
