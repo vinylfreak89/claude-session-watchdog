@@ -9,6 +9,7 @@
 #   wd.sh queue add "<text>"        hold an owner item until the next wake (add --urgent to send at once)
 #   wd.sh queue list | clear <id>   show held items; clear them once delivered in a message
 #   wd.sh due                       what is undelivered (owner items + findings) and whether the target is receptive
+#   wd.sh owe add|list|ungate|done   decisions the owner owes, each READY or GATED behind unfinished target work
 #   wd.sh status                    one-screen state summary
 #   wd.sh check <kind> [args]       verify one thing now (running | commit <sha> | file <path> [since] | task <id> | row <ID> | msg-to-watchdog [since] | dispatch <thread> | tree [path] | grep <path> <regex> | csv <path> <col><op><val> [idcol])
 #   wd.sh finding <class> "<quote>" check <kind> [args]   build a fixed-form finding from a check the model chose; the result text is the script's
@@ -53,6 +54,15 @@ case "$cmd" in
             *) echo "wd.sh queue add [--urgent] \"<owner's words>\" | list | clear <message_id>" >&2; exit 2 ;;
           esac ;;
   due)    exec $PY "$D/wd_wake.py" --state-dir "$S" --target "$TARGET" --due ;;
+  owe)    sub=$1; shift
+          case "$sub" in
+            add)    g=""; [ "$1" = "--gated-on" ] && { g="$2"; shift 2; }
+                    exec $PY "$D/wd_wake.py" --state-dir "$S" --owe-add "$*" --gated-on "$g" ;;
+            list)   exec $PY "$D/wd_wake.py" --state-dir "$S" --owe-list ;;
+            ungate) exec $PY "$D/wd_wake.py" --state-dir "$S" --owe-ungate "$1" ;;
+            done)   exec $PY "$D/wd_wake.py" --state-dir "$S" --owe-clear "$1" ;;
+            *) echo 'wd.sh owe add [--gated-on "<what must finish first>"] "<decision>" | list | ungate <id> | done <id>' >&2; exit 2 ;;
+          esac ;;
   status) $PY - "$S" <<'PYS'
 import json,sys,os
 p=os.path.join(sys.argv[1],'state.json'); d=json.load(open(p)) if os.path.exists(p) else {}

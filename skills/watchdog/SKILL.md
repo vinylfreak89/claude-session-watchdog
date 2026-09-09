@@ -59,6 +59,17 @@ The exception is an item that changes what the target is doing RIGHT NOW — a w
 working from, or a destructive risk. Queue that with `--urgent`, send it immediately, and say why it could not
 wait. Nothing else earns an immediate send.
 
+## A decision the owner cannot yet make is NOT waiting on him
+
+Track every decision he owes with `wd.sh owe add`, and record what it is GATED behind whenever the target has
+work outstanding that the decision depends on. `wd.sh owe list` splits them: READY, which he can answer now, and
+GATED, which he must not be shown as pending. Ungate one with `wd.sh owe ungate <id>` when the work it waited on
+lands, and clear it with `wd.sh owe done <id>` when he answers.
+
+Putting a gated decision in front of him is worse than silence: he cannot answer it without the measurement that
+is missing, so it reads as the work being blocked on him when it is blocked on the target. Both of the decisions
+this loop carried for an hour were gated, and neither was labelled that way until he said so himself.
+
 ## FOR THE OWNER — the state channel
 
 The report's `=== FOR THE OWNER ===` section holds every declaration that work is gated on the owner: sentences

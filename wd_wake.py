@@ -523,11 +523,32 @@ def main():
     ap.add_argument('--sent'); ap.add_argument('--message-id', default=''); ap.add_argument('--veto'); ap.add_argument('--reason', default='')
     ap.add_argument('--queue-add'); ap.add_argument('--queue-urgent', action='store_true'); ap.add_argument('--queue-list', action='store_true'); ap.add_argument('--queue-clear')
     ap.add_argument('--due', action='store_true')
+    ap.add_argument('--owe-add'); ap.add_argument('--gated-on', default=''); ap.add_argument('--owe-list', action='store_true')
+    ap.add_argument('--owe-clear'); ap.add_argument('--owe-ungate')
     a = ap.parse_args()
     a.perm_paths = [x.strip() for x in a.perm_paths.split(',') if x.strip()]
     W.set_row_pattern(a.row_pattern)
     os.makedirs(a.state_dir, exist_ok=True)
     state = load_state(a.state_dir)
+    if a.owe_add or a.owe_list or a.owe_clear or a.owe_ungate:
+        # Decisions the OWNER owes. Each is READY or GATED behind work the target has not finished: a decision
+        # he cannot sensibly make yet must never be presented to him as if it were waiting on him.
+        owe = state.setdefault('owner_decisions', {})
+        if a.owe_add:
+            oid = 'D%d' % (len(owe) + 1)
+            owe[oid] = dict(id=oid, ts=W.now_iso(), text=a.owe_add, gated_on=a.gated_on or None)
+            save_state(a.state_dir, state); print('recorded %s%s' % (oid, (' GATED behind: ' + a.gated_on) if a.gated_on else ' READY'))
+        if a.owe_ungate:
+            if a.owe_ungate in owe: owe[a.owe_ungate]['gated_on'] = None; save_state(a.state_dir, state); print('%s is now READY' % a.owe_ungate)
+        if a.owe_clear:
+            if owe.pop(a.owe_clear, None) is not None: save_state(a.state_dir, state); print('%s answered and cleared' % a.owe_clear)
+        ready = [d for d in owe.values() if not d.get('gated_on')]
+        gated = [d for d in owe.values() if d.get('gated_on')]
+        print('READY for the owner — he can answer these now: %d' % len(ready))
+        for d in ready: print('  %s %s' % (d['id'], W.short(d['text'], 220)))
+        print('GATED — do not put these to him yet: %d' % len(gated))
+        for d in gated: print('  %s %s\n      gated behind: %s' % (d['id'], W.short(d['text'], 200), d['gated_on']))
+        return 0
     if a.due:
         if not a.target: ap.error('--due needs --target')
         sess = W.find_session(a.target); st = W.read_state(sess)
