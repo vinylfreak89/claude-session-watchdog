@@ -382,13 +382,15 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
     # ---- the target simply stopped, against a standing instruction to continue (owner's rule: report the
     # contradiction when it stopped without saying why; stay quiet when it named a blocker or a question)
     if trigger.startswith('IDLE') and a.standing_instruction:
+        # a question to the owner from ANY recent turn keeps the session legitimately waiting, not stopped:
+        # looking only at the last turn missed one asked two turns earlier and called a waiting session idle
         gate_hints = []
-        if T:
-            for _ts, _txt in T.assistant_texts: gate_hints += W.owner_gate_hints(_txt)
+        for _t in turns[-4:]:
+            for _ts, _txt in _t.assistant_texts: gate_hints += W.owner_gate_hints(_txt)
         open_rows = len((L.get('rows') or {})) if L.get('exists') and not L.get('dataless') else None
         idle_min = re.search(r'idle_min=(\d+)', trigger)
         if gate_hints:
-            observations.append('IDLE, but the turn named a blocker or a question for the owner, so it is waiting rather than stopped: %s' % W.short(gate_hints[0], 160))
+            observations.append('IDLE, but a recent turn named a blocker or a question for the owner, so it is waiting rather than stopped: %s' % W.short(gate_hints[0], 160))
         else:
             findings.append(finding('idle_no_blocker', 'idle_no_blocker:%s' % (T.pid[:8] if T else ct), dict(ct=ct, open_rows=open_rows),
                                     "the owner's standing instruction: %s" % a.standing_instruction,
