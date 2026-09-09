@@ -131,5 +131,7 @@ adds ~0.5 s.
 - A `codex-run say` dispatch resolves its thread by chat, so its thread id (and rollout) is unknown to the checks.
 - `push_drift` needs the network for `ls-remote`; without it the check falls back to the last-fetched remote ref
   and says so in the evidence.
+- A turn continued by a queued message after its final text (same `promptId`) is reported once, at its first
+  end; the continuation is folded into the next wake's view of the transcript.
 - Owner-present stretches are mostly silent by rule 5; the tool earns its keep on autonomous stretches and on
   staleness. Interrupted-turn counting remains uncontrolled (unknown 1) but does not affect the triggers.

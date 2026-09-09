@@ -175,6 +175,7 @@ def analyse(a, sess, st, state, turns, trigger, replay=False):
         rec = dict(ts=d['ts'], verb=d['verb'], thread=d['thread'], brief_path=d['brief_path'], turn_ct=ct, task_id=(d['background'] or {}).get('task_id'),
                    output_file=(d['background'] or {}).get('output_file'), inline=d['inline'])
         outcome, failed, tail = 'unknown', False, ''
+        ts_ = {}
         if d['background']:
             ts_ = W.task_output_status(d['background']['output_file'])
             if ts_.get('exit_code') is not None:
@@ -203,7 +204,7 @@ def analyse(a, sess, st, state, turns, trigger, replay=False):
         elif thread_state and thread_state.get('found') and d['verb'] in ('task', 'send', 'queue') and rec['task_id']:
             age = now - (W.epoch_from_iso(d['ts']) or now)
             ls_ = thread_state.get('last_started')
-            if age > 120 and (not ls_ or ls_ < d['ts']) and not ts_.get('exit_code') is not None:
+            if age > 120 and (not ls_ or ls_ < d['ts']) and ts_.get('exit_code') is None:
                 findings.append(finding('dispatch_no_turn', 'dispatch_no_turn:%s' % rec['task_id'], dict(last_started=ls_, dispatched=d['ts']),
                                         dc['sentence'] if dc else quote, 'Codex rollout for thread %s (%s)' % (d['thread'][:8], thread_state['rollout']),
                                         'no task_started after the dispatch at %s (last task_started %s, last task_complete %s); codex-run task %s still without an exit marker' % (d['ts'], ls_, thread_state.get('last_complete'), rec['task_id']), turn_label, end_ts))
