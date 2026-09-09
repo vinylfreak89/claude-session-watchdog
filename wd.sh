@@ -1,22 +1,44 @@
 #!/bin/bash
-# wd.sh -- thin wrapper so the watchdog session types short, literal commands.
-#   wd.sh wait  <target> [extra wd_wait args]    block until the target ends a turn / goes stale (prints one event line)
-#   wd.sh wake  <target> [--trigger 'LINE'] ...  analyse the latest completed turn and print the report
-#   wd.sh boot  <target>                         bootstrap state (first run only)
-#   wd.sh sent  F1,F2 [message_id]               record that findings were sent
-#   wd.sh veto  F3 "reason"                      record a veto
-#   wd.sh cost  <self>                           append this session's per-turn token cost to state/cost.tsv
-# State lives in /private/tmp/bm-meta-analysis/watchdog/state (override with WD_STATE).
-D=/private/tmp/bm-meta-analysis/watchdog
-S=${WD_STATE:-$D/state}
+# wd.sh -- the watchdog session's commands, driven by config.json beside this file (see config.example.json).
+#   wd.sh boot                      bootstrap state (first run only)
+#   wd.sh wait [extra args]         the hook: block until the target ends a turn, work stalls, or a reply is overdue (one event line)
+#   wd.sh wake --trigger '<line>'   analyse the latest completed turn / the stall / the reply; print the report
+#   wd.sh sent F1,F2 <message_id>   record that findings were sent (opens the reply window when one asked for a reply)
+#   wd.sh veto F3 "reason"          record a veto
+#   wd.sh cost                      append this session's per-turn token cost to state/cost.tsv
+#   wd.sh status                    one-screen state summary
+# Overrides: WD_STATE (state dir), WD_CONFIG (config file). Everything is read-only except the state dir.
+D="$(cd "$(dirname "$0")" && pwd)"
+S="${WD_STATE:-$D/state}"
+C="${WD_CONFIG:-$D/config.json}"
 PY=/usr/bin/python3
+if [ ! -f "$C" ]; then echo "no config: copy $D/config.example.json to $C and fill in target/self" >&2; exit 2; fi
+cfg() { $PY -c "import json,sys; d=json.load(open(sys.argv[1])); v=d.get(sys.argv[2], sys.argv[3] if len(sys.argv)>3 else ''); print(','.join(v) if isinstance(v,list) else ('' if v is None else v))" "$C" "$@"; }
+TARGET="$(cfg target)"; SELF="$(cfg self)"
+if [ -z "$TARGET" ] || [ "${TARGET#<}" != "$TARGET" ]; then echo "config.json: 'target' is not set" >&2; exit 2; fi
+WAKE_ARGS=(--target "$TARGET" --state-dir "$S" --quiet-min "$(cfg quiet_min 10)" --stale-turns "$(cfg stale_turns 5)" --dead-min "$(cfg stall_min 20)" --codex-quiet-min "$(cfg stall_min 20)" --reply-min "$(cfg reply_min 20)" --row-pattern "$(cfg row_pattern '[A-Z]{1,2}\d{1,3}')")
+[ -n "$SELF" ] && [ "${SELF#<}" = "$SELF" ] && WAKE_ARGS+=(--self "$SELF")
+[ -n "$(cfg repo)" ] && WAKE_ARGS+=(--repo "$(cfg repo)")
+[ -n "$(cfg ledger)" ] && WAKE_ARGS+=(--ledger "$(cfg ledger)")
+[ -n "$(cfg engine_ref)" ] && WAKE_ARGS+=(--engine-ref "$(cfg engine_ref)")
+[ -n "$(cfg perm_paths)" ] && WAKE_ARGS+=(--perm-paths "$(cfg perm_paths)")
+WAIT_ARGS=(--target "$TARGET" --state-dir "$S" --stale-after "$(cfg stale_after_s 1800)" --stall-min "$(cfg stall_min 20)")
+[ -n "$SELF" ] && [ "${SELF#<}" = "$SELF" ] && WAIT_ARGS+=(--self "$SELF")
 cmd=$1; shift
 case "$cmd" in
-  wait) t=$1; shift; exec $PY $D/wd_wait.py --target "$t" --state-dir "$S" "$@" ;;
-  wake) t=$1; shift; exec $PY $D/wd_wake.py --target "$t" --state-dir "$S" "$@" ;;
-  boot) t=$1; shift; exec $PY $D/wd_wake.py --target "$t" --state-dir "$S" --bootstrap "$@" ;;
-  sent) ids=$1; mid=$2; exec $PY $D/wd_wake.py --state-dir "$S" --sent "$ids" --message-id "${mid:-}" ;;
-  veto) id=$1; shift; exec $PY $D/wd_wake.py --state-dir "$S" --veto "$id" --reason "$*" ;;
-  cost) t=$1; shift; exec $PY $D/wd_cost.py --self "$t" --state-dir "$S" "$@" ;;
+  boot)   exec $PY "$D/wd_wake.py" "${WAKE_ARGS[@]}" --bootstrap "$@" ;;
+  wait)   exec $PY "$D/wd_wait.py" "${WAIT_ARGS[@]}" "$@" ;;
+  wake)   exec $PY "$D/wd_wake.py" "${WAKE_ARGS[@]}" "$@" ;;
+  sent)   ids=$1; mid=$2; exec $PY "$D/wd_wake.py" --state-dir "$S" --reply-min "$(cfg reply_min 20)" --sent "$ids" --message-id "${mid:-}" ;;
+  veto)   id=$1; shift; exec $PY "$D/wd_wake.py" --state-dir "$S" --veto "$id" --reason "$*" ;;
+  cost)   [ -n "$SELF" ] || { echo "config.json: 'self' is not set" >&2; exit 2; }; exec $PY "$D/wd_cost.py" --self "$SELF" --state-dir "$S" "$@" ;;
+  status) $PY - "$S" <<'PYS'
+import json,sys,os
+p=os.path.join(sys.argv[1],'state.json'); d=json.load(open(p)) if os.path.exists(p) else {}
+print('wakes', d.get('wake_count'), 'last', d.get('last_wake_ts'), 'last_ct', d.get('last_ct'), 'findings', d.get('finding_counter'), 'raised', len(d.get('raised') or {}), 'proposed(unmarked)', list((d.get('proposed') or {}).keys()))
+print('in_flight:', [(i.get('kind'), i.get('id') or (i.get('thread') or '')[:8], i.get('launched_ts')) for i in d.get('in_flight') or []])
+print('awaiting_reply:', d.get('awaiting_reply')); print('last_reply:', (d.get('last_reply') or {}).get('ts'))
+PYS
+  ;;
   *) sed -n '2,10p' "$0"; exit 2 ;;
 esac
