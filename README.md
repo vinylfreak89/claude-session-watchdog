@@ -30,7 +30,7 @@ watchdog session needs the cross-session tools (`mcp__ccd_session_mgmt__send_mes
 
 1. `cp config.example.json config.json`; set `target` (the working session's title or `local_…` id) and `self`
    (the watchdog session's own id, from `get_session self`). Optional: `repo` (defaults to the target's cwd),
-   `ledger` (a markdown file with `| ID | … |` rows that are deleted when done), `engine_ref` (a second branch
+   `ledger` (a markdown file with `| ID | … |` rows that are deleted when done), `other_ref` (a second branch
    whose commits count as backing), `perm_paths` (files whose commits back a ledger row deletion), thresholds.
 2. Open a new session, paste `WATCHDOG_SESSION.md` as its instruction, and let it run `wd.sh boot` and arm
    `wd.sh wait`.
@@ -80,7 +80,7 @@ redirect targets, task notifications; from the assistant's own text: sentences w
 | `file_claim_missing` / `file_claim_stale` | text says wrote/saved/rendered `<path>` (path after the verb) and the file is missing or older than the turn |
 | `ledger_close_not_applied` | text says row X deleted/closed; X is still in the ledger |
 | `ledger_close_unbacked` | a row vanished and no commit since the last snapshot mentions it, touches `perm_paths`, or touches the row's own paths |
-| `ledger_stale_row` | a row unchanged for `stale_turns` turns while a dispatch whose brief names it went out; evidence lists `git log` for its paths on HEAD and `engine_ref` |
+| `ledger_stale_row` | a row unchanged for `stale_turns` turns while a dispatch whose brief names it went out; evidence lists `git log` for its paths on HEAD and `other_ref` |
 | `announced_nothing_running` | the final text announces an unconditional next action and nothing launched in that turn is alive |
 | `task_dead` / `codex_turn_silent` | in-flight work with no exit marker, no notification, no live process / no rollout event |
 | `reply_overdue` | the one poke |
@@ -110,7 +110,7 @@ acceptance number. Cost per wake is in `state/wake.log` (script time, transcript
 
 ## Known limits
 
-- Premise errors, wrong measurements, bad instruments, and engine correctness are out of scope by design.
+- Premise errors, wrong measurements, bad instruments, and whether a change is correct are out of scope by design.
 - Claim extraction is pattern-based; the session's veto is the only judgment layer, and it may only remove.
 - The ledger snapshot begins at `boot`; staleness counts turns from then.
 - A `codex-run say` dispatch resolves its thread by chat, so its rollout is unknown to the checks.

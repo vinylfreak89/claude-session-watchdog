@@ -4,7 +4,7 @@
   "self": "<this watchdog session's own id, from get_session self>",
   "repo": null,
   "ledger": null,
-  "engine_ref": null,
+  "other_ref": null,
   "perm_paths": [],
   "row_pattern": "[A-Z]{1,2}\\d{1,3}",
   "quiet_min": 10,

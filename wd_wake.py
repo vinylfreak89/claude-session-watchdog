@@ -283,11 +283,11 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
             paths = token_paths(r.get('tokens', []), repo, files)
             since_ts = r.get('last_changed_ts') or since
             commits_head = W.git_log_paths_since(repo, since_ts, paths) if paths else []
-            commits_eng = W.git_log_paths_since(repo, since_ts, paths, ref=a.engine_ref) if paths and a.engine_ref else []
+            commits_eng = W.git_log_paths_since(repo, since_ts, paths, ref=a.other_ref) if paths and a.other_ref else []
             findings.append(finding('ledger_stale_row', 'ledger_stale_row:%s:%s' % (rid, r['hash']), dict(row=r['hash'], mentions=len(mentions), commits=len(commits_head) + len(commits_eng)),
                                     'row %s state: %s' % (rid, W.short(r['state'], 120)),
-                                    'row unchanged since ct %s (%s); dispatches since that mention it: %s; git log --since=%s -- %s on HEAD and %s' % (lc, since_ts, '; '.join(mentions[:3]), since_ts, ' '.join(paths) or '(no paths)', a.engine_ref or '-'),
-                                    '%d turns, %d matching dispatch(es), commits touching its paths: HEAD %s, %s %s' % (ct - lc, len(mentions), commits_head[:3] or 'none', a.engine_ref or '-', commits_eng[:3] or 'none'), turn_label, end_ts))
+                                    'row unchanged since ct %s (%s); dispatches since that mention it: %s; git log --since=%s -- %s on HEAD and %s' % (lc, since_ts, '; '.join(mentions[:3]), since_ts, ' '.join(paths) or '(no paths)', a.other_ref or '-'),
+                                    '%d turns, %d matching dispatch(es), commits touching its paths: HEAD %s, %s %s' % (ct - lc, len(mentions), commits_head[:3] or 'none', a.other_ref or '-', commits_eng[:3] or 'none'), turn_label, end_ts))
         new_ledger = dict(rows=snap_rows, order=L['order'], sections=L['sections'], snapshot_ts=W.now_iso(), snapshot_ct=ct, mtime=L['mtime'], reconciled=L.get('reconciled'))
     else:
         new_ledger = prev
@@ -442,7 +442,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--target'); ap.add_argument('--state-dir', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'state'))
     ap.add_argument('--self', dest='self_sel', help='the watchdog session itself (for reply tracking)')
-    ap.add_argument('--repo'); ap.add_argument('--ledger', default=None, help='ledger file relative to the repo (optional)'); ap.add_argument('--engine-ref', default=None, help='a second ref whose commits also count as backing (e.g. the other agent\'s branch)')
+    ap.add_argument('--repo'); ap.add_argument('--ledger', default=None, help='ledger file relative to the repo (optional)'); ap.add_argument('--other-ref', default=None, help='a second ref whose commits also count as backing (e.g. the other agent\'s branch)')
     ap.add_argument('--perm-paths', default='', help='comma-separated repo paths whose commits back a ledger row deletion')
     ap.add_argument('--row-pattern', default=W.DEFAULT_ROW_PATTERN); ap.add_argument('--reply-min', type=float, default=20.0)
     ap.add_argument('--trigger', default='manual'); ap.add_argument('--quiet-min', type=float, default=10.0); ap.add_argument('--stale-turns', type=int, default=5)

@@ -1,37 +1,35 @@
 # Brief: build the orchestration watchdog session
 
-Executor: a fresh session (Claude or Codex). You do not need the physical-signal
-project context. You are building a tool, not doing registration work.
+Executor: a fresh session. You do not need the watched project's context. You are
+building a tool, not doing the project's work.
 
 ## What this is
 
-The blackmagic-usb-mac project runs two working agents and an owner. The owner's
-largest measured correction class is not wrong code — it is **missing execution
-and coordination**: work announced and not started, dispatches reported as sent
-that exited non-zero, background jobs dead for a day, commits made and not
-pushed, ledger rows stale for turns. Hand-coded over the record: 14 of 59 owner
-messages in one session, 9 of 99 in another.
+A long-running project session run by one or two working agents and an owner. The
+owner's largest measured correction class is not wrong code — it is **missing
+execution and coordination**: work announced and not started, dispatches reported
+as sent that exited non-zero, background jobs dead for a day, commits made and not
+pushed, ledger rows stale for turns.
 
-`docs/v10_pending.md` in that repo is the orchestration ledger — the queue, the
-per-item state, the dependency edges, and the items gated on the owner. Today it
-is reconciled by hand by the working session, which is also the thing that
-forgets.
+The project's orchestration ledger — a markdown file of open items: the queue, the
+per-item state, the dependency edges, the items gated on the owner — is reconciled
+by hand by the working session, which is also the thing that forgets.
 
 **You are building a separate, long-lived session that watches the working
 session and tells it what the ledger and the world disagree about.**
 
 ## Hard boundaries — these define the tool
 
-1. **Read-only on everything.** You never edit `v10_pending.md`, the repo, or any
+1. **Read-only on everything.** You never edit the ledger, the repo, or any
    project file. You tell the working session what to add, change or delete. It
    is the single writer.
-2. **You never adjudicate a technical claim.** You cannot know whether a comb
-   mask is correct. You can know whether a row claiming it was fixed has a
-   commit touching that file. Anything requiring project judgment is out of
-   scope and stays with the owner.
+2. **You never adjudicate a technical claim.** You cannot know whether an
+   algorithm change is correct. You can know whether a row claiming it was fixed
+   has a commit touching that file. Anything requiring project judgment is out
+   of scope and stays with the owner.
 3. **You never assert a fact you did not verify yourself.** Quote with
-   provenance: "row A15 says production unchanged after three turns; no commit
-   since <sha> touches src/field_registration/" — never "A15 is stalled."
+   provenance: "row X says unchanged after three turns; no commit since <sha>
+   touches <path>" — never "X is stalled."
 4. **You never tell it to keep going.** Measured externally: allowing repeated
    submissions raised specification-violating passage 33%→38% while legitimate
    passage rose 80%→83%. A push to continue manufactures invalid work. You
@@ -52,7 +50,7 @@ GLOB the two middle directories; do not hardcode them. Fields that matter:
 |---|---|---|
 | `completedTurns` | monotonic per-turn counter | a session reading 32 had had ~32 turns |
 | `lastActivityAt` | epoch ms | — |
-| `contextExceededCount` | count of HARD context failures (prompt rejected). NOT compaction: one session compacted 11-13 times with this at 1 | its single event matched one `"Prompt is too long"` record at 2026-09-02T08:48:45Z and the owner's message 7 min later |
+| `contextExceededCount` | count of HARD context failures (prompt rejected). NOT compaction: one session compacted 11-13 times with this at 1 | its single event matched one `"Prompt is too long"` record and the owner's message 7 min later |
 | `cliSessionId` | -> `~/.claude/projects/<slug>/<cliSessionId>.jsonl`, the full transcript | — |
 
 `isRunning` from `list_sessions` is **app-computed and not on disk**, and it is
@@ -113,8 +111,8 @@ a checkable referent, and verify each against the world:
 Message form:
 
     [watchdog] <claim, quoted, with turn/time> | <what I checked> | <result>
-    e.g. [watchdog] turn 761 said "burning the engine's record into it";
-         no task running, no file under /private/tmp/... modified since 17:41Z.
+    e.g. [watchdog] turn 761 said "writing the report now";
+         no task running, no file under <output dir> modified since 17:41Z.
 
 ## Acceptance — how the owner knows it works
 
@@ -127,6 +125,6 @@ Report cost per wake separately.
 
 ## Out of scope, explicitly
 
-Premise errors, wrong measurements, bad instruments, and whether an engine
-change is correct. Those are the classes that cost this project the most days
-and no watchdog addresses them. Do not attempt them and do not imply coverage.
+Premise errors, wrong measurements, bad instruments, and whether a change is
+correct. Those are the classes that cost this project the most days and no
+watchdog addresses them. Do not attempt them and do not imply coverage.

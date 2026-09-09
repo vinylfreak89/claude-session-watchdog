@@ -20,7 +20,7 @@ WAKE_ARGS=(--target "$TARGET" --state-dir "$S" --quiet-min "$(cfg quiet_min 10)"
 [ -n "$SELF" ] && [ "${SELF#<}" = "$SELF" ] && WAKE_ARGS+=(--self "$SELF")
 [ -n "$(cfg repo)" ] && WAKE_ARGS+=(--repo "$(cfg repo)")
 [ -n "$(cfg ledger)" ] && WAKE_ARGS+=(--ledger "$(cfg ledger)")
-[ -n "$(cfg engine_ref)" ] && WAKE_ARGS+=(--engine-ref "$(cfg engine_ref)")
+[ -n "$(cfg other_ref)" ] && WAKE_ARGS+=(--other-ref "$(cfg other_ref)")
 [ -n "$(cfg perm_paths)" ] && WAKE_ARGS+=(--perm-paths "$(cfg perm_paths)")
 WAIT_ARGS=(--target "$TARGET" --state-dir "$S" --stale-after "$(cfg stale_after_s 1800)" --stall-min "$(cfg stall_min 20)")
 [ -n "$SELF" ] && [ "${SELF#<}" = "$SELF" ] && WAIT_ARGS+=(--self "$SELF")
