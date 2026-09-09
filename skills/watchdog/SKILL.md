@@ -160,6 +160,20 @@ message, or it will count one ruling twice and read agreement into a single sour
 
 Verified provenance is what converts a claim into something it can act on without waking anyone.
 
+## Read the OPEN turn before sending, not just the last completed one
+
+The rule above says read the last completed turn before anything goes out. That is not sufficient. A finding is
+usually about something the target did seconds ago, and it is often already mid-fix in the turn that is still
+open. Check the open turn's assistant texts too — the wake skips them, so this is a deliberate extra step — and
+if its first line already names what you were going to report, say nothing.
+
+Measured: a genuinely true finding about an uncommitted fix was sent 75 seconds after the target had named the
+same defect itself and 40 seconds before its commit landed. Correct, verified, and pure noise. The cost is not
+just tokens: a stream of findings it has already handled trains it to skim you, and then the one that matters
+gets skimmed too.
+
+The file system tells you what is true right now. The open turn tells you whether anyone already knows.
+
 ## Grade a finding after the target answers it
 
 `wd.sh outcome <id> accepted|partly|wrong "<why>"` writes the verdict into the acceptance log. A finding the
