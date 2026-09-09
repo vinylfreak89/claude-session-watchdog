@@ -174,6 +174,21 @@ gets skimmed too.
 
 The file system tells you what is true right now. The open turn tells you whether anyone already knows.
 
+## Verifying a number is not verifying what it means
+
+You can reproduce a figure exactly and still pass on a false conclusion, because the figure and the claim it is
+offered for are different things. Ask what the metric is STRUCTURALLY UNABLE to see before you repeat what it is
+said to show.
+
+Measured: the target reported the harness stable because no reading was more than one row from the mode, and I
+reproduced that from the CSV myself before relaying it. Both true. But the wrong readings sat AT the mode, so a
+mode-based metric could never have detected them, and the raw rows later showed the harness wrong in every unit
+of the passage. Stable and correct are different properties, and the instrument answered only the first.
+
+The tell is a metric defined in terms of the thing it is being used to validate — a spread around a centre used
+to argue the centre is right, a pass rate computed from the rule being tested, a diff against a reference the
+same code produced. When you see one, say what it cannot see, and ask for the measurement that could.
+
 ## Grade a finding after the target answers it
 
 `wd.sh outcome <id> accepted|partly|wrong "<why>"` writes the verdict into the acceptance log. A finding the
