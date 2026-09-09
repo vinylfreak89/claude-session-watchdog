@@ -5,6 +5,8 @@ Event-driven: kqueue vnode events on the session-state directory and on the tran
 15 s re-check backstop (liveness only; the events are what wake it). Prints ONE line per event:
 
   TURN ct=765->766 ts=<utc>                 completedTurns incremented (normal turn end)
+  TURN_END ts=<utc> ct=766->766 opener=peer  the transcript shows the turn ended (final assistant text, no tool call pending)
+                                            but the counter did not move within 6 s -- seen for peer-opened (cross-session) turns
   INTERRUPTED ts=<utc> ct=766->766          '[Request interrupted by user' marker appended (ct folded if it moved within 6 s)
   API_ERROR ts=<utc> ct=... text=<head>     assistant record with isApiErrorMessage appended
   CONTEXT_EXCEEDED cec=1->2 ct=...          contextExceededCount incremented (hard API-edge failure)
@@ -36,6 +38,8 @@ class Watch(object):
         self.ct, self.cec, self.last_act = st['ct'], st['cec'], st['lastActivityAt']
         self.pos = os.path.getsize(self.tpath); self.partial = b''
         self.stale_reported_for = None
+        self.prev_pid = self._last_pid(); self.cur_opener_kind = None; self.pending_tool = False
+        self.transcript_turn_ended = False   # a TURN_END was emitted for the current transcript turn; swallow a late counter bump
 
     def _arm(self, path, tag):
         flags = getattr(os, 'O_EVTONLY', os.O_RDONLY)
@@ -47,6 +51,13 @@ class Watch(object):
                            fflags=select.KQ_NOTE_WRITE | select.KQ_NOTE_EXTEND | select.KQ_NOTE_ATTRIB | select.KQ_NOTE_RENAME | select.KQ_NOTE_DELETE)
         self.kq.control([ev], 0, 0)
         self.fds[fd] = (path, tag)
+
+    def _last_pid(self):
+        try:
+            _, turns = W.last_turns(self.sess, n=1)
+            return turns[-1].pid if turns else None
+        except Exception:
+            return None
 
     def _rearm_transcript(self):
         # the transcript could in principle be rotated; re-open if the inode changed
@@ -93,26 +104,50 @@ class Watch(object):
         out = []
         st = W.read_state(self.sess)
         recs = self.new_transcript_records()
+        ended = None
         for r in recs:
-            if r.get('type') == 'user':
-                txt = W._text_of((r.get('message') or {}).get('content'))
+            ty = r.get('type')
+            if ty == 'user':
+                m = r.get('message') or {}
+                c = m.get('content')
+                is_tr = bool(W._blocks(c, 'tool_result'))
+                if not is_tr and r.get('promptId') != self.prev_pid:      # a new turn opened
+                    self.cur_opener_kind = (r.get('origin') or {}).get('kind') or 'other'
+                    self.transcript_turn_ended = False
+                self.prev_pid = r.get('promptId')
+                if is_tr: self.pending_tool = False
+                txt = W._text_of(c)
                 if W.MARKER in txt:
                     out.append(('INTERRUPTED', 'ts=%s' % r.get('timestamp')))
-            elif r.get('type') == 'assistant' and r.get('isApiErrorMessage'):
-                out.append(('API_ERROR', 'ts=%s text=%s' % (r.get('timestamp'), W.short(W._text_of((r.get('message') or {}).get('content')), 80).replace(' ', '_'))))
-        if out:   # fold a counter move that follows within 6 s
+            elif ty == 'assistant':
+                m = r.get('message') or {}
+                c = m.get('content')
+                if r.get('isApiErrorMessage'):
+                    out.append(('API_ERROR', 'ts=%s text=%s' % (r.get('timestamp'), W.short(W._text_of(c), 80).replace(' ', '_'))))
+                if W._blocks(c, 'tool_use'):
+                    self.pending_tool = True
+                elif m.get('stop_reason') in ('end_turn', 'stop_sequence', 'max_tokens') and W._text_of(c).strip():
+                    self.pending_tool = False
+                    ended = r.get('timestamp')
+        if out or ended:   # fold a counter move that follows within 6 s
             deadline = time.time() + 6
             while time.time() < deadline and st['ct'] == self.ct:
                 try: self.kq.control(None, 32, max(0.05, deadline - time.time()))
                 except OSError: pass
                 st = W.read_state(self.sess)
+        if ended and not out and st['ct'] == self.ct and not self.transcript_turn_ended:
+            out.append(('TURN_END', 'ts=%s opener=%s' % (ended, self.cur_opener_kind)))
+            self.transcript_turn_ended = True
         lines = []
         if st['ct'] != self.ct:
-            if not out:
-                lines.append('TURN ct=%s->%s ts=%s' % (self.ct, st['ct'], W.now_iso()))
-            else:
+            if out:
                 lines.append('%s %s ct=%s->%s' % (out[0][0], out[0][1], self.ct, st['ct']))
+            elif self.transcript_turn_ended and not recs:
+                log('counter moved %s->%s after a TURN_END already reported for this turn; swallowed' % (self.ct, st['ct']))
+            else:
+                lines.append('TURN ct=%s->%s ts=%s' % (self.ct, st['ct'], W.now_iso()))
             self.ct = st['ct']
+            if out and out[0][0] != 'TURN_END': self.transcript_turn_ended = True
         elif out:
             lines.append('%s %s ct=%s->%s' % (out[0][0], out[0][1], self.ct, st['ct']))
         if st['cec'] != self.cec:

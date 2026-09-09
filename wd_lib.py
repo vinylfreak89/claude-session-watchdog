@@ -232,6 +232,8 @@ class Turn(object):
         self.end_ts = opener.get('timestamp')
         self.opener_kind = (opener.get('origin') or {}).get('kind') or ('compact' if opener.get('isCompactSummary') else ('meta' if opener.get('isMeta') else 'unknown'))
         self.opener_text = _text_of((opener.get('message') or {}).get('content'))
+        self.peer_from = (opener.get('origin') or {}).get('from') if self.opener_kind == 'peer' else None
+        self.peer_name = _grab(r'<cross-session-message[^>]*name="([^"]*)"', self.opener_text) if self.opener_kind == 'peer' else None
         self.records = [opener]
         self.tool_uses = []          # dict(id,name,input,ts)
         self.tool_results = {}       # id -> dict(text,is_error,ts)
@@ -309,7 +311,11 @@ class Turn(object):
 
     @property
     def is_watchdog_turn(self):
-        return WATCHDOG_TAG in (self.opener_text or '')
+        """Opened by the watchdog's own message: the tag in the text, or a peer message from the watchdog session
+        (set WD_SELF_SESSION to the watchdog's local_... id for the strongest match)."""
+        if WATCHDOG_TAG in (self.opener_text or ''): return True
+        me = os.environ.get('WD_SELF_SESSION')
+        return bool(me and self.peer_from and self.peer_from == me)
 
     def background_launches(self):
         """Background Bash tasks launched in this turn: from tool results 'Command running in background with ID: X'."""
