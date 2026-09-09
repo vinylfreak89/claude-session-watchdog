@@ -276,12 +276,15 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
                 snap_rows[rid] = dict(hash=r['hash'], text=r['text'], state=r['state'], tokens=r['tokens'], first_seen_ct=(pr or {}).get('first_seen_ct', ct), first_seen_ts=(pr or {}).get('first_seen_ts', W.now_iso()), last_changed_ct=ct, last_changed_ts=W.now_iso())
         # stale rows: unchanged for >= stale_turns turns while dispatches that mention the row went out
         dl = state.get('dispatch_log', []) + [dict(ts=r['ts'], ct=ct, verb=r['verb'], thread=r['thread'], brief_path=r['brief_path'], inline=r['inline']) for r in disp_records]
+        tok_rows = collections.Counter()
+        for r_ in snap_rows.values():
+            for t_ in set(os.path.basename(re.sub(r':\d+$', '', t)) for t in r_.get('tokens', [])): tok_rows[t_] += 1
         for rid, r in snap_rows.items():
             lc = r.get('last_changed_ct')
             if lc is None or ct is None or ct - lc < a.stale_turns: continue
             later = [d for d in dl if (d.get('ct') or 0) > lc and d.get('verb') in ('task', 'send', 'say', 'queue')]
             mentions = []
-            toks = [os.path.basename(re.sub(r':\d+$', '', t)) for t in r.get('tokens', [])]
+            toks = [t_ for t_ in set(os.path.basename(re.sub(r':\d+$', '', t)) for t in r.get('tokens', [])) if tok_rows[t_] == 1 and len(t_) >= 6]
             for d in later:
                 text = ''
                 if d.get('brief_path') and os.path.exists(d['brief_path']):
