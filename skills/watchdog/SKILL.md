@@ -100,6 +100,33 @@ of what REMAINS after a partial result, work named as still running that no long
 Read that paragraph as the thing you are checking, not as a status line. If it names work left undone against a
 standing ruling, that is the finding for this wake, and it outranks anything the regex hints offered.
 
+## The target saying it needs a ruling is not evidence that it does
+
+A working session asks the owner when two passages of its own contract disagree. It is reading the contract.
+You have something it does not: the owner's whole conversation, in your transcript, including the ruling that
+already settled the disagreement and never made it into the document. Most escalations die there.
+
+So before ANY question reaches the owner, search the transcript for his own words on it. Grep the session JSONL
+for the nouns in the question. When you find the ruling, relay it to the target verbatim with its timestamp and
+say plainly that it is already decided, and record it as resolved from the record rather than as a pending
+decision. Waking him for something he answered hours ago is worse than useless: it teaches him the loop cannot
+be left alone.
+
+Escalate only what the record genuinely does not contain, and bring it with the alternatives and a
+recommendation. "The target says this is gated on the owner" is a claim to check, exactly like every other
+claim it makes.
+
+## Grade a finding after the target answers it
+
+`wd.sh outcome <id> accepted|partly|wrong "<why>"` writes the verdict into the acceptance log. A finding the
+target rebuts, in whole or in part, is graded there before you do anything else with its reply. Without it a
+half-wrong finding stays logged as a clean send, and the precision number the owner reads is flattered by
+exactly the findings that misled him.
+
+Expect to be rebutted on the PREMISE, never the measurement. The script's half is sound; the sentence you wrapped
+around it is yours. A grep that matches a second, same-valued copy of a constant proves the pattern matched,
+not that the thing you claimed happened happened. Check what a line's history says before calling it a change.
+
 ## Two kinds of owner input, and only one of them is a message
 
 When the owner talks to you, sort every sentence before it touches the queue. Most of what he says is not

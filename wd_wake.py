@@ -526,7 +526,7 @@ def main():
     ap.add_argument('--max-digest', type=int, default=30); ap.add_argument('--bootstrap', action='store_true'); ap.add_argument('--replay', type=int, default=0)
     ap.add_argument('--no-state', action='store_true'); ap.add_argument('--json', action='store_true')
     ap.add_argument('--sent'); ap.add_argument('--message-id', default=''); ap.add_argument('--veto'); ap.add_argument('--reason', default='')
-    ap.add_argument('--queue-add'); ap.add_argument('--queue-urgent', action='store_true'); ap.add_argument('--queue-list', action='store_true'); ap.add_argument('--queue-clear'); ap.add_argument('--queue-hold'); ap.add_argument('--hold-until', default='')
+    ap.add_argument('--queue-add'); ap.add_argument('--queue-urgent', action='store_true'); ap.add_argument('--queue-list', action='store_true'); ap.add_argument('--outcome', nargs=2, metavar=('ID','VERDICT')); ap.add_argument('--queue-clear'); ap.add_argument('--queue-hold'); ap.add_argument('--hold-until', default='')
     ap.add_argument('--due', action='store_true')
     ap.add_argument('--owe-add'); ap.add_argument('--gated-on', default=''); ap.add_argument('--owe-list', action='store_true')
     ap.add_argument('--owe-clear'); ap.add_argument('--owe-ungate')
@@ -588,6 +588,17 @@ def main():
             print('GATE: it is mid-work -> hold.')
         if openq: print('note: it has a question outstanding to the owner (%s) -- it is waiting, not stopped' % W.short(openq[-1], 90))
         return 0
+    if a.outcome:
+        fid, verdict = a.outcome
+        if verdict not in ('accepted', 'partly', 'wrong'):
+            raise SystemExit("verdict must be accepted | partly | wrong")
+        # A finding the target rebuts is graded HERE. Without this a half-wrong finding stays logged as a
+        # clean send and the owner's precision number is flattered by exactly the findings that misled him.
+        append_findings_md(a.state_dir, [dict(id=fid + ' (outcome)', wake=state.get('wake_count'),
+                           wake_ts=W.now_iso(), turn_ct='', cls='outcome', status=verdict,
+                           message=(a.reason or '').replace('|', '\\|'))])
+        log_line(a.state_dir, '%s OUTCOME %s %s %s' % (W.now_iso(), fid, verdict, a.reason or ''))
+        print('%s graded %s' % (fid, verdict)); return 0
     if a.queue_hold:
         q = state.setdefault('owner_queue', [])
         hit = [it for it in q if it['id'] == a.queue_hold]

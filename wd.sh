@@ -54,6 +54,7 @@ case "$cmd" in
             hold)  id=$1; shift; exec $PY "$D/wd_wake.py" --state-dir "$S" --queue-hold "$id" --hold-until "$*" ;;
             *) echo "wd.sh queue add [--urgent] \"<owner's words>\" | list | clear <message_id>" >&2; exit 2 ;;
           esac ;;
+  outcome) id=$1; v=$2; shift 2; exec $PY "$D/wd_wake.py" --state-dir "$S" --outcome "$id" "$v" --reason "$*" ;;
   due)    exec $PY "$D/wd_wake.py" --state-dir "$S" --target "$TARGET" --due ;;
   owe)    sub=$1; shift
           case "$sub" in
