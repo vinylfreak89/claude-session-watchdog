@@ -375,6 +375,23 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
         observations.append('ANNOUNCE HINT%s: "%s" -- at turn end: %d live process(es), %d item(s) from this turn still in flight. If this is a commitment to act, raise it: wd.sh finding announced_nothing_running "<sentence>" check running' % (
             ' [conditional]' if c.get('conditional') else '', W.short(c['sentence'], 160), len(procs), len(this_turn_live)))
 
+    # ---- for the owner: declarations that work is gated on the owner, wherever they appear
+    for_owner = []
+    if T:
+        for ts, txt in T.assistant_texts:
+            for hnt in W.owner_gate_hints(txt): for_owner.append(('turn text %s' % (ts or '')[11:19], hnt))
+    if L.get('exists') and not L.get('dataless'):
+        for name, body in (L.get('section_text') or {}).items():
+            if W.OWNER_GATE_RE.search(name) or name.lower().startswith(('e.', 'e ')):
+                for_owner.append(('ledger section "%s"' % name, body.strip()))
+    seen_fo = set(state.get('for_owner_seen') or [])
+    for_owner_new = [(src, txt) for src, txt in for_owner if W.h(txt) not in seen_fo]
+    for_owner_all = for_owner; for_owner = for_owner_new
+    to_wd = W.messages_to_watchdog(T, (self_sess or {}).get('sessionId')) if T else []
+    bypass_hint = None
+    if for_owner_new and T and not any(re.search(r'owner|blocked|ruling|question|decide', m, re.I) for _, m in to_wd):
+        bypass_hint = 'work declared gated on the owner in this turn (%s) and no message to the watchdog session carried it (messages to watchdog this turn: %d)' % ('; '.join(sorted(set(src for src, _ in for_owner)))[:160], len(to_wd))
+
     # ---- did the target reply to a question we asked?
     reply = None
     if aw and self_sess:
