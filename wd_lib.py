@@ -662,7 +662,15 @@ def load_config(path):
     d = read_json_retry(path) or {}
     return {k: v for k, v in d.items() if not k.startswith('_')}
 
-OWNER_GATE_RE = re.compile(r"(blocked on (?:the )?owner|blocked on you|gated on (?:the )?owner|owner(?:'s)? (?:ruling|decision|answer|call)|awaiting (?:the )?owner|needs? (?:the )?owner|to put to the owner|for the owner|questions? for you|\bowner ruling owed|owner decision owed|ask(?:ed)? (?:the )?owner|your (?:ruling|decision|answer|call))", re.I)
+OWNER_GATE_RE = re.compile(
+    r"(blocked on (?:the )?owner|blocked on you|gated on (?:the )?owner|owner(?:'s)? (?:ruling|decision|answer|call)"
+    r"|awaiting (?:the )?owner|needs? (?:the )?owner|to put to the owner|for the owner|questions? for you"
+    r"|\bowner ruling owed|owner decision owed|ask(?:ed)? (?:the )?owner|your (?:ruling|decision|answer|call)"
+    # a question addressed to the owner without any of the words above: "want to put to you",
+    # "since it's your rule", "if you read it differently" -- missed once, which is what this section exists for
+    r"|put (?:it |this |that )?to you|your (?:rule|reading|view|preference|choice)|if you read it differently"
+    r"|needs? your|want your|only you can|yours to (?:decide|rule|answer|say))",
+    re.I)
 
 def owner_gate_hints(text):
     """Sentences/lines that declare work gated on the owner. Hints for the model, never a verdict."""
