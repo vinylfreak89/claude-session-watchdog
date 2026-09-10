@@ -172,9 +172,14 @@ def main():
     ap.add_argument('--target', required=True); ap.add_argument('--self', dest='self_sel'); ap.add_argument('--repo'); ap.add_argument('--ledger')
     ap.add_argument('--state-dir', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'state')); ap.add_argument('--quiet-min', type=float, default=10.0)
     ap.add_argument('--row-pattern', default=W.DEFAULT_ROW_PATTERN)
-    ap.add_argument('mode', choices=['check', 'finding', 'owed', 'relayed', 'hold']); ap.add_argument('rest', nargs=argparse.REMAINDER)
+    ap.add_argument('mode', choices=['check', 'finding', 'owed', 'relayed', 'hold', 'answered']); ap.add_argument('rest', nargs=argparse.REMAINDER)
     a = ap.parse_args(); W.set_row_pattern(a.row_pattern)
     sess = W.find_session(a.target); state = WK.load_state(a.state_dir)
+    if a.mode == 'answered':
+        # Sends go out through the MCP tool, which cannot write here, so this is the hook that
+        # records them. Forgetting it makes `owed` claim a turn is unanswered when it was answered.
+        state['last_send_ts'] = W.now_iso(); WK.save_state(a.state_dir, state)
+        print('answered at %s' % state['last_send_ts']); return 0
     if a.mode in ('relayed', 'hold'):
         ts = a.rest[0] if a.rest else ''
         if not ts: ap.error('%s <turn end_ts> %s' % (a.mode, '"reason"' if a.mode == 'hold' else ''))
