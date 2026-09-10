@@ -133,20 +133,34 @@ def turn_made_a_dispatch(turn):
     return False
 
 def owed(sess, state):
-    """The two ways the watchdog stops doing its job while talking to the owner:
-    a turn that DECLARED an action and did not take it (nobody kicked it), and a completed
-    turn nobody relayed (the owner never heard the result). Both were live on 2026-09-10."""
+    """What the watchdog still owes on each completed target turn.
+
+    Owner's rule, 2026-09-10, in two parts. A turn is answered when it has been RELAYED to him
+    AND responded to -- a send back to the target -- or when it is DELIBERATELY HELD because it
+    is blocked on his answer. Relaying alone is not enough: that is the failure where he hears
+    about a result and nobody acts on it. Sending alone is not enough either: that is the failure
+    where the watchdog handles something and he never learns it happened.
+
+    "it should be firing every minute unless you actually sent something back... it firing
+    excessively is the point."
+    """
     _, turns = W.last_turns(sess, n=8)
     done = [t for t in turns if t.end_state != 'open']
-    ack = state.get('acked_turn_ts') or ''
+    relayed = state.get('last_relay_ts') or ''
+    sent = state.get('last_send_ts') or ''
+    held = state.get('held_turns') or {}
     rows = []
     for t in done:
+        if t.end_ts in held: continue
+        why = []
+        if not (relayed and t.end_ts <= relayed): why.append('not relayed')
+        if not (sent and t.end_ts <= sent): why.append('not answered')
+        if not why: continue
         text = ' '.join(x for _, x in t.assistant_texts)
-        intent = [m.group(0).strip() for m in W.INTENT_RE.finditer(text)]
-        sent = turn_made_a_dispatch(t)
-        rows.append(dict(ts=t.end_ts, acked=(t.end_ts <= ack) if ack else False,
-                         declared=intent[:3], dispatched=sent,
-                         head=W.short(t.final_text or '', 140)))
+        rows.append(dict(ts=t.end_ts, why=' + '.join(why),
+                         declared=[m.group(0).strip() for m in W.INTENT_RE.finditer(text)][:3],
+                         dispatched=turn_made_a_dispatch(t),
+                         head=W.short(t.final_text or '', 130)))
     return rows
 
 def main():
@@ -154,29 +168,29 @@ def main():
     ap.add_argument('--target', required=True); ap.add_argument('--self', dest='self_sel'); ap.add_argument('--repo'); ap.add_argument('--ledger')
     ap.add_argument('--state-dir', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'state')); ap.add_argument('--quiet-min', type=float, default=10.0)
     ap.add_argument('--row-pattern', default=W.DEFAULT_ROW_PATTERN)
-    ap.add_argument('mode', choices=['check', 'finding', 'owed', 'acked']); ap.add_argument('rest', nargs=argparse.REMAINDER)
+    ap.add_argument('mode', choices=['check', 'finding', 'owed', 'relayed', 'hold']); ap.add_argument('rest', nargs=argparse.REMAINDER)
     a = ap.parse_args(); W.set_row_pattern(a.row_pattern)
     sess = W.find_session(a.target); state = WK.load_state(a.state_dir)
-    if a.mode == 'acked':
+    if a.mode in ('relayed', 'hold'):
         ts = a.rest[0] if a.rest else ''
-        if not ts: ap.error('acked <turn end_ts>')
-        state['acked_turn_ts'] = max(ts, state.get('acked_turn_ts') or '')
-        WK.save_state(a.state_dir, state)
-        print('relayed up to %s' % state['acked_turn_ts']); return 0
+        if not ts: ap.error('%s <turn end_ts> %s' % (a.mode, '"reason"' if a.mode == 'hold' else ''))
+        if a.mode == 'relayed':
+            state['last_relay_ts'] = max(ts, state.get('last_relay_ts') or '')
+            print('relayed to the owner up to %s' % state['last_relay_ts'])
+        else:
+            reason = ' '.join(a.rest[1:]).strip()
+            if not reason: ap.error('hold <turn end_ts> "why it is blocked on the owner"')
+            state.setdefault('held_turns', {})[ts] = dict(reason=reason, ts=W.now_iso())
+            print('holding %s: %s' % (ts, reason))
+        WK.save_state(a.state_dir, state); return 0
     if a.mode == 'owed':
         rows = owed(sess, state)
-        unacked = [r for r in rows if not r['acked']]
-        # Only turns not yet acked: acking means the watchdog dealt with that turn, so a
-        # declaration it did not execute has either been kicked or been overtaken. Without
-        # this the same historical turn is reported every minute forever - which it was,
-        # within one minute of the per-minute monitor going up.
-        broken = [r for r in rows if r['declared'] and not r['dispatched'] and not r['acked']]
-        print('UNRELAYED completed turns: %d' % len(unacked))
-        for r in unacked: print('   %s  %s' % (r['ts'], r['head']))
-        print('DECLARED an action and made no dispatch in the same turn: %d' % len(broken))
+        broken = [r for r in rows if r['declared'] and not r['dispatched']]
+        print('OWED completed turns: %d' % len(rows))
+        for r in rows: print('   %s  [%s]  %s' % (r['ts'], r['why'], r['head']))
+        print('DECLARED an action and made no dispatch: %d' % len(broken))
         for r in broken: print('   %s  declared: %s' % (r['ts'], ' | '.join(r['declared'])))
-        if not unacked and not broken: print('   nothing owed')
-        print('\nmark relayed with: wd.sh acked <turn end_ts>')
+        if not rows: print('   nothing owed')
         return 0
     if a.mode == 'check':
         kind, args = a.rest[0], a.rest[1:]

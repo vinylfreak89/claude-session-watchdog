@@ -6,7 +6,8 @@
 #   wd.sh sent F1,F2 <message_id>   record that findings were sent (opens the reply window when one asked for a reply)
 #   wd.sh veto F3 "reason"          record a veto
 #   wd.sh owed                      what the watchdog still owes: turns nobody relayed, and actions the target declared and did not take
-#   wd.sh acked <turn end_ts>       mark a completed turn as relayed to the owner
+#   wd.sh relayed <turn end_ts>     mark turns up to here as relayed to the owner (a send answers them separately)
+#   wd.sh hold <turn end_ts> "why"  deliberately hold a turn: it is blocked on the owner
 #   wd.sh cost                      append this session's per-turn token cost to state/cost.tsv
 #   wd.sh queue add "<text>"        hold an owner item until the next wake (add --urgent to send at once)
 #   wd.sh queue list | clear <id>   show held items; clear them once delivered in a message
@@ -46,7 +47,8 @@ case "$cmd" in
   veto)   id=$1; shift; exec $PY "$D/wd_wake.py" --state-dir "$S" --veto "$id" --reason "$*" ;;
   cost)   [ -n "$SELF" ] || { echo "config.json: 'self' is not set" >&2; exit 2; }; exec $PY "$D/wd_cost.py" --self "$SELF" --state-dir "$S" "$@" ;;
   owed)   exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" owed ;;
-  acked)  exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" acked "$@" ;;
+  relayed) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" relayed "$@" ;;
+  hold)   exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" hold "$@" ;;
   check)  exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" check "$@" ;;
   finding) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" finding "$@" ;;
   queue)  sub=$1; shift

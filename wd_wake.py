@@ -670,6 +670,9 @@ def main():
             else:
                 rewrite_status(a.state_dir, fid, 'vetoed', a.reason.replace('|', '/'))
                 log_line(a.state_dir, '%s VETO %s %s' % (W.now_iso(), fid, a.reason))
+        # A send is what ANSWERS a target turn, so record when it happened: `owed` clears
+        # turns up to this and keeps firing until it moves.
+        if a.sent: state['last_send_ts'] = W.now_iso()
         save_state(a.state_dir, state); print('recorded %s: %s' % ('sent' if a.sent else 'veto', ids)); return 0
     if not a.target: ap.error('--target is required')
     t0 = time.time()
