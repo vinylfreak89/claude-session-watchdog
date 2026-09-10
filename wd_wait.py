@@ -14,6 +14,9 @@ every wake); --follow streams.
   STALL kind=bg id=<taskid> idle_min=<n> reason=<r>  after --stale-after of silence, an in-flight item (from state/state.json)
   STALL kind=codex thread=<id> idle_min=<n> reason=<r>   has shown no progress for --stall-min: no live process and no output
                                                      growth (bg), or no rollout event (codex). One line per item per episode.
+  WAITING agents=<k> oldest_min=<n> ct=<n>            silent and turn closed, but background subagents the
+                                                     target launched have not returned. Not stopped. Past
+                                                     --stall-min the same state is reported as STALL kind=agent.
   IDLE idle_min=<n> ct=<n>                           the target stopped: silent past --idle-after with NOTHING running,
                                                      no work in flight and no reply owed. The wake decides whether that
                                                      contradicts a standing instruction; the hook only spots the state.
@@ -28,7 +31,7 @@ is idle past --stale-after and state.json lists in-flight work, every backstop t
 progress and says nothing until one stalls. Read-only on everything except its own memory file,
 state/wait_memory.json (which stalls and overdue replies it has already reported, so a re-armed hook stays quiet).
 """
-import os, sys, json, time, select, argparse
+import os, sys, json, time, re, select, argparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wd_lib as W
 
@@ -262,6 +265,42 @@ class Watch(object):
         lines.extend(self.idle_check())
         return lines
 
+    def outstanding_agents(self):
+        """Background subagents the target launched that have not come back.
+
+        They are NOT OS children of the session, so live_children() cannot see them: a target waiting on
+        four of them has no process, no in-flight item of OURS, and a closed turn -- it looks stopped and
+        is not. Measured 2026-09-10: four Agent launches with background=True, each agentId appearing
+        exactly once in the transcript (the launch acknowledgement) nine minutes later.
+
+        The completion test is occurrence count, which is a heuristic: a launch acknowledgement mentions
+        the agentId once and anything reporting the agent back mentions it again. If a future client ever
+        reports completion without naming the id, this would hold agents outstanding forever -- so the
+        caller must NOT treat 'outstanding' as a reason for indefinite silence. Past --stall-min it
+        becomes a STALL, which is visible, rather than suppressing the report."""
+        try:
+            _, turns = W.last_turns(self.sess, n=6)
+        except Exception:
+            return []
+        ids = {}
+        for t in turns:
+            try: launches = t.agent_launches() or []
+            except Exception: continue
+            for a in launches:
+                if not a.get('background'): continue
+                m = re.search(r'agentId: (\w+)', a.get('result') or '')
+                if m: ids[m.group(1)] = a.get('ts')
+        if not ids: return []
+        counts = dict.fromkeys(ids, 0)
+        try:
+            with open(W.transcript_path(self.sess), errors='replace') as fh:
+                for ln in fh:
+                    for aid in ids:
+                        if aid in ln: counts[aid] += 1
+        except OSError:
+            return []
+        return [(aid, ts) for aid, ts in ids.items() if counts[aid] <= 1]
+
     def idle_check(self):
         """The target stopped: silent past --idle-after, nothing running, nothing in flight, no reply owed.
         The hook only reports the STATE; whether it contradicts a standing instruction is the wake's call."""
@@ -271,6 +310,14 @@ class Watch(object):
         if idle < self.idle_after: return []
         if self.idle_reported_for == act: return []
         if self.turn_open: return []   # working, not stopped -- whatever the app's counters say
+        agents = self.outstanding_agents()
+        if agents:
+            oldest = min(W.ms_of_iso(ts) or 0 for _, ts in agents)
+            wait_min = (time.time() - oldest / 1000.0) / 60.0
+            self.idle_reported_for = act
+            if wait_min < self.stall_min:
+                return ['WAITING agents=%d oldest_min=%d ct=%s' % (len(agents), wait_min, self.ct)]
+            return ['STALL kind=agent id=%s idle_min=%d reason=no_completion_record' % (agents[0][0], wait_min)]
         st = self.state_json()
         if st.get('in_flight'): return []
         if (st.get('awaiting_reply') or {}) and not (st.get('awaiting_reply') or {}).get('poked'): return []
