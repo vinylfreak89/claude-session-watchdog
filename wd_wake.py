@@ -561,7 +561,17 @@ def main():
         # he cannot sensibly make yet must never be presented to him as if it were waiting on him.
         owe = state.setdefault('owner_decisions', {})
         if a.owe_add:
-            oid = 'D%d' % (len(owe) + 1)
+            # NEVER derive the id from len(): clearing an answered decision makes the next add
+            # reuse a live id and overwrite it, silently, in the one instrument whose whole job is
+            # not losing the owner's decisions. Cost, 2026-09-10: clearing D4 made the next add
+            # take D6 and destroy the D6 that was already there. Max-of-existing has the same hole
+            # (clear the highest and it comes back), so the counter is persistent and monotonic.
+            seq = int(state.get('owner_decision_seq') or 0)
+            seq = max(seq, max([int(k[1:]) for k in owe if k[1:].isdigit()] or [0]))
+            seq += 1
+            state['owner_decision_seq'] = seq
+            oid = 'D%d' % seq
+            assert oid not in owe, 'owner-decision id %s already in use' % oid
             owe[oid] = dict(id=oid, ts=W.now_iso(), text=a.owe_add, gated_on=a.gated_on or None)
             save_state(a.state_dir, state); print('recorded %s%s' % (oid, (' GATED behind: ' + a.gated_on) if a.gated_on else ' READY'))
         if a.owe_ungate:
