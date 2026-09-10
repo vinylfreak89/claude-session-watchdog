@@ -177,6 +177,47 @@ def owed(sess, state):
     return rows
 
 
+def next_item(sess, state):
+    """The send gate, as ONE function so a control can exercise IT rather than re-derive it.
+
+    Refuses on four grounds, and the middle two were both missing (owner, 2026-09-11: "you're not
+    waiting for turns to close... don't rapid fire the queue"):
+
+      1. the target is MID-TURN                      -- it cannot read a second item
+      2. a completed turn is OWED                    -- its reply to the LAST item is unhandled, so
+                                                        sending the next one outruns the work
+      3. the item is HELD behind a condition          -- `queue hold` wrote hold_until and this gate
+                                                        never read it, so the hold did NOTHING
+      4. nothing is queued
+
+    Only the owner's send-immediately mark overrides 1-3. A hold is the watchdog's own pacing; his
+    urgency outranks it.
+
+    ⚠️ The hold defect is the two-stores failure again: `wd_wake.py --due` read hold_until and this
+    did not, and THIS is the one that gates the send. The gate is the reading side.
+    """
+    q = [x for x in (state.get('owner_queue') or []) if not x.get('sent')]
+    urgent = [x for x in q if x.get('urgent')]
+    if not q:
+        return 'none', None, 'nothing queued.', 0
+    if urgent:
+        return 'send', urgent[0], '** URGENT override: owner marked this send-immediately **', len(q)
+    _, turns = W.last_turns(sess, n=1)
+    if turns and turns[-1].end_state == 'open':
+        return 'busy', None, 'TARGET BUSY (turn open). %d queued. SEND NOTHING.' % len(q), len(q)
+    owed_rows = owed(sess, state)
+    if owed_rows:
+        return 'owed', None, ('ITS LAST REPLY IS UNHANDLED (%d owed turn(s), oldest %s). %d queued. '
+                              'SEND NOTHING -- relay and answer first.'
+                              % (len(owed_rows), owed_rows[0]['ts'], len(q))), len(q)
+    sendable = [x for x in q if not x.get('hold_until')]
+    if not sendable:
+        held = q[0]
+        return 'held', None, ('ALL %d QUEUED ITEMS ARE HELD. SEND NOTHING.\n   %s waits on: %s'
+                              % (len(q), held.get('id'), held.get('hold_until'))), len(q)
+    return 'send', sendable[0], '', len(q)
+
+
 def due_questions(sess, state, quiet_min):
     """Open questions that should be nudged NOW: the peer has gone quiet, or has moved several
     turns past the ask without resolving it. Never 'every poll' -- nagging a session mid-work is
@@ -285,20 +326,13 @@ def main():
     # item, and only when the target is not mid-turn. An advisory queue was bypassed all evening
     # because nothing sat on the send path; this does.
     if a.mode == 'next':
-        q = [x for x in (state.get('owner_queue') or []) if not x.get('sent')]
-        _, turns = W.last_turns(sess, n=1)
-        busy = bool(turns) and turns[-1].end_state == 'open'
-        urgent = [x for x in q if x.get('urgent')]
-        if busy and not urgent:
-            print('TARGET BUSY (turn open). %d queued. SEND NOTHING.' % len(q)); return 1
-        pick = (urgent or q)
-        if not pick:
-            print('nothing queued%s' % (' (target busy)' if busy else '')); return 1
-        item = pick[0]
-        if busy: print('** URGENT override: target is mid-turn, owner marked this send-immediately **')
-        print('SEND EXACTLY THIS ONE ITEM, then run:  wd.sh sent1 %s' % item.get('id'))
-        print('---'); print(item.get('text','')); print('---')
-        print('%d other item(s) stay queued.' % (len(q)-1)); return 0
+        verdict, item, why, n = next_item(sess, state)
+        if verdict == 'send':
+            if why: print(why)
+            print('SEND EXACTLY THIS ONE ITEM, then run:  wd.sh sent1 %s' % item.get('id'))
+            print('---'); print(item.get('text','')); print('---')
+            print('%d other item(s) stay queued.' % (n - 1)); return 0
+        print(why); return 1
     if a.mode == 'sent1':
         i = a.rest[0] if a.rest else ''
         for x in (state.get('owner_queue') or []):
