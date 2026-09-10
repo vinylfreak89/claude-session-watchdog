@@ -143,6 +143,8 @@ def owed(sess, state):
 
     "it should be firing every minute unless you actually sent something back... it firing
     excessively is the point."
+
+    Formula: RELAY AND (RESPOND OR HOLD).
     """
     _, turns = W.last_turns(sess, n=8)
     done = [t for t in turns if t.end_state != 'open']
@@ -150,11 +152,13 @@ def owed(sess, state):
     sent = state.get('last_send_ts') or ''
     held = state.get('held_turns') or {}
     rows = []
+    # Owner's formula, 2026-09-10: RELAY AND (RESPOND OR HOLD). Relay is mandatory in both
+    # branches - a hold is a decision to wait for him, which he cannot make if he was never
+    # told. The earlier version cleared a held turn whether or not it had been relayed.
     for t in done:
-        if t.end_ts in held: continue
         why = []
         if not (relayed and t.end_ts <= relayed): why.append('not relayed')
-        if not (sent and t.end_ts <= sent): why.append('not answered')
+        if not ((sent and t.end_ts <= sent) or t.end_ts in held): why.append('not answered or held')
         if not why: continue
         text = ' '.join(x for _, x in t.assistant_texts)
         rows.append(dict(ts=t.end_ts, why=' + '.join(why),
