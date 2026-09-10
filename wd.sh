@@ -50,6 +50,11 @@ case "$cmd" in
   owed)   exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" owed ;;
   answered) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" answered ;;
   relayed) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" relayed "$@" ;;
+  ask)    exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" ask "$@" ;;
+  resolved) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" resolved "$@" ;;
+  open)   exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" open ;;
+  next)   exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" next ;;
+  sent1)  exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" sent1 "$@" ;;
   hold)   exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" hold "$@" ;;
   check)  exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" check "$@" ;;
   finding) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" finding "$@" ;;
