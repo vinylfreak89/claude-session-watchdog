@@ -55,6 +55,7 @@ case "$cmd" in
   open)   exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" open ;;
   next)   exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" next ;;
   sent1)  exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" sent1 "$@" ;;
+  nudged) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" nudged "$@" ;;
   hold)   exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" hold "$@" ;;
   check)  exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" check "$@" ;;
   finding) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" finding "$@" ;;

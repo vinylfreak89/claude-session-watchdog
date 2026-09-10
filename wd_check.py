@@ -244,7 +244,7 @@ def main():
     ap.add_argument('--target', required=True); ap.add_argument('--self', dest='self_sel'); ap.add_argument('--repo'); ap.add_argument('--ledger')
     ap.add_argument('--state-dir', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'state')); ap.add_argument('--quiet-min', type=float, default=10.0)
     ap.add_argument('--row-pattern', default=W.DEFAULT_ROW_PATTERN)
-    ap.add_argument('mode', choices=['check', 'finding', 'owed', 'relayed', 'hold', 'answered', 'ask', 'resolved', 'open', 'next', 'sent1']); ap.add_argument('rest', nargs=argparse.REMAINDER)
+    ap.add_argument('mode', choices=['check', 'finding', 'owed', 'relayed', 'hold', 'answered', 'ask', 'resolved', 'open', 'next', 'sent1', 'nudged']); ap.add_argument('rest', nargs=argparse.REMAINDER)
     a = ap.parse_args(); W.set_row_pattern(a.row_pattern)
     sess = W.find_session(a.target); state = WK.load_state(a.state_dir)
     if a.mode == 'answered':
@@ -292,6 +292,21 @@ def main():
         state.setdefault('open_questions', {})[key] = dict(
             text=text, asked_ts=W.now_iso(), asked_ct=str(st.get('ct')), resends=0, last_send=W.now_iso())
         WK.save_state(a.state_dir, state); print('open question %s registered at ct %s' % (key, st.get('ct'))); return 0
+    if a.mode == 'nudged':
+        # `resends` existed from the start and NOTHING incremented it, so every question read
+        # "0 resend(s)" however often it was re-sent -- a counter that cannot count. Recording a
+        # re-send re-arms the clock: it comes back DUE at the next gate crossing or quiet period,
+        # so a nudge never becomes permanently silent, only temporarily satisfied.
+        key = a.rest[0] if a.rest else ''
+        if not key: ap.error('nudged <key>')
+        qs = state.get('open_questions') or {}
+        q = qs.get(key)
+        if q is None: print('no open question %s' % key); return 1
+        st = W.read_state(sess)
+        q['resends'] = int(q.get('resends', 0)) + 1
+        q['last_send'] = W.now_iso(); q['asked_ct'] = str(st.get('ct'))
+        WK.save_state(a.state_dir, state)
+        print('nudged %s (%d resend(s)); due again at the next gate crossing' % (key, q['resends'])); return 0
     if a.mode == 'resolved':
         key = a.rest[0] if a.rest else ''
         if not key: ap.error('resolved <key>')
@@ -343,8 +358,17 @@ def main():
     if a.mode == 'owed':
         rows = owed(sess, state)
         broken = [r for r in rows if r['declared'] and not r['dispatched']]
-        print('OWED completed turns: %d' % len(rows))
+        due_now = due_questions(sess, state, a.quiet_min)
+        # The nudge rides INSIDE owed, in the headline the monitor already reads (owner,
+        # 2026-09-11: "throw nudge inside owed so it fires consistently... You should be as
+        # annoying to it as the hook is to you lol"). Listing due questions in a section
+        # further down was not an alarm: 21 questions sat DUE for 30+ turns with 0 resends,
+        # because nothing counted them as owed and nothing recorded a re-send either.
+        print('OWED completed turns: %d  DUE NUDGES: %d' % (len(rows), len(due_now)))
         for r in rows: print('   %s  [%s]  %s' % (r['ts'], r['why'], r['head']))
+        for k, q, why, age in due_now:
+            print('   NUDGE %-22s %s  (%d resend(s))  -- re-send it, then: wd.sh nudged %s'
+                  % (k, why, q.get('resends', 0), k))
         print('DECLARED an action and made no dispatch: %d' % len(broken))
         for r in broken: print('   %s  declared: %s' % (r['ts'], ' | '.join(r['declared'])))
         if not rows: print('   nothing owed')
