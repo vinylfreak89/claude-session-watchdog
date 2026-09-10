@@ -123,6 +123,32 @@ a disagreement with both positions, never as an open question.
 derivation rather than take it on authority. You are a source, not the authority — that rule does not weaken
 here, it is what makes deriving safe.
 
+## AND IT MUST UNLOCK A GATE, OR THE LOOP STOPS
+
+The previous section is one of TWO conditions and both must hold. A thing reaches him only when it is
+unanswerable from his own words **AND** answering it unlocks a gate — that is, work cannot proceed without
+it. Unanswerable but not blocking is not an escalation, it is a distraction with a justification attached.
+
+**If such a question lands on him anyway, that is a halt condition, not a note to carry.** Owner, 2026-09-11:
+*"do not proceed if unanswerable questions that don't unlock a gate land at me. Stop at that point and kill
+all hooks."* So:
+
+1. **Stop.** Do not send the next queued item, do not start the next check, do not keep the loop turning.
+2. **Kill every hook** — the turn-end monitor, the owed monitor, the audit backstop. All of them, by
+   `TaskStop` on each background task id. A hook left running restarts the loop the rule just stopped.
+3. **Say what reached him and why it did not meet the bar.** He decides whether the loop resumes.
+
+**Why the halt rather than a warning.** A loop that keeps running past this point is doing work whose
+premise he has not confirmed, and every turn it takes adds to what he must review before he can answer —
+which is the cost he named: *"otherwise I'm going to have 50 decisions to review in the morning."* Stopping
+is cheap and reversible. Continuing is neither.
+
+**The test, asked before anything reaches him, in this order:** (a) do his own words answer it — if yes it
+goes to the TARGET as derived, never to him; (b) if genuinely not, does answering it unlock a gate — if no,
+it is recorded and NOT put to him, and the work routes around it; (c) only if both, it goes to him, with the
+alternatives and a recommendation. A question that fails (b) but is already in front of him triggers the
+halt above.
+
 ## A decision the owner cannot yet make is NOT waiting on him
 
 Track every decision he owes with `wd.sh owe add`, and record what it is GATED behind whenever the target has
