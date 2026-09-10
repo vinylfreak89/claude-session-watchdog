@@ -466,10 +466,24 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
                 new_pids=[t.pid for t in new_turns if t.pid], drift=drift, commits=commits, pushes=pushes, launches=launches, reply=reply,
                 ledger_diff=ledger_diff, for_owner=for_owner, for_owner_all=for_owner_all, to_wd=to_wd, bypass_hint=bypass_hint)
 
+def sendable_items(q):
+    """Queue items that may be offered for sending: neither ALREADY SENT nor HELD.
+
+    Both conditions, and the `sent` half is the one that was missing. This filtered on
+    `hold_until` alone, so every item ever delivered came back on every wake under a heading
+    reading "send with this wake" -- 22 of 27 on 2026-09-11. The send gate in wd_check filters
+    `sent` correctly, so one store had two readers and they disagreed: `next` said 4 held,
+    `wake` said 22 sendable. Acting on the wake list would have re-sent the owner's whole
+    queue in one burst, which is precisely what he forbade ("don't rapid fire the queue").
+    Control: tests/test_wake_sendable.py, including the invariant that the two readers agree.
+    """
+    return [it for it in q if not it.get('sent') and not it.get('hold_until')]
+
+
 def print_report(a, sess, st, state, R, trigger, wall, bytes_read):
     T = R['T']
     q = state.get('owner_queue') or []
-    sendable = [it for it in q if not it.get('hold_until')]
+    sendable = sendable_items(q)
     held = [it for it in q if it.get('hold_until')]
     if sendable:
         print('=== OWNER ITEMS, SENDABLE NOW (%d) -- send with this wake, as ONE message with any findings ===' % len(sendable))
@@ -602,7 +616,7 @@ def main():
         # spawning anything. Treating that as idle nudged a session that was mid-answer.
         _open_turn = turns[-1] if turns and turns[-1].end_state == 'open' else None
         receptive = (not procs) and (not infl) and idle_min > 0.5 and _open_turn is None
-        sendable = [it for it in q if not it.get('hold_until')]
+        sendable = sendable_items(q)
         held = [it for it in q if it.get('hold_until')]
         print('OWNER ITEMS SENDABLE NOW: %d' % len(sendable))
         for it in sendable: print('  %s%s %s' % (it['id'], ' URGENT' if it.get('urgent') else '', W.short(it['text'], 220)))
