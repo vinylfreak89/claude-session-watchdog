@@ -183,6 +183,15 @@ def main():
     if a.mode in ('relayed', 'hold'):
         ts = a.rest[0] if a.rest else ''
         if not ts: ap.error('%s <turn end_ts> %s' % (a.mode, '"reason"' if a.mode == 'hold' else ''))
+        if a.mode == 'hold' and 'owner' not in ' '.join(a.rest[1:]).lower() and 'you' not in ' '.join(a.rest[1:]).lower():
+            # hold means BLOCKED ON THE OWNER. Waiting on Codex, a subagent or a running job is
+            # not a hold -- it is work in flight that still needs collecting, and calling it a
+            # hold is how a loop gets lost: the check goes quiet on something that needs a kick.
+            # Cost, 2026-09-10: four turns marked held for "with Codex" while nothing collected
+            # the reply, until the owner noticed the loop had stopped.
+            print('REFUSED: hold is for turns blocked on the OWNER. Waiting on Codex, a subagent'
+                  ' or a job is work in flight -- kick it or poll it, do not hold it.')
+            return 1
         if a.mode == 'relayed':
             state['last_relay_ts'] = max(ts, state.get('last_relay_ts') or '')
             print('relayed to the owner up to %s' % state['last_relay_ts'])
