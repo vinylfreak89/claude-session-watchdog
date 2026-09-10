@@ -206,6 +206,32 @@ Escalate only what the record genuinely does not contain, and bring it with the 
 recommendation. "The target says this is gated on the owner" is a claim to check, exactly like every other
 claim it makes.
 
+## A RECORD TYPE IS A CHANNEL, NOT AN AUTHOR — and the same channel carries different authors per session
+
+His messages do NOT arrive as `user` records. In this session's transcript they are `queue-operation` and
+`attachment` records; reading only `type == "user"` reads a fraction of what he said. Measured 2026-09-11:
+including the other two took the recoverable owner corpus from 292,659 characters to 9,871,153. **A search
+that misses 97% of his words will report "he never said this" with total confidence**, which is how a real
+ruling gets closed as absent.
+
+⚠️ **And the fix has a trap sitting immediately behind it.** In THIS session `queue-operation` carries HIS
+messages. In the TARGET's session the same type carries YOUR messages to it. Same type, different author,
+nothing in the record distinguishing them. So widening a provenance search to "all project transcripts"
+silently fills the corpus with your own copies, and every quote you relayed then verifies — against itself.
+
+Cost, same night: a quote correctly closed as having no provenance was re-checked against the widened corpus,
+came back FOUND, and a retraction of a correct finding was one step from being sent. Every hit was the
+watchdog's own nudge text quoting it.
+
+**So: scope a provenance check to a store whose type-to-author mapping you have established, and re-establish
+it whenever the store changes.** Test the corpus for contamination with phrases that are unambiguously YOURS
+— your own headers, your own tool output — and require zero hits. A contamination test that passed on the
+narrow corpus says nothing about the wide one; it must be re-run per corpus, not per session.
+
+**The general form, and it outranks the instance:** a verification that can be satisfied by the thing it is
+verifying is not one. The target reached this independently from the other side — two of its "found outside a
+relay" hits were a `tool_result` echoing its own commit output and a diff of an edit made to its own file.
+
 ## Quote, never paraphrase — a paraphrase resolves the pronouns
 
 The owner writes the way people talk, with "it" and "that" and "the lack of one" pointing back at something a
