@@ -32,7 +32,15 @@ def check(a, sess, kind, args, state):
         checked = 'live child processes of the session pid(s) %s; in-flight items in state; Codex rollouts of dispatched threads' % W.session_pids(sess)
         result = '%d live process(es)%s; %d in-flight item(s)%s%s' % (len(procs), (': ' + '; '.join(W.short(p['command'], 70) for p in procs[:4])) if procs else '', len(infl),
                                                                      (': ' + '; '.join((i.get('id') or (i.get('thread') or '')[:8]) for i in infl)) if infl else '', ('; codex: ' + '; '.join(cod)) if cod else '')
-        return checked, result, dict(procs=len(procs), inflight=len(infl))
+        # A turn can be OPEN with zero subprocesses -- the model is reading or writing and spawns nothing.
+        # Reporting that as idle is how a working session gets nudged for stopping. State it explicitly.
+        _, _turns = W.last_turns(sess, n=2)
+        _open = _turns[-1] if _turns and _turns[-1].end_state == 'open' else None
+        if _open is not None:
+            result += '; TURN IS OPEN since %s -- NOT idle, whatever the process count says' % _open.start_ts
+        else:
+            result += '; no turn open'
+        return checked, result, dict(procs=len(procs), inflight=len(infl), turn_open=bool(_open))
     if kind == 'commit':
         info = W.git_sha_info(repo, args[0]); d = W.git_branch_drift(repo)
         checked = 'git cat-file/branch --contains %s; git ls-remote origin %s vs local HEAD' % (args[0], d['branch'])

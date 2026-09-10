@@ -585,7 +585,10 @@ def main():
         for t in turns[-3:]:
             for _ts, _txt in t.assistant_texts: openq += W.owner_gate_hints(_txt)
         idle_min = (time.time() - (st['lastActivityAt'] or 0) / 1000.0) / 60.0
-        receptive = (not procs) and (not infl) and idle_min > 0.5
+        # An open turn means it is working even with no subprocess: the model reads and writes without
+        # spawning anything. Treating that as idle nudged a session that was mid-answer.
+        _open_turn = turns[-1] if turns and turns[-1].end_state == 'open' else None
+        receptive = (not procs) and (not infl) and idle_min > 0.5 and _open_turn is None
         sendable = [it for it in q if not it.get('hold_until')]
         held = [it for it in q if it.get('hold_until')]
         print('OWNER ITEMS SENDABLE NOW: %d' % len(sendable))
@@ -594,6 +597,8 @@ def main():
         for it in held: print('  %s waits on: %s' % (it['id'], it['hold_until']))
         print('UNDELIVERED findings: %d' % len(prop))
         for fid, pr in prop.items(): print('  %s (%s, proposed %s)' % (fid, pr.get('key', '').split(':')[0], pr.get('ts')))
+        if _open_turn is not None:
+            print('target: A TURN IS OPEN since %s -- it is working, do not read the process count as idle' % _open_turn.start_ts)
         print('target: %d live process(es), %d in flight, idle %.1f min -> %s' % (len(procs), len(infl), idle_min,
               'not mid-turn' if receptive else 'BUSY: mid-work'))
         # An idle target is not the gate. The gate is the CURRENT WORK SET: everything it is doing plus
