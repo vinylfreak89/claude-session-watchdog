@@ -51,6 +51,7 @@ class Watch(object):
         self.ct, self.cec, self.last_act = st['ct'], st['cec'], st['lastActivityAt']
         self.pos = os.path.getsize(self.tpath); self.partial = b''
         self.prev_pid, self.turn_open = self._last_turn()
+        self.last_record_ms = self._last_record_ms()
         self.cur_opener_kind = None; self.pending_tool = False
         self.event_emitted_for_turn = not self.turn_open
         self.prog = {}          # in-flight item id -> (signature, last_change_epoch)
@@ -83,6 +84,22 @@ class Watch(object):
             return (turns[-1].pid, turns[-1].end_state == 'open') if turns else (None, False)
         except Exception:
             return None, False
+
+    def _last_record_ms(self):
+        """The transcript's own last-record time. `lastActivityAt` in the app's session state does NOT
+        advance during a turn the app is not attached to -- a peer-opened turn freezes it at the moment
+        of delivery -- so idle measured from it reads minutes of silence while the target is working.
+        Measured 2026-09-10: lastActivityAt 07:06:35 against a transcript record at 07:12:18, 14 tool
+        calls into an open turn. The transcript is the truth, the same way it is for turn boundaries."""
+        try:
+            _, turns = W.last_turns(self.sess, n=1)
+            return W.ms_of_iso(turns[-1].end_ts) if turns else None
+        except Exception:
+            return None
+
+    def activity_ms(self):
+        """Whichever source saw the target most recently. Never regresses."""
+        return max(self.last_act or 0, self.last_record_ms or 0) or None
 
     def _rearm_transcript(self):
         for fd, (path, tag) in list(self.fds.items()):
@@ -192,6 +209,10 @@ class Watch(object):
         recs = self.new_transcript_records()
         ended = None
         for r in recs:
+            ts = r.get('timestamp')
+            if ts:
+                ms = W.ms_of_iso(ts)
+                if ms and ms > (self.last_record_ms or 0): self.last_record_ms = ms
             ty = r.get('type')
             if ty == 'user':
                 m = r.get('message') or {}; c = m.get('content')
@@ -234,7 +255,8 @@ class Watch(object):
             lines.append('CONTEXT_EXCEEDED cec=%s->%s ct=%s' % (self.cec, st['cec'], st['ct'])); self.cec = st['cec']
         if st['lastActivityAt'] != self.last_act:
             self.last_act = st['lastActivityAt']
-        if self.stale_after and self.last_act and (time.time() - self.last_act / 1000.0) > self.stale_after:
+        _act = self.activity_ms()
+        if self.stale_after and _act and (time.time() - _act / 1000.0) > self.stale_after:
             lines.extend(self.interrogate())
         lines.extend(self.reply_check())
         lines.extend(self.idle_check())
@@ -243,10 +265,12 @@ class Watch(object):
     def idle_check(self):
         """The target stopped: silent past --idle-after, nothing running, nothing in flight, no reply owed.
         The hook only reports the STATE; whether it contradicts a standing instruction is the wake's call."""
-        if not self.idle_after or not self.last_act: return []
-        idle = time.time() - self.last_act / 1000.0
+        act = self.activity_ms()
+        if not self.idle_after or not act: return []
+        idle = time.time() - act / 1000.0
         if idle < self.idle_after: return []
-        if self.idle_reported_for == self.last_act: return []
+        if self.idle_reported_for == act: return []
+        if self.turn_open: return []   # working, not stopped -- whatever the app's counters say
         st = self.state_json()
         if st.get('in_flight'): return []
         if (st.get('awaiting_reply') or {}) and not (st.get('awaiting_reply') or {}).get('poked'): return []
@@ -254,7 +278,7 @@ class Watch(object):
             if W.live_children(self.sess): return []
         except Exception:
             return []
-        self.idle_reported_for = self.last_act
+        self.idle_reported_for = act
         return ['IDLE idle_min=%d ct=%s' % (idle / 60.0, self.ct)]
 
 def main():
@@ -282,19 +306,22 @@ def main():
             try: w.kq.control(None, 1, min(30.0, a.max_wait - (time.time() - t0)))
             except OSError: pass
         st = W.read_state(sess); sj = w.state_json()
-        idle = (time.time() - (st['lastActivityAt'] or 0) / 1000.0) / 60.0
+        w.last_act = st['lastActivityAt']; w.last_record_ms = w._last_record_ms()
+        _open = w._last_turn()[1]
+        idle = (time.time() - (w.activity_ms() or 0) / 1000.0) / 60.0
         try: procs = len(W.live_children(sess))
         except Exception: procs = -1
-        emit('AUDIT ct=%s idle_min=%d live=%d inflight=%d cec=%s' % (st['ct'], idle, procs, len(sj.get('in_flight') or []), st['cec']))
+        emit('AUDIT ct=%s idle_min=%d live=%d inflight=%d cec=%s open=%d' % (st['ct'], idle, procs, len(sj.get('in_flight') or []), st['cec'], 1 if _open else 0))
         return 0
     while True:
         for line in w.poll(a.backstop):
             emit(line)
             if not a.follow: return 0
         if a.max_wait and time.time() - t0 > a.max_wait:
-            idle = int(time.time() - (w.last_act or 0) / 1000.0) if w.last_act else -1
+            _a = w.activity_ms()
+            idle = int(time.time() - _a / 1000.0) if _a else -1
             st_ = w.state_json()
-            emit('HEARTBEAT idle_min=%d ct=%s inflight=%d' % (idle / 60.0, w.ct, len(st_.get('in_flight') or []))); return 3
+            emit('HEARTBEAT idle_min=%d ct=%s inflight=%d open=%d' % (idle / 60.0, w.ct, len(st_.get('in_flight') or []), 1 if w.turn_open else 0)); return 3
 
 if __name__ == '__main__':
     sys.exit(main())

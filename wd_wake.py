@@ -584,7 +584,10 @@ def main():
         openq = []
         for t in turns[-3:]:
             for _ts, _txt in t.assistant_texts: openq += W.owner_gate_hints(_txt)
-        idle_min = (time.time() - (st['lastActivityAt'] or 0) / 1000.0) / 60.0
+        # NOT lastActivityAt alone: it does not advance during a turn the app is not attached to (a
+        # peer-opened turn freezes it at delivery), so it reads minutes of silence mid-work. Transcript wins.
+        _last_rec = W.ms_of_iso(turns[-1].end_ts) if turns else None
+        idle_min = (time.time() - max(st['lastActivityAt'] or 0, _last_rec or 0) / 1000.0) / 60.0
         # An open turn means it is working even with no subprocess: the model reads and writes without
         # spawning anything. Treating that as idle nudged a session that was mid-answer.
         _open_turn = turns[-1] if turns and turns[-1].end_state == 'open' else None

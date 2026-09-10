@@ -28,6 +28,15 @@ def iso_ms(ms):
     if not ms: return None
     return datetime.datetime.utcfromtimestamp(ms / 1000.0).strftime('%Y-%m-%dT%H:%M:%SZ')
 
+def ms_of_iso(ts):
+    """ISO-8601 (the transcript's own stamps) -> epoch ms. The inverse of iso_ms."""
+    if not ts: return None
+    try:
+        t = ts.replace('Z', '+00:00')
+        return int(datetime.datetime.fromisoformat(t).timestamp() * 1000)
+    except Exception:
+        return None
+
 def now_iso():
     return datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
 
