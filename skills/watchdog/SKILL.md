@@ -174,6 +174,22 @@ gets skimmed too.
 
 The file system tells you what is true right now. The open turn tells you whether anyone already knows.
 
+## Your own scripts are not exempt: check the denominator first
+
+Every rule here about the target's instruments applies to yours. The watchdog's scripts read transcripts, parse
+state files and count findings, and they fail the same way: confidently, on nothing, in a shape that looks like
+an answer.
+
+Measured, on this tool's own acceptance log: a one-off audit of the night's findings reported zero findings
+raised, because it assumed a column layout instead of reading one row of the file. The log held 42. It gave
+itself away by its denominator, exactly as the target's four did — a count that cannot be right for a domain you
+already know the size of.
+
+So before reporting any number your own script produced, make it print what it looked at: how many rows it read,
+how many it matched, how many it skipped. If the count is impossible against something you already know, stop.
+And never quote a figure from a script you wrote in the same breath as the claim it supports without that check,
+because the script and the claim were built from the same wrong assumption.
+
 ## Do not relay a result the target is still adjudicating
 
 Reading a finished job's output file the moment it exits feels like being ahead. It is not: the target has the
