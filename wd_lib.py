@@ -460,6 +460,18 @@ ANNOUNCE_RE = re.compile(
 ACTION_VERB_RE = re.compile(r'\b(render|dispatch|run|re-?run|launch|build|commit|push|write|replay|measure|re-?measure|merge|fix|implement|send|score|cut|re-?cut|verify|check|watch|hook|burn|encode|generate|produce|start|kick)\w*\b', re.I)
 CONDITIONAL_RE = re.compile(r"\b(if|once|when|after you|unless|let me know|want me|should I|shall I|your call|you decide|await|waiting for)\b|\?\s*$", re.I)
 DISPATCH_CLAIM_RE = re.compile(r'\b(dispatch(?:ed|ing)?|sent (?:it |that |this |the \w+ )?to codex|codex is (?:now )?(?:running|working|on it)|queued (?:to|for|on) codex|handed (?:it |this )?(?:off )?to codex|codex-run (?:task|send|say|queue|steer))\b', re.I)
+# An action DECLARED but not taken in the same turn. Past-tense claims are covered by
+# DISPATCH_CLAIM_RE above; this is the other half, and it is the one that cost real time on
+# 2026-09-10: "I'm putting it to Codex", "I'll send it", "getting that review now" - stated,
+# then the turn ended with no dispatch in it. A reader takes the sentence for the event.
+INTENT_RE = re.compile(
+    r"\b(?:i'?m|i am|i'?ll|i will|going to|about to|next i|now i)\b[^.!?\n]{0,80}"
+    r"\b(?:send|sending|dispatch\w*|put(?:ting)? (?:it|this|that|them)? ?to|ask(?:ing)?|hand(?:ing)? (?:it|this|off)|queue(?:ing)?|kick(?:ing)?)\b"
+    r"|\b(?:putting|sending|dispatching|asking|handing|kicking) (?:it|this|that|them|the \w+)\b[^.!?\n]{0,40}\bto\b"
+    r"|\b(?:getting|running) (?:that|the|its|a) (?:review|sign-?off|check)\b"
+    r"|\bwith codex (?:for|now)\b|\bto codex (?:for|now)\b",
+    re.I)
+
 PUSH_CLAIM_RE = re.compile(r'\b(pushed|push(?:ed)? to origin|committed and pushed|commit(?:ted)?/pushed)\b', re.I)
 COMMIT_CLAIM_RE = re.compile(r'\b(committed|commit(?:ted)? (?:as|at|in)|landed (?:as|at|in)|is at|now at|HEAD)\b', re.I)
 FILE_CLAIM_RE = re.compile(r'\b(wrote|written|saved|created|rendered|produced|generated|emitted|dumped|published|appended)\b', re.I)

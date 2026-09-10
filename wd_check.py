@@ -121,14 +121,59 @@ def check(a, sess, kind, args, state):
         return 'rollout %s' % ts_.get('rollout'), 'in_flight %s; last task_started %s; last task_complete %s; last event %s; last message: %s' % (ts_.get('in_flight'), ts_.get('last_started'), ts_.get('last_complete'), ts_.get('last_event'), W.short(ts_.get('last_agent_message') or '', 160)), dict(in_flight=ts_.get('in_flight'))
     raise SystemExit('unknown check kind %r' % kind)
 
+DISPATCH_TOOLS = ('send_message',)
+DISPATCH_CMD = __import__('re').compile(r'codex-(run|app)\b', __import__('re').I)
+
+def turn_made_a_dispatch(turn):
+    """Did this turn actually send anything -- to a peer session or to Codex?"""
+    for u in turn.tool_uses:
+        name = u.get('name') or ''
+        if any(t in name for t in DISPATCH_TOOLS): return True
+        if DISPATCH_CMD.search(json.dumps(u.get('input') or {})): return True
+    return False
+
+def owed(sess, state):
+    """The two ways the watchdog stops doing its job while talking to the owner:
+    a turn that DECLARED an action and did not take it (nobody kicked it), and a completed
+    turn nobody relayed (the owner never heard the result). Both were live on 2026-09-10."""
+    _, turns = W.last_turns(sess, n=8)
+    done = [t for t in turns if t.end_state != 'open']
+    ack = state.get('acked_turn_ts') or ''
+    rows = []
+    for t in done:
+        text = ' '.join(x for _, x in t.assistant_texts)
+        intent = [m.group(0).strip() for m in W.INTENT_RE.finditer(text)]
+        sent = turn_made_a_dispatch(t)
+        rows.append(dict(ts=t.end_ts, acked=(t.end_ts <= ack) if ack else False,
+                         declared=intent[:3], dispatched=sent,
+                         head=W.short(t.final_text or '', 140)))
+    return rows
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--target', required=True); ap.add_argument('--self', dest='self_sel'); ap.add_argument('--repo'); ap.add_argument('--ledger')
     ap.add_argument('--state-dir', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'state')); ap.add_argument('--quiet-min', type=float, default=10.0)
     ap.add_argument('--row-pattern', default=W.DEFAULT_ROW_PATTERN)
-    ap.add_argument('mode', choices=['check', 'finding']); ap.add_argument('rest', nargs=argparse.REMAINDER)
+    ap.add_argument('mode', choices=['check', 'finding', 'owed', 'acked']); ap.add_argument('rest', nargs=argparse.REMAINDER)
     a = ap.parse_args(); W.set_row_pattern(a.row_pattern)
     sess = W.find_session(a.target); state = WK.load_state(a.state_dir)
+    if a.mode == 'acked':
+        ts = a.rest[0] if a.rest else ''
+        if not ts: ap.error('acked <turn end_ts>')
+        state['acked_turn_ts'] = max(ts, state.get('acked_turn_ts') or '')
+        WK.save_state(a.state_dir, state)
+        print('relayed up to %s' % state['acked_turn_ts']); return 0
+    if a.mode == 'owed':
+        rows = owed(sess, state)
+        unacked = [r for r in rows if not r['acked']]
+        broken = [r for r in rows if r['declared'] and not r['dispatched']]
+        print('UNRELAYED completed turns: %d' % len(unacked))
+        for r in unacked: print('   %s  %s' % (r['ts'], r['head']))
+        print('DECLARED an action and made no dispatch in the same turn: %d' % len(broken))
+        for r in broken: print('   %s  declared: %s' % (r['ts'], ' | '.join(r['declared'])))
+        if not unacked and not broken: print('   nothing owed')
+        print('\nmark relayed with: wd.sh acked <turn end_ts>')
+        return 0
     if a.mode == 'check':
         kind, args = a.rest[0], a.rest[1:]
         checked, result, ev = check(a, sess, kind, args, state)
