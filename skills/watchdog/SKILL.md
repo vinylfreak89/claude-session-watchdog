@@ -290,6 +290,31 @@ gets skimmed too.
 
 The file system tells you what is true right now. The open turn tells you whether anyone already knows.
 
+## SYNTHESISE THE DEFECT, NEVER BORROW IT — a control that needs the bug to exist in production is not one
+
+A control must create the failure it detects. Pointing it at a real defect that happens to exist right now
+works exactly until that defect is fixed, and then it goes quiet without failing — the worst possible way for
+a check to die, because a silent control reads as a passing one.
+
+Measured on 2026-09-11, the same defect three times, each a level further out than the last:
+
+| the control's subject | how it died |
+|---|---|
+| **hardcoded text** to mutate | an amendment replaced the wording, so `str.replace` became a NO-OP, no mutation happened, and the check correctly passed an unmutated file |
+| a **live subject derived from the file** — the repair for the above | worked until the last open question was closed, leaving nothing to borrow, killing three controls at once |
+| a **historical commit** carrying the defect | the subject was retired hours later, so the commit no longer contained anything the check could see |
+
+The third is the subtlest and the most tempting: a commit really did carry the defect, the hash really does
+resolve, and the control still stops working. **A historical fact is not a mechanism.** Cite the commit where
+it earned its place in the record; do not make a test depend on it.
+
+**The fix is identical in all three cases: the defect's shape lives in the TEST.** Inject a marker/row pair
+into a copy of the file. Take a live pair, strip its replacement, append the withdrawn phrasing bare. Then the
+control exercises the real matching code against a defect it built, and nothing outside the test can silence it.
+
+**And the tell that you are borrowing:** if a control would start passing because someone FIXED something
+elsewhere, it is borrowing. A control's result must depend on the code under test and on nothing else.
+
 ## Your own scripts are not exempt: check the denominator first
 
 Every rule here about the target's instruments applies to yours. The watchdog's scripts read transcripts, parse
