@@ -7,7 +7,11 @@
 #   wd.sh veto F3 "reason"          record a veto
 #   wd.sh owed                      what the watchdog still owes: turns nobody relayed, and actions the target declared and did not take
 #   wd.sh answered                 record that a message was just sent to the target (the MCP send tool cannot do it itself)
+#   wd.sh ask <key> "<question>"    register a question as OPEN until explicitly resolved
+#   wd.sh open                      open questions, and whether each is DUE to re-send (peer quiet, or moved past a gate)
+#   wd.sh resolved <key>            close one
 #   wd.sh relayed <turn end_ts>     mark turns up to here as relayed to the owner (a send answers them separately)
+#   wd.sh digest <end_ts> "where"   the owner is unreachable: this turn is CAPTURED for him, not relayed. Still owed a relay.
 #   wd.sh hold <turn end_ts> "why"  deliberately hold a turn: it is blocked on the owner
 #   wd.sh cost                      append this session's per-turn token cost to state/cost.tsv
 #   wd.sh queue add "<text>"        hold an owner item until the next wake (add --urgent to send at once)
@@ -50,8 +54,14 @@ case "$cmd" in
   owed)   exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" owed ;;
   answered) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" answered ;;
   relayed) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" relayed "$@" ;;
+  digest) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" digest "$@" ;;
   hold)   exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" hold "$@" ;;
   check)  exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" check "$@" ;;
+  ask)    exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" ask "$@" ;;
+  resolved) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" resolved "$@" ;;
+  open)   exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" open ;;
+  next)   exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" next ;;
+  sent1)  exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" sent1 "$@" ;;
   finding) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" finding "$@" ;;
   queue)  sub=$1; shift
           case "$sub" in

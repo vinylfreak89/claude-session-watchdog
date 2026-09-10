@@ -155,24 +155,72 @@ def owed(sess, state):
     # Owner's formula, 2026-09-10: RELAY AND (RESPOND OR HOLD). Relay is mandatory in both
     # branches - a hold is a decision to wait for him, which he cannot make if he was never
     # told. The earlier version cleared a held turn whether or not it had been relayed.
+    # The send gate forbids answering while the target is mid-turn (owner, 2026-09-10: "wherever
+    # you get hooked to actually send a message, thats where you need to put the instruction to
+    # check if its busy, and if it is queue it"). So "not answered" is not a fault while it is
+    # busy -- it is the gate working, and reporting it every minute is noise on a state that
+    # cannot be cleared without violating the gate. RELAYING is always possible, so that half
+    # still counts. The nag resumes the moment the turn ends and the send becomes permitted.
+    _, _turns_now = W.last_turns(sess, n=1)
+    target_busy = bool(_turns_now) and _turns_now[-1].end_state == 'open'
+    # A turn CAPTURED for the owner while he is unreachable is neither relayed nor lost, and
+    # folding it into the alarm leaves the alarm permanently on -- at which point it stops being
+    # a signal at all and a genuinely unrelayed turn is invisible. Cost, 2026-09-10: the owner
+    # went to bed, every later turn read as owed, and the check could no longer distinguish
+    # "captured for his morning" from "nobody has looked at this". So they are reported
+    # SEPARATELY and still loudly: `digested` is never a resting state, only a deferral, and
+    # `relayed` is what actually clears it.
+    digested = state.get('digested') or {}
+    pending = []
     for t in done:
         why = []
-        if not (relayed and t.end_ts <= relayed): why.append('not relayed')
-        if not ((sent and t.end_ts <= sent) or t.end_ts in held): why.append('not answered or held')
+        is_relayed = bool(relayed and t.end_ts <= relayed)
+        if not is_relayed: why.append('not relayed')
+        if not ((sent and t.end_ts <= sent) or t.end_ts in held or target_busy):
+            why.append('not answered or held')
         if not why: continue
         text = ' '.join(x for _, x in t.assistant_texts)
-        rows.append(dict(ts=t.end_ts, why=' + '.join(why),
-                         declared=[m.group(0).strip() for m in W.INTENT_RE.finditer(text)][:3],
-                         dispatched=turn_made_a_dispatch(t),
-                         head=W.short(t.final_text or '', 130)))
-    return rows
+        row = dict(ts=t.end_ts, why=' + '.join(why),
+                   declared=[m.group(0).strip() for m in W.INTENT_RE.finditer(text)][:3],
+                   dispatched=turn_made_a_dispatch(t),
+                   head=W.short(t.final_text or '', 130))
+        # Only the RELAY half is deferrable this way: answering the target is a separate duty and
+        # the send gate already governs it. A digested turn that is also unanswered stays an alarm.
+        if (not is_relayed) and t.end_ts in digested and why == ['not relayed']:
+            row['note'] = (digested[t.end_ts] or {}).get('note') or ''
+            pending.append(row)
+        else:
+            rows.append(row)
+    return rows, pending
+
+
+def due_questions(sess, state, quiet_min):
+    """Open questions that should be nudged NOW: the peer has gone quiet, or has moved several
+    turns past the ask without resolving it. Never 'every poll' -- nagging a session mid-work is
+    the behaviour this primitive exists to replace."""
+    qs = state.get('open_questions') or {}
+    if not qs: return []
+    st = W.read_state(sess); ct = st.get('ct')
+    quiet = False
+    try:
+        last = W.activity_ms(sess)
+        quiet = (W.ms_of_iso(W.now_iso()) - last) / 60000.0 >= quiet_min
+    except Exception:
+        pass
+    out = []
+    for k, q in sorted(qs.items()):
+        try: age = int(ct) - int(q.get('asked_ct') or ct)
+        except Exception: age = 0
+        if quiet: out.append((k, q, 'peer is quiet', age))
+        elif age >= 3: out.append((k, q, 'moved %d turns past the ask' % age, age))
+    return out
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--target', required=True); ap.add_argument('--self', dest='self_sel'); ap.add_argument('--repo'); ap.add_argument('--ledger')
     ap.add_argument('--state-dir', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'state')); ap.add_argument('--quiet-min', type=float, default=10.0)
     ap.add_argument('--row-pattern', default=W.DEFAULT_ROW_PATTERN)
-    ap.add_argument('mode', choices=['check', 'finding', 'owed', 'relayed', 'hold', 'answered']); ap.add_argument('rest', nargs=argparse.REMAINDER)
+    ap.add_argument('mode', choices=['check', 'finding', 'owed', 'relayed', 'hold', 'answered', 'ask', 'resolved', 'open', 'next', 'sent1', 'digest']); ap.add_argument('rest', nargs=argparse.REMAINDER)
     a = ap.parse_args(); W.set_row_pattern(a.row_pattern)
     sess = W.find_session(a.target); state = WK.load_state(a.state_dir)
     if a.mode == 'answered':
@@ -180,7 +228,7 @@ def main():
         # records them. Forgetting it makes `owed` claim a turn is unanswered when it was answered.
         state['last_send_ts'] = W.now_iso(); WK.save_state(a.state_dir, state)
         print('answered at %s' % state['last_send_ts']); return 0
-    if a.mode in ('relayed', 'hold'):
+    if a.mode in ('relayed', 'hold', 'digest'):
         ts = a.rest[0] if a.rest else ''
         if not ts: ap.error('%s <turn end_ts> %s' % (a.mode, '"reason"' if a.mode == 'hold' else ''))
         if a.mode == 'hold' and 'owner' not in ' '.join(a.rest[1:]).lower() and 'you' not in ' '.join(a.rest[1:]).lower():
@@ -192,23 +240,119 @@ def main():
             print('REFUSED: hold is for turns blocked on the OWNER. Waiting on Codex, a subagent'
                   ' or a job is work in flight -- kick it or poll it, do not hold it.')
             return 1
-        if a.mode == 'relayed':
+        if a.mode == 'digest':
+            note = ' '.join(a.rest[1:]).strip()
+            if not note: ap.error('digest <turn end_ts> "where it was captured"')
+            state.setdefault('digested', {})[ts] = dict(note=note, ts=W.now_iso())
+            print('captured %s for the owner: %s  -- still owed a relay' % (ts, note))
+        elif a.mode == 'relayed':
             state['last_relay_ts'] = max(ts, state.get('last_relay_ts') or '')
-            print('relayed to the owner up to %s' % state['last_relay_ts'])
+            # Relaying is the only thing that clears a deferral; drop what it covers.
+            dg = state.get('digested') or {}
+            for k in [k for k in dg if k <= state['last_relay_ts']]: dg.pop(k, None)
+            print('relayed to the owner up to %s (%d still captured-but-unrelayed)' % (state['last_relay_ts'], len(dg)))
         else:
             reason = ' '.join(a.rest[1:]).strip()
             if not reason: ap.error('hold <turn end_ts> "why it is blocked on the owner"')
             state.setdefault('held_turns', {})[ts] = dict(reason=reason, ts=W.now_iso())
             print('holding %s: %s' % (ts, reason))
         WK.save_state(a.state_dir, state); return 0
+
+    # ---- unanswered questions (owner's primitive, 2026-09-10) ----------------------------
+    # A question sent mid-turn is exactly where things stop getting answered: it lands at a
+    # turn boundary the other side is already past, and nothing ever asks again. So questions
+    # are REGISTERED when asked and stay open until explicitly resolved. There is deliberately
+    # no keyword test for "did they answer" -- that is a proxy for the property, and every
+    # proxy this project built tonight came apart. Being loud until resolved is the design.
+    #
+    # Re-send is NOT every poll. The owner's rule: only when the other side goes quiet, or when
+    # it is moving past a gate with the question unreacted. Nagging a session mid-work is the
+    # behaviour that caused this.
+    if a.mode == 'ask':
+        key = a.rest[0] if a.rest else ''
+        text = ' '.join(a.rest[1:]).strip()
+        if not key or not text: ap.error('ask <key> "<the question as sent>"')
+        st = W.read_state(sess)
+        state.setdefault('open_questions', {})[key] = dict(
+            text=text, asked_ts=W.now_iso(), asked_ct=str(st.get('ct')), resends=0, last_send=W.now_iso())
+        WK.save_state(a.state_dir, state); print('open question %s registered at ct %s' % (key, st.get('ct'))); return 0
+    if a.mode == 'resolved':
+        key = a.rest[0] if a.rest else ''
+        if not key: ap.error('resolved <key>')
+        q = (state.get('open_questions') or {}).pop(key, None)
+        if q is None: print('no open question %s' % key); return 1
+        WK.save_state(a.state_dir, state)
+        print('resolved %s (open since %s, %d resend(s))' % (key, q['asked_ts'], q.get('resends', 0))); return 0
+    if a.mode == 'open':
+        qs = state.get('open_questions') or {}
+        st = W.read_state(sess); ct = st.get('ct')
+        idle = W.activity_ms(sess) if hasattr(W, 'activity_ms') else None
+        quiet = (idle is not None and (W.ms_of_iso(W.now_iso()) - idle) / 60000.0 >= a.quiet_min)
+        print('OPEN QUESTIONS: %d' % len(qs))
+        for k, q in sorted(qs.items()):
+            try: age = int(ct) - int(q.get('asked_ct') or ct)
+            except Exception: age = 0
+            # gate-crossing: the other side has moved several turns past the ask without it resolving
+            gate = age >= 3
+            due = quiet or gate
+            print('   %-14s %s turns ago%s' % (k, age, '   ** DUE: %s' % ('peer quiet' if quiet else 'moved past a gate') if due else ''))
+            print('      %s' % W.short(q['text'], 150))
+        if not qs: print('   none')
+        return 0
+
+    # ---- ONE AT A TIME (owner, 2026-09-10) --------------------------------------------------
+    # "ONE AT A TIME. the whole point is not to confuse the target. when you flush it a bunch of
+    #  shit it gets confused. you should be dolling things out one at a time. wherever you get
+    #  hooked to actually send a message, thats where you need to put the instruction to check if
+    #  its busy, and if it is queue it" -- and "unless I specifically tell you send this immediately".
+    #
+    # This is the gate that runs BEFORE every send. It is not a flush: it hands back at most ONE
+    # item, and only when the target is not mid-turn. An advisory queue was bypassed all evening
+    # because nothing sat on the send path; this does.
+    if a.mode == 'next':
+        q = [x for x in (state.get('owner_queue') or []) if not x.get('sent')]
+        _, turns = W.last_turns(sess, n=1)
+        busy = bool(turns) and turns[-1].end_state == 'open'
+        urgent = [x for x in q if x.get('urgent')]
+        if busy and not urgent:
+            print('TARGET BUSY (turn open). %d queued. SEND NOTHING.' % len(q)); return 1
+        pick = (urgent or q)
+        if not pick:
+            print('nothing queued%s' % (' (target busy)' if busy else '')); return 1
+        item = pick[0]
+        if busy: print('** URGENT override: target is mid-turn, owner marked this send-immediately **')
+        print('SEND EXACTLY THIS ONE ITEM, then run:  wd.sh sent1 %s' % item.get('id'))
+        print('---'); print(item.get('text','')); print('---')
+        print('%d other item(s) stay queued.' % (len(q)-1)); return 0
+    if a.mode == 'sent1':
+        i = a.rest[0] if a.rest else ''
+        for x in (state.get('owner_queue') or []):
+            if str(x.get('id')) == i: x['sent'] = W.now_iso(); break
+        else: print('no queued item %s' % i); return 1
+        state['last_send_ts'] = W.now_iso(); WK.save_state(a.state_dir, state)
+        print('item %s marked sent at %s' % (i, state['last_send_ts'])); return 0
     if a.mode == 'owed':
-        rows = owed(sess, state)
+        rows, pending = owed(sess, state)
         broken = [r for r in rows if r['declared'] and not r['dispatched']]
         print('OWED completed turns: %d' % len(rows))
         for r in rows: print('   %s  [%s]  %s' % (r['ts'], r['why'], r['head']))
         print('DECLARED an action and made no dispatch: %d' % len(broken))
         for r in broken: print('   %s  declared: %s' % (r['ts'], ' | '.join(r['declared'])))
         if not rows: print('   nothing owed')
+        print('CAPTURED for the owner, NOT yet relayed to him: %d  (drain with: wd.sh relayed <ts>)' % len(pending))
+        for r in pending: print('   %s  %s  %s' % (r['ts'], ('[' + r['note'] + ']') if r.get('note') else '', r['head']))
+        # The owner's primitive, 2026-09-10: "keep track of what you've requested and what the
+        # engine has and hasn't answered... keep reminding yourself, and not interrupting, but
+        # nudging for answers when you don't get them." So open questions ride on the check that
+        # already polls, rather than needing to be remembered -- being remembered is what failed.
+        qs = state.get('open_questions') or {}
+        due = due_questions(sess, state, a.quiet_min)
+        print('UNANSWERED requests: %d (due to nudge: %d)' % (len(qs), len(due)))
+        for k, q, why, age in due:
+            print('   ** NUDGE %-14s asked %s turns ago -- %s' % (k, age, why))
+            print('      %s' % W.short(q['text'], 150))
+        for k in sorted(set(qs) - {d[0] for d in due}):
+            print('   (open, not due) %s' % k)
         return 0
     if a.mode == 'check':
         kind, args = a.rest[0], a.rest[1:]
