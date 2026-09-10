@@ -166,7 +166,11 @@ def main():
     if a.mode == 'owed':
         rows = owed(sess, state)
         unacked = [r for r in rows if not r['acked']]
-        broken = [r for r in rows if r['declared'] and not r['dispatched']]
+        # Only turns not yet acked: acking means the watchdog dealt with that turn, so a
+        # declaration it did not execute has either been kicked or been overtaken. Without
+        # this the same historical turn is reported every minute forever - which it was,
+        # within one minute of the per-minute monitor going up.
+        broken = [r for r in rows if r['declared'] and not r['dispatched'] and not r['acked']]
         print('UNRELAYED completed turns: %d' % len(unacked))
         for r in unacked: print('   %s  %s' % (r['ts'], r['head']))
         print('DECLARED an action and made no dispatch in the same turn: %d' % len(broken))
