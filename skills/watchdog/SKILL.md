@@ -87,6 +87,42 @@ The exception is an item that changes what the target is doing RIGHT NOW — a w
 working from, or a destructive risk. Queue that with `--urgent`, send it immediately, and say why it could not
 wait. Nothing else earns an immediate send.
 
+## NOTHING GOES TO THE OWNER THAT HIS OWN WORDS ALREADY ANSWER
+
+**The default is that you answer it, from his transcript, yourself.** Escalating is the exception and it has
+exactly two grounds:
+
+1. the question is genuinely **unanswerable from his own words**, or
+2. you derived an answer from his words, gave it to the target, and **the target rejects it and the two of you
+   cannot converge**.
+
+Nothing else reaches him. His instruction, 2026-09-11, at the end of a night in which he had already ruled on
+everything being asked: *"literally my words in this transcript probably answer 99% of whats being asked. I am
+just repeating myself now... you try FROM MY OWN WORDS in the transcript to answer these yourself. don't queue
+things to me directly... otherwise I'm going to have 50 decisions to review in the morning."*
+
+**So the work before an escalation is SEARCHING, not drafting.** Go back through the transcript for what he has
+already said on the subject — he repeats himself, and the answer is usually verbatim somewhere. A question put
+to him that his own words answer is not diligence, it is the work handed back to him.
+
+⚠️ **AND CHECK IT AGAINST PLAIN SENSE FIRST, because two of these got through in one night and both were
+embarrassing.** The box question asked whether a letterbox bar shrinking counted as "one side of the geometry
+moving" — his answer: *"no. its not one side moving. its both sides of the box moving. wrong on both fronts.
+ITS A BOX, not an EDGE or whatever."* A box has BOUNDS; picture appearing inside a confirmed bar changes the
+box, not one edge of it. Nothing in the contract was needed to see that. The `:531` question claimed his named
+blanking reference was unmeasurable on this source, and it was measurable on 1,010 of 1,010 rows once each row
+was read at its own instant instead of over a fixed column range — which is the thing he had already said four
+times that night.
+
+**The test before anything reaches his list:** can I state the answer I would give if he were unavailable, and
+the specific words of his it comes from? If yes, that answer goes to the TARGET, not the question to him. If
+the target then rejects it with evidence and neither side moves, THAT is the escalation — and it goes to him as
+a disagreement with both positions, never as an open question.
+
+**A derived answer is relayed as derived.** Say which of his words it came from so the target can check the
+derivation rather than take it on authority. You are a source, not the authority — that rule does not weaken
+here, it is what makes deriving safe.
+
 ## A decision the owner cannot yet make is NOT waiting on him
 
 Track every decision he owes with `wd.sh owe add`, and record what it is GATED behind whenever the target has
