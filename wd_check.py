@@ -205,11 +205,18 @@ def next_item(sess, state):
     _, turns = W.last_turns(sess, n=1)
     if turns and turns[-1].end_state == 'open':
         return 'busy', None, 'TARGET BUSY (turn open). %d queued. SEND NOTHING.' % len(q), len(q)
-    owed_rows = owed(sess, state)
-    if owed_rows:
-        return 'owed', None, ('ITS LAST REPLY IS UNHANDLED (%d owed turn(s), oldest %s). %d queued. '
-                              'SEND NOTHING -- relay and answer first.'
-                              % (len(owed_rows), owed_rows[0]['ts'], len(q))), len(q)
+    # Only the RELAY half gates a send, and the reason is a deadlock this hit within the hour:
+    # `owed` counts a turn unhandled until it is BOTH relayed and answered, and the thing that
+    # answers it is usually the next queued item -- so blocking on "not answered" blocked the only
+    # message that could clear it. Relaying is a duty to the owner that no queue item performs, so
+    # that half gates; answering is what releasing the item DOES.
+    # The pacing the owner asked for ("don't rapid fire the queue") is carried by hold_until below,
+    # which is the control that actually waits for the WORK rather than for a turn boundary.
+    unrelayed = [r for r in owed(sess, state) if 'not relayed' in r['why']]
+    if unrelayed:
+        return 'owed', None, ('ITS LAST REPLY IS UNRELAYED (%d turn(s), oldest %s). %d queued. '
+                              'SEND NOTHING -- read it and relay to the owner first.'
+                              % (len(unrelayed), unrelayed[0]['ts'], len(q))), len(q)
     sendable = [x for x in q if not x.get('hold_until')]
     if not sendable:
         held = q[0]

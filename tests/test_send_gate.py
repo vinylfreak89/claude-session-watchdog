@@ -44,8 +44,13 @@ def main():
     _setup(busy=True)
     v, _, why, _ = C.next_item(None, _q()); check('target MID-TURN', 'busy', v, why)
 
-    _setup(owed_rows=[dict(ts=TS)])
-    v, _, why, _ = C.next_item(None, _q()); check('its last reply UNHANDLED (owed)', 'owed', v, why)
+    _setup(owed_rows=[dict(ts=TS, why='not relayed')])
+    v, _, why, _ = C.next_item(None, _q()); check('its last reply UNRELAYED', 'owed', v, why)
+
+    # the deadlock control: a turn that is relayed but not yet answered must NOT block, because the
+    # queued item is how it gets answered. Blocking here stopped the only message that could clear it.
+    _setup(owed_rows=[dict(ts=TS, why='not answered or held')])
+    v, _, why, _ = C.next_item(None, _q()); check('relayed but UNANSWERED -> must still send', 'send', v, why)
 
     _setup()
     v, _, why, _ = C.next_item(None, _q(hold_until='Q34 resolved')); check('item HELD behind a condition', 'held', v, why)
