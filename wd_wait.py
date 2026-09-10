@@ -291,15 +291,37 @@ class Watch(object):
                 m = re.search(r'agentId: (\w+)', a.get('result') or '')
                 if m: ids[m.group(1)] = a.get('ts')
         if not ids: return []
+        # Count only USER records. The launch acknowledgement is one; the completion notification is a
+        # second. Assistant records are excluded deliberately: counting every mention broke this check the
+        # first time it ran, because the target AUDITED its own subagents, its audit text named their ids,
+        # and three live agents were read as returned while their transcripts were being written to that
+        # second. Anything the target says can mention an id for any reason; only a delivery record marks
+        # a return.
         counts = dict.fromkeys(ids, 0)
         try:
             with open(W.transcript_path(self.sess), errors='replace') as fh:
                 for ln in fh:
-                    for aid in ids:
-                        if aid in ln: counts[aid] += 1
+                    if not ln.strip(): continue
+                    hit = [aid for aid in ids if aid in ln]
+                    if not hit: continue
+                    try: rec = json.loads(ln)
+                    except Exception: continue
+                    if rec.get('type') != 'user': continue
+                    for aid in hit: counts[aid] += 1
         except OSError:
             return []
-        return [(aid, ts) for aid, ts in ids.items() if counts[aid] <= 1]
+        out = []
+        for aid, ts in ids.items():
+            if counts[aid] > 1: continue
+            # Progress, measured the same way a background job's is: has its own transcript grown?
+            # A subagent appends as it works, so mtime is direct evidence of life, not a guess.
+            # <transcript>.jsonl -> <transcript>/subagents/agent-<id>.jsonl, derived from the path
+            # itself rather than a session field, so it cannot drift from where the transcript lives.
+            sub = os.path.join(W.transcript_path(self.sess)[:-len('.jsonl')], 'subagents', 'agent-%s.jsonl' % aid)
+            try: wrote_min = (time.time() - os.path.getmtime(sub)) / 60.0
+            except OSError: wrote_min = None
+            out.append((aid, ts, wrote_min))
+        return out
 
     def idle_check(self):
         """The target stopped: silent past --idle-after, nothing running, nothing in flight, no reply owed.
@@ -312,12 +334,17 @@ class Watch(object):
         if self.turn_open: return []   # working, not stopped -- whatever the app's counters say
         agents = self.outstanding_agents()
         if agents:
-            oldest = min(W.ms_of_iso(ts) or 0 for _, ts in agents)
+            oldest = min(W.ms_of_iso(ts) or 0 for _, ts, _ in agents)
             wait_min = (time.time() - oldest / 1000.0) / 60.0
             self.idle_reported_for = act
-            if wait_min < self.stall_min:
-                return ['WAITING agents=%d oldest_min=%d ct=%s' % (len(agents), wait_min, self.ct)]
-            return ['STALL kind=agent id=%s idle_min=%d reason=no_completion_record' % (agents[0][0], wait_min)]
+            # An agent whose own transcript is still growing is working, however long it has been at it.
+            quiet = [a for a in agents if a[2] is None or a[2] >= self.stall_min]
+            if len(quiet) < len(agents) or wait_min < self.stall_min:
+                fresh = min([a[2] for a in agents if a[2] is not None] or [-1])
+                return ['WAITING agents=%d oldest_min=%d wrote_min=%.1f ct=%s'
+                        % (len(agents), wait_min, fresh, self.ct)]
+            return ['STALL kind=agent id=%s idle_min=%d reason=no_completion_record_and_transcript_quiet'
+                    % (quiet[0][0], wait_min)]
         st = self.state_json()
         if st.get('in_flight'): return []
         if (st.get('awaiting_reply') or {}) and not (st.get('awaiting_reply') or {}).get('poked'): return []
