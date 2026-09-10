@@ -114,8 +114,19 @@ def check(a, sess, kind, args, state):
         hits = [(i + 1, ln.strip()) for i, ln in enumerate(open(rp, errors='replace').read().splitlines()) if _re.search(pat, ln, _re.I)]
         return checked, ('%d line(s): %s' % (len(hits), '; '.join('L%d: %s' % (n, W.short(t, 120)) for n, t in hits[:4])) if hits else 'no line matches'), dict(hits=len(hits))
     if kind == 'dispatch':
+        # A Codex thread id is UUID-shaped, and this check can only look up that namespace.
+        # Handed an id of any other kind -- a harness background-task id, say -- it used to glob,
+        # miss, and return a bare `no rollout found`, which reads as "the claimed dispatch never
+        # happened" and is one step from filing dispatch_claim_no_call against work that was done.
+        # A negative must say WHICH negative it is. Control: tests/test_dispatch_check.py.
+        if not __import__('re').fullmatch(r'[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}|[0-9a-fA-F]{8,}', args[0]):
+            return ('id %r against Codex thread ids' % args[0],
+                    'NOT A THREAD ID -- this check only resolves UUID-shaped Codex thread ids, so it '
+                    'cannot speak to this id at all. Absence here is NOT evidence the dispatch did not '
+                    'happen; corroborate by the reply and by rollout mtimes instead.',
+                    dict(found=None, id_form='unrecognised'))
         fs = glob.glob(os.path.join(W.CODEX_SESSIONS, '*', '*', '*', 'rollout-*-%s*.jsonl' % args[0]))
-        if not fs: return 'Codex rollouts for thread %s*' % args[0], 'no rollout found', dict(found=False)
+        if not fs: return 'Codex rollouts for thread %s*' % args[0], 'no rollout found', dict(found=False, id_form='thread')
         tid = os.path.basename(max(fs, key=os.path.getmtime)).split('rollout-')[1][20:-6]
         ts_ = W.codex_thread_state(tid)
         return 'rollout %s' % ts_.get('rollout'), 'in_flight %s; last task_started %s; last task_complete %s; last event %s; last message: %s' % (ts_.get('in_flight'), ts_.get('last_started'), ts_.get('last_complete'), ts_.get('last_event'), W.short(ts_.get('last_agent_message') or '', 160)), dict(in_flight=ts_.get('in_flight'))
