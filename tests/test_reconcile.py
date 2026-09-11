@@ -1046,7 +1046,7 @@ CHAIN_DECISIONS = [
 CHAIN_TRUTH = {
     'D1': ['complete'],
     'D2': ['answered_not_forwarded'],
-    'D3': ['closed_without_answer'],
+    'D3': ['closed_without_matched_answer'],
     'D4': ['answered_not_closed', 'forwarded_not_tracked'],
 }
 
@@ -1137,7 +1137,7 @@ def test_decision_chains():
         ck('his answers are read from attachment records',
            len(art['owner']), sum(1 for _, _, a_, _, _ in CHAIN_DECISIONS if a_))
 
-        ch = R.chains(opens, closes, art)
+        ch = R.chains(opens, closes, art, seq_base=len(CHAIN_DECISIONS))
         for did, want in CHAIN_TRUTH.items():
             ck('%s -> %s' % (did, '+'.join(want)), sorted(ch[did]['verdicts']), sorted(want))
 
@@ -1164,6 +1164,77 @@ def test_decision_chains():
         return fails
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+
+
+def test_chain_edges():
+    """The chain's own corner cases. Each of these gave a WRONG answer when probed, and a
+    wrong attribution is worse than an admitted gap -- it reports a genuinely unanswered
+    decision as answered, or a closed one as still open against him."""
+    fails = []
+    def ck(name, got, want):
+        ok = got == want
+        print('%-56s %s%s' % (name, 'PASS' if ok else 'FAIL',
+                              '' if ok else '  got=%r want=%r' % (got, want)))
+        if not ok:
+            fails.append(name)
+
+    empty = {'owner': [], 'sends': []}
+
+    # a window that starts mid-history: the first ask here is D5, not D1
+    opens = [{'store': 'owner_decisions', 'ts': '2026-09-10T05:00:00Z', 'cite': 'f:1#0',
+              'text': 'a decision asked long after the first four already existed here'}]
+    closes = [{'ts': '2026-09-10T06:00:00Z', 'id': 'D5', 'verb': 'owe done', 'cite': 'f:2#0'}]
+    ch = R.chains(opens, closes, empty, seq_base=5)
+    ck('a mid-history window keys the ask as D5, not D1', list(ch), ['D5'])
+    ck('and its close is matched', bool(ch['D5']['closed']), True)
+    ck('so it is not reported as still open against him',
+       'answered_not_closed' in ch['D5']['verdicts'], False)
+
+    # the counter cannot key them: report unkeyed rather than guess
+    ch2 = R.chains(opens, closes, empty, seq_base=None)
+    ck('with no counter the chain is UNKEYED, not assumed to be D1',
+       list(ch2)[0].startswith('UNKEYED:'), True)
+    ch3 = R.chains(opens, closes, empty, seq_base=0)
+    ck('a counter smaller than the ask count is refused too',
+       list(ch3)[0].startswith('UNKEYED:'), True)
+
+    # two decisions worded alike: one ruling must not be claimed by both
+    o2 = [{'store': 'owner_decisions', 'ts': '2026-09-10T01:00:00Z', 'cite': 'f:1#0',
+           'text': 'does position alone establish the head switch identity here'},
+          {'store': 'owner_decisions', 'ts': '2026-09-10T02:00:00Z', 'cite': 'f:2#0',
+           'text': 'does position alone establish the head switch identity here too'}]
+    a2 = {'owner': [{'ts': '2026-09-10T03:00:00Z', 'kind': 'user',
+                     'text': 'position alone does not establish head switch identity'}],
+          'sends': []}
+    c2 = R.chains(o2, [], a2, seq_base=2)
+    ck('an answer claimed by two decisions is attributed to neither',
+       [c2[k]['answered'] for k in sorted(c2)], [None, None])
+    ck('and both are marked ambiguous, not unanswered',
+       all('answer_ambiguous' in c2[k]['verdicts'] for k in c2), True)
+
+    # a terse reply cannot be matched by shared terms -- say so rather than call it unanswered
+    o3 = [{'store': 'owner_decisions', 'ts': '2026-09-10T01:00:00Z', 'cite': 'f:1#0',
+           'text': 'keep the fitted comb tolerance or drop it entirely now please'}]
+    c3 = R.chains(o3, [{'ts': '2026-09-10T03:00:00Z', 'id': 'D1', 'verb': 'owe done',
+                        'cite': 'f:2#0'}],
+                  {'owner': [{'ts': '2026-09-10T02:00:00Z', 'kind': 'user', 'text': 'drop it'}],
+                   'sends': []}, seq_base=1)
+    ck('a terse answer yields "no MATCHED answer", not "no answer"',
+       c3['D1']['verdicts'], ['closed_without_matched_answer'])
+
+    # a forward that precedes the answer is not a forward
+    o4 = [{'store': 'owner_decisions', 'ts': '2026-09-10T01:00:00Z', 'cite': 'f:1#0',
+           'text': 'which nominal threshold ruling words here now applies to the cut'}]
+    a4 = {'owner': [{'ts': '2026-09-10T05:00:00Z', 'kind': 'user',
+                     'text': 'nominal threshold ruling words here now applies'}],
+          'sends': [{'ts': '2026-09-10T02:00:00Z', 'msg': 'nominal threshold ruling words here now'}]}
+    ck('a send BEFORE the answer is not counted as forwarding it',
+       R.chains(o4, [], a4, seq_base=1)['D1']['forwarded'], None)
+
+    # empty input
+    ck('no decisions yields no chains', R.chains([], [], empty, seq_base=0), {})
+    return fails
 
 
 def main():
@@ -1310,6 +1381,8 @@ def main():
         fails.extend(test_tm_reader())
         print('\n--- decision chains + snapshot series ---')
         fails.extend(test_decision_chains())
+        print('\n--- decision chain edges ---')
+        fails.extend(test_chain_edges())
         print('\n--- corner cases and error handling ---')
         fails.extend(test_corner_cases())
         print('\n--- robustness: concurrency, crash residue, hostile input ---')

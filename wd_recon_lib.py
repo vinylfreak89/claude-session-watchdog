@@ -745,7 +745,7 @@ def tm_state_at(raw):
 FORWARD_HINT = re.compile(r'\b(owner|his words|verbatim|he (?:says|said|ruled|answered))\b', re.I)
 
 
-def chains(opens, closes, art, snapshots=None):
+def chains(opens, closes, art, seq_base=None, snapshots=None):
     """A DECISION IS A CHAIN, and every link can break independently.
 
     Owner, 2026-09-11: "decisions can follow a chain. for example, a decision is put to me, you
@@ -766,38 +766,66 @@ def chains(opens, closes, art, snapshots=None):
       forwarded_not_tracked   relayed, but what it answers was never updated or closed
       answered_not_closed     he answered and the item still sits open against him
     """
-    by_id = {}
-    for o in opens:
-        if o['store'] != 'owner_decisions':
-            continue
-        by_id.setdefault(o.get('id') or o['cite'], {'asked': o['ts'], 'text': o['text'],
-                                                    'cite': o['cite']})
-    # attach ids positionally when the open did not carry one: D1 is the first, and so on
-    ordered = sorted(by_id.items(), key=lambda kv: kv[1]['asked'])
-    seq = {}
-    for n, (k, v) in enumerate(ordered, 1):
-        seq['D%d' % n] = v
+    # IDS COME FROM THE RECORD, NOT FROM POSITION. `wd_wake` assigns D<seq> from a counter
+    # that persists across the whole history, so "the first ask in this window is D1" is only
+    # true when the window starts at the beginning. Measured 2026-09-11: a decision genuinely
+    # numbered D5 was relabelled D1, and its close -- recorded against D5 -- went unmatched, so
+    # a closed chain reported answered_not_closed.
+    #
+    # The ask carries no id (the id is minted by the script, after the command), so the link is
+    # the ORDER of asks against the decision counter's base: if the store's seq is N and this
+    # window contains k asks, the last ask is D<N> and they count back from there. When that
+    # cannot be established the id is UNKNOWN and the chain is reported as unkeyed rather than
+    # guessed at.
+    asks = sorted([o for o in opens if o['store'] == 'owner_decisions'], key=lambda o: o['ts'])
+    seq = None
+    if isinstance(seq_base, int) and seq_base >= len(asks):
+        seq = seq_base
+    keyed = {}
+    for n, o in enumerate(asks):
+        if seq is not None:
+            did = 'D%d' % (seq - len(asks) + 1 + n)
+        else:
+            did = 'UNKEYED:%s' % o['cite']
+        keyed[did] = {'asked': o['ts'], 'text': o['text'], 'cite': o['cite']}
+    seq_map = keyed
     for c in closes:
-        if c['id'] in seq:
-            seq[c['id']].setdefault('closed', c['ts'])
+        if c['id'] in seq_map:
+            seq_map[c['id']].setdefault('closed', c['ts'])
     owner = sorted(art.get('owner') or [], key=lambda r: r['ts'])
     sends = sorted(art.get('sends') or [], key=lambda r: r['ts'])
     out = {}
-    for did, rec in seq.items():
+    for did, rec in seq_map.items():
         terms = _terms(rec['text'])
-        answer = next((o for o in owner if o['ts'] > rec['asked']
-                       and sum(1 for t in terms if t in o['text'].lower()) >= max(2, len(terms) // 5)),
-                      None)
+        need = max(2, len(terms) // 5)
+        cands = [o for o in owner if o['ts'] > rec['asked']
+                 and sum(1 for t in terms if t in o['text'].lower()) >= need]
+        answer, ambiguous = (cands[0] if cands else None), False
+        # An answer claimed by more than one decision is attributed to NONE of them: a wrong
+        # attribution reports a genuinely unanswered decision as answered, which is worse than
+        # an admitted gap. Measured: two similarly worded decisions both claimed one ruling.
+        if answer is not None:
+            rivals = [d for d in seq_map.values()
+                      if d is not rec and d['asked'] < answer['ts']
+                      and sum(1 for t in _terms(d['text']) if t in answer['text'].lower()) >= need]
+            if rivals:
+                answer, ambiguous = None, True
         fwd = None
         if answer:
             fwd = next((s for s in sends if s['ts'] > answer['ts']
-                        and sum(1 for t in terms if t in s['msg'].lower()) >= max(2, len(terms) // 5)),
-                       None)
+                        and sum(1 for t in terms if t in s['msg'].lower()) >= need), None)
         verdicts = []
+        if ambiguous:
+            # not "unanswered": the record may hold his answer and this cannot tell which
+            # decision it belongs to.
+            verdicts.append('answer_ambiguous')
+        elif not answer and rec.get('closed'):
+            # a close with no MATCHED answer is only evidence of a missing answer when the
+            # record could have matched one; a terse reply ("drop it") shares no terms with the
+            # question and is unmatchable by this means.
+            verdicts.append('closed_without_matched_answer')
         if answer and not fwd:
             verdicts.append('answered_not_forwarded')
-        if rec.get('closed') and not answer:
-            verdicts.append('closed_without_answer')
         if answer and not rec.get('closed'):
             verdicts.append('answered_not_closed')
         if fwd and not rec.get('closed'):

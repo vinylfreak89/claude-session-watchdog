@@ -266,7 +266,8 @@ def run_stage(n, L, S, a):
         # answer acknowledge it but never track or correct what it responds to."
         if 'stage1' in L:
             opens1, closes1, _u1 = RL.stage1(a.self_prefix, proj=a.proj)
-            ch = RL.chains(opens1, closes1, art)
+            ch = RL.chains(opens1, closes1, art,
+                           seq_base=RL.live_stores(S).get('owner_decision_seq'))
             broken = {k: v for k, v in ch.items() if v['verdicts'] != ['complete']}
             L['stage3']['chains'] = ch
             print('         %d decision chain(s): %d complete, %d broken'
