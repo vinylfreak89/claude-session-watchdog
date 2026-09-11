@@ -473,3 +473,21 @@ by the tool:
 ## Out of scope
 
 Premise errors, wrong measurements, bad instruments, whether a change is correct.
+
+## NEVER LEAVE A TURN UNACKNOWLEDGED — the loop is closed by a REPLY, not by a mark
+
+Owner, 2026-09-11, answering D15 and overriding the "relay but do not answer" policy this session
+invented: *"you should never have an unacknowledged turn. you should always reply to the target with
+what you are acknowledging. this closes the loop. only if you end up with a simple response (1 line or
+less) those turns you may close. I will let that TRY to slide past for now, but if you two get into
+loops of just writing ACK at each other to bypass doing work, I'm going to ban you again LOL"*
+
+So: **every target turn gets a reply saying WHAT is being acknowledged.** Relaying to the owner is not
+acknowledging the target — those are different acts, and fusing them is what produced five false
+`answered` marks in one session.
+
+**The one-line exception is on probation, in his words.** A turn whose honest response is a line or
+less may be closed without sending. That exception exists to prevent ceremony, NOT to permit it: two
+agents exchanging acknowledgements to look busy is the failure he named, and it is worse than the
+silence it replaces because it consumes both sides' turns while producing nothing. If a reply has
+nothing in it but assent, the turn qualifies for the exception — say nothing and close it.
