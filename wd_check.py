@@ -483,8 +483,16 @@ def main():
         if not key: ap.error('resolved <key>')
         q = (state.get('open_questions') or {}).pop(key, None)
         if q is None: print('no open question %s' % key); return 1
+        # ARCHIVE, NEVER DESTROY. This used to `pop` and drop the item on the floor: D13's text
+        # survived only because it had been copied into the digest by hand, and two others had to be
+        # reconstructed from the transcript. An item's own words are the evidence that it was real
+        # and what it asked, so closing it must keep them. Control: tests/test_resolved_archives.py.
+        q = dict(q); q['resolved_ts'] = W.now_iso()
+        if len(a.rest) > 1: q['resolved_reason'] = ' '.join(a.rest[1:])
+        state.setdefault('resolved_questions', {})[key] = q
         WK.save_state(a.state_dir, state)
-        print('resolved %s (open since %s, %d resend(s))' % (key, q['asked_ts'], q.get('resends', 0))); return 0
+        print('resolved %s (open since %s, %d resend(s)) -- ARCHIVED, not deleted'
+              % (key, q['asked_ts'], q.get('resends', 0))); return 0
     if a.mode == 'open':
         qs = state.get('open_questions') or {}
         st = W.read_state(sess); ct = st.get('ct')
