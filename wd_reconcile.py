@@ -221,7 +221,8 @@ def run_stage(n, L, S, a):
         path = RL.transcript_for(a.self_prefix, a.proj)
         numbered, bad = RL.read_records(path)
         recs = [r for _, r in numbered]
-        acts = RL.my_actions(numbered, os.path.basename(path))
+        acts = RL.resolve_from_evidence(RL.my_actions(numbered, os.path.basename(path), S, getattr(a, 'cwd', None)),
+                                        recs, RL.live_stores(S)['raw'])
         owner, exc, peers, acct = RL.owner_messages(recs)
         my_text, sends = RL.artifacts(recs)
         return path, numbered, bad, recs, acts, owner, exc, peers, acct, my_text, sends
@@ -233,12 +234,14 @@ def run_stage(n, L, S, a):
             raise SystemExit('stage 1 REFUSED: the transcript mixes timestamp formats %s. Events '
                              'are ordered by comparing timestamps as strings, and mixed formats '
                              'misorder them; normalise the reader before reconciling.' % dict(fmts))
-        opens = [x for x in acts if x['kind'] == 'open']
+        opens = [x for x in acts if x['kind'] == 'open' and x.get('state') == 'live']
         live = RL.live_stores(S)
         inv = acct['seen'] == acct['attributed'] + acct['excluded_total'] + acct.get('batch_deliveries', 0)
         L['stage1'] = {'ts': now_iso(), 'transcript': os.path.basename(path),
                        'records': len(numbered), 'unparseable': bad, 'ts_formats': dict(fmts),
                        'actions': len(acts), 'opens': len(opens),
+                       'live_actions': sum(1 for x in acts if x.get('state') == 'live'),
+                       'outstanding': len(RL.outstanding(acts)),
                        'by_outcome': dict(_c.Counter(x['outcome'] for x in acts)),
                        'owner_messages': len(owner), 'owner_accounting': acct,
                        'owner_accounting_holds': inv, 'excluded': exc, 'peer_replies': len(peers),
@@ -248,7 +251,7 @@ def run_stage(n, L, S, a):
         cov['state_keys'] = [len(live['all_keys']), len(live['all_keys'])]
         # an unparseable line is unreconciled content, so it holds record coverage below 100
         cov['records'] = [len(numbered), len(numbered) + bad]
-        cov['actions'] = [0, len(acts)]
+        cov['actions'] = [0, sum(1 for x in acts if x.get('state') == 'live')]
         print('stage 1: %d records (%d unparseable), %d actions of mine, %d opens, '
               '%d owner messages, %d state keys'
               % (len(numbered), bad, len(acts), len(opens), len(owner), len(live['all_keys'])))
@@ -297,7 +300,10 @@ def run_stage(n, L, S, a):
                        'commits': {'tally': dict(ctally),
                                    'not_ok': [{'ts': x['ts'], 'sha': x['sha'], 'verdict': x['verdict']}
                                               for x in commits if x['verdict'] != 'ok']}}
-        cov['actions'] = [len(rep), len(rep)]
+        # an action counts as reconciled only once evidence ESTABLISHED its outcome; pending ones
+        # hold confidence below 100 until Time Machine or a later record settles them
+        cov['actions'] = [len(rep), sum(1 for x in acts if x.get('state') == 'live')]
+        print('         %d live action(s) still OUTSTANDING (no evidence yet)' % len(RL.outstanding(acts)))
         print('stage 3: %d actions replayed -- %s' % (len(rep), dict(tally)))
         print('         %d decision chain(s): %d complete, %d broken'
               % (len(ch), len(ch) - len(broken), len(broken)))
@@ -365,6 +371,7 @@ def main():
     ap.add_argument('--self-prefix', default='80f99b89')
     ap.add_argument('--target', help='the target session selector, as wd.sh passes it from config')
     ap.add_argument('--target-id', help='the target session id directly (testing)')
+    ap.add_argument('--cwd', help='starting directory for records that do not carry one (real records do)')
     ap.add_argument('--repo', action='append', default=[],
                     help='a repo whose commits my claims may refer to (repeatable)')
     ap.add_argument('--validate', type=int)

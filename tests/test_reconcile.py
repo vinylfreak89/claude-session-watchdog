@@ -104,10 +104,10 @@ def build(dirpath):
                    'content': './wd.sh queue add "OUTPUT ECHOED BACK BY A TOOL, never an invocation."'}]}})
 
     # --- genuine opens, each with the result that minted its id ------------------------
-    L += RS.bash('2026-09-09T11:00:00Z', 'cd /x && ./wd.sh queue add "%s"' % REAL_ITEMS[0], 'queued Q10')
-    L += RS.bash('2026-09-11T01:13:00Z', 'cd /x && ./wd.sh owe add "%s"' % REAL_ITEMS[1],
+    L += RS.bash('2026-09-09T11:00:00Z', './wd.sh queue add "%s"' % REAL_ITEMS[0], 'queued Q10')
+    L += RS.bash('2026-09-11T01:13:00Z', './wd.sh owe add "%s"' % REAL_ITEMS[1],
                  'recorded D2 READY\nREADY for the owner: 1')
-    L += RS.bash('2026-09-11T01:19:00Z', 'cd /x && python3 wd_wake.py --owe-add "%s"' % REAL_ITEMS[2],
+    L += RS.bash('2026-09-11T01:19:00Z', 'python3 wd_wake.py --owe-add "%s"' % REAL_ITEMS[2],
                  'recorded D4 READY')
     L += RS.bash('2026-09-11T01:20:00Z', './wd.sh queue add "%s"' % REAL_ITEMS[3], 'queued Q11')
     L += RS.bash('2026-09-11T01:21:00Z', './wd.sh queue add "%s"' % REAL_ITEMS[4], 'queued Q12')
@@ -117,20 +117,28 @@ def build(dirpath):
     # --- closes in every form ------------------------------------------------------------
     # 11. ids bound by a for-loop, $d form
     L += RS.bash('2026-09-11T02:00:00Z',
-                 'cd /x && for d in D1 D3; do python3 wd_wake.py --owe-clear $d; done',
+                 'for d in D1 D3; do python3 wd_wake.py --owe-clear $d; done',
                  'D1 answered and cleared\nD3 answered and cleared')
     # 12. ${d} form, quoted items, inside a pipeline
     L += RS.bash('2026-09-11T02:01:00Z', 'for d in "D5"; do ./wd.sh owe done ${d} | tail -1; done',
                  'D5 answered and cleared')
     # 13. plain literal close
-    L += RS.bash('2026-09-11T03:00:00Z', 'cd /x && ./wd.sh sent1 Q1', 'item Q1 marked sent at T')
+    L += RS.bash('2026-09-11T03:00:00Z', './wd.sh sent1 Q1', 'item Q1 marked sent at T')
     # 14. close whose id is followed by shell punctuation
     L += RS.bash('2026-09-11T03:01:00Z', './wd.sh sent1 Q2; echo ok', 'item Q2 marked sent at T\nok')
     # 15. the SAME id closed twice: the second found nothing to close
     L += RS.bash('2026-09-11T03:02:00Z', './wd.sh sent1 Q3', 'item Q3 marked sent at T')
     L += RS.bash('2026-09-11T03:03:00Z', './wd.sh sent1 Q3', 'no queued item Q3')
-    # 16. a close with no id argument: the id is in its result
-    L += RS.bash('2026-09-11T03:04:00Z', './wd.sh queue clear', 'queue cleared into message M7')
+    # 16. queue clear names the message it cleared into
+    L += RS.bash('2026-09-11T03:04:00Z', './wd.sh queue clear M7', 'queue cleared into message M7')
+    # 16b. a TRAILING comment hiding an invocation: only comment handling keeps it from running
+    L += RS.bash('2026-09-11T03:05:00Z',
+                 'echo done  # then: ; ./wd.sh queue add "A TRAILING COMMENT that must never run as an invocation."',
+                 'done')
+    # 16c. an invocation against a SCRATCH state: recorded, never a change to the live state
+    L += RS.bash('2026-09-11T03:06:00Z',
+                 'WD_STATE=/private/tmp/scratch-copy ./wd.sh queue add "A SCRATCH-STATE ITEM that never touched the live state."',
+                 'queued Q90')
 
     # --- the owner, through the channels he actually uses -----------------------------
     L += RS.owner_midturn('2026-09-11T04:00:00Z', 'stop all your hooks now')
@@ -504,7 +512,7 @@ def test_cli_stages():
 
         def run(*args):
             r = subprocess.run([sys.executable, os.path.join(here, 'wd_reconcile.py'),
-                                '--state-dir', st] + list(args),
+                                '--state-dir', st, '--cwd', d] + list(args),
                                capture_output=True, text=True)
             return r.returncode, r.stdout + r.stderr
 
@@ -576,7 +584,7 @@ def test_citation():
             except Exception:
                 continue
             for j, c in enumerate(R.commands_in(rec_)):
-                t = R.extract_item(R.normalize(c))
+                t = R.extract_item(c)
                 if t and R.is_real_item(t) and t == REAL_ITEMS[0]:
                     target = (i, j)
             if target:
@@ -604,7 +612,7 @@ def test_citation():
             except Exception:
                 continue
             cmds = R.commands_in(rr)
-            if cmds and all(not (R.extract_item(R.normalize(c)) or '') for c in cmds):
+            if cmds and all(not (R.extract_item(c) or '') for c in cmds):
                 bad = n
                 break
         ck('a command-bearing line with no item is locatable', bool(bad), True)
@@ -648,16 +656,15 @@ def test_citation():
         ck('is_real_item rejects empty', R.is_real_item(''), False)
         ck('is_real_item accepts a sentence', R.is_real_item(REAL_ITEMS[0]), True)
 
-        # normalize as a COMPOSITION, not just its parts
+        # the shell reader as a COMPOSITION, not just its parts
         combined = ("# ./wd.sh queue add \"a commented example that is long enough to count\"\n"
                     "cat > f <<'EOF'\n./wd.sh owe add \"a heredoc example long enough to count\"\nEOF\n"
                     "echo './wd.sh queue add \"an echoed example long enough to count\"'\n"
                     "for d in D7 D8; do ./wd.sh owe done $d; done")
-        norm = R.normalize(combined)
-        ck('normalize removes comment, heredoc and echo together',
-           R.extract_item(norm), None)
-        ck('and still unrolls the loop in the same pass',
-           ('owe done D7' in norm and 'owe done D8' in norm), True)
+        ck('comment, heredoc and echo together yield no item', R.extract_item(combined), None)
+        ck('and the loop is unrolled in the same read',
+           [(i['verb'], i['args']) for i in R.invocations(combined, None)],
+           [('owe done', ['D7']), ('owe done', ['D8'])])
 
         # the library's own selftest must pass -- imported AND as a direct entry point: the
         # __main__ block once sat mid-module and died with NameError before OPEN_RX existed,
@@ -696,7 +703,7 @@ def test_cli_all_stages():
 
         def run(*args):
             r = subprocess.run([sys.executable, os.path.join(here, 'wd_reconcile.py'),
-                                '--state-dir', st] + list(args),
+                                '--state-dir', st, '--cwd', d] + list(args),
                                capture_output=True, text=True)
             return r.returncode, r.stdout + r.stderr
 
@@ -867,7 +874,9 @@ def test_remaining_units():
         # every retired duplicate must be GONE, not merely unused: two sources of truth is how
         # the Unknown-type verdicts survived the rewrite
         for gone in ('adjudicate', 'load', 'timeline', '_near', 'stage1', 'stage1_join',
-                     'stage3', 'chains', 'ARGFORMS'):
+                     'stage3', 'chains', 'ARGFORMS', 'normalize', 'strip_heredocs',
+                     'strip_comments', 'strip_echoes', 'expand_loops', 'FORLOOP', 'OPEN_RX',
+                     'CLOSE_RX', 'unresolved_ids', 'item_text', 'outcome'):
             ck('%s is deleted, not left as a second source of truth' % gone,
                hasattr(R, gone), False)
         return fails
@@ -923,13 +932,14 @@ def test_corner_cases():
     ck('a one-word genuine item is accepted', R.is_real_item('no'), True)
 
     # --- ids that cannot be resolved to a literal --------------------------------------
-    u = R.unresolved_ids('while read d; do ./wd.sh owe done $d; done')
-    ck('a while-read loop id is surfaced as unresolvable', bool(u), True)
-    ck('and is labelled a while-loop', any(x.get('form') == 'while-loop' for x in u), True)
-    u2 = R.unresolved_ids('./wd.sh owe done $(cat id.txt)')
-    ck('a $(...) substitution is surfaced', bool(u2), True)
-    ck('a plain literal id is NOT flagged unresolvable',
-       R.unresolved_ids('./wd.sh sent1 Q1'), [])
+    w = R.invocations('while read d; do ./wd.sh owe done $d; done', None)
+    ck('a while-read loop id is an expansion, marked as a loop',
+       [(i['args'], i['arg_expands'], i['loop']) for i in w], [(['$d'], [True], 'while')])
+    ck('a $(...) substitution id is an expansion',
+       [i['arg_expands'] for i in R.invocations('./wd.sh owe done $(cat id.txt)', None)
+        if i['verb'] == 'owe done'], [[True]])
+    ck('a plain literal id is NOT an expansion',
+       [i['arg_expands'] for i in R.invocations('./wd.sh sent1 Q1', None)], [[False]])
 
     d = tempfile.mkdtemp(prefix='recon-corner-')
     try:
@@ -967,7 +977,7 @@ def test_corner_cases():
         L += RS.bash('2026-09-11T05:00:00Z', './wd.sh sent1 QX', 'no queued item QX')
         RS.write(p2, L)
         numbered, _bad = R.read_records(p2)
-        acts = R.my_actions(numbered, os.path.basename(p2))
+        acts = R.my_actions(numbered, os.path.basename(p2), os.path.join(d, 'state'), d)
         opens = [x for x in acts if x['kind'] == 'open']
         closes = [x for x in acts if x['kind'] == 'close']
         ids = [c['id'] for c in closes]
@@ -1003,7 +1013,7 @@ def test_corner_cases():
 
         def run(*args):
             r = subprocess.run([sys.executable, os.path.join(here, 'wd_reconcile.py'),
-                                '--state-dir', st] + list(args),
+                                '--state-dir', st, '--cwd', d] + list(args),
                                capture_output=True, text=True)
             return r.returncode, r.stdout + r.stderr
 
@@ -1078,7 +1088,7 @@ def test_robustness():
 
         def run(*args):
             r = subprocess.run([sys.executable, os.path.join(here, 'wd_reconcile.py'),
-                                '--state-dir', st] + list(args),
+                                '--state-dir', st, '--cwd', d] + list(args),
                                capture_output=True, text=True)
             return r.returncode, r.stdout + r.stderr
 
@@ -1141,7 +1151,7 @@ def test_robustness():
             f.write(json.dumps(rec('2026-09-11T01:00:00Z',
                                    cmds=['./wd.sh sent1 QGOOD'])).encode() + b'\n')
         numbered, bad = R.read_records(p2)
-        acts = R.my_actions(numbered, os.path.basename(p2))
+        acts = R.my_actions(numbered, os.path.basename(p2), os.path.join(d, 'state'), d)
         opens = [a for a in acts if a['kind'] == 'open']
         closes = [a for a in acts if a['kind'] == 'close']
         ck('the garbage line is counted, not dropped', bad, 1)
@@ -1255,7 +1265,7 @@ def test_decision_chains():
         p, st, snaps = build_chain_world(d)
         numbered, bad = R.read_records(p)
         recs = [r for _, r in numbered]
-        acts = R.my_actions(numbered, os.path.basename(p))
+        acts = R.my_actions(numbered, os.path.basename(p), st, d)
         owner, _exc, _peers, _acct = R.owner_messages(recs)
         my_text, sends = R.artifacts(recs)
 
@@ -1477,22 +1487,43 @@ def test_real_shapes():
     # outcomes: every verdict is a fact the record states
     ck('OUTCOMES has no unknown-like class',
        any(w in v for v in R.OUTCOMES for w in ('unknown', 'undecid', 'ambig', 'unkey')), False)
-    ck('landed: the result carries the success line with the id',
-       R.outcome('owe add', 'D5', ('recorded D5 READY\nREADY for the owner', False))[0], 'landed')
-    ck('landed: id read from the result even when not supplied',
-       R.outcome('owe add', None, ('recorded D7 READY', False))[0], 'landed')
-    ck('no_effect: clearing an id that is not there prints nothing',
-       R.outcome('owe done', 'D1', ('READY for the owner -- he can answer these now: 0', False))[0],
-       'no_effect')
-    ck('failed: REFUSED', R.outcome('answered', None, ('REFUSED: no delivered message', False))[0],
-       'failed')
-    ck('failed: a queued item that does not exist',
-       R.outcome('sent1', 'Q9', ('no queued item Q9', False))[0], 'failed')
-    ck('failed: is_error set', R.outcome('sent1', 'Q9', ('something', True))[0], 'failed')
-    ck('not_completed: no result was ever recorded', R.outcome('sent1', 'Q9', None)[0],
-       'not_completed')
-    ck('landed on the RIGHT id only',
-       R.outcome('owe done', 'D2', ('D1 answered and cleared', False))[0], 'no_effect')
+    def one(cmd, result, is_error=False, no_result=False):
+        rr = (RS.bash_no_result('2026-09-11T02:00:00Z', cmd) if no_result
+              else RS.bash('2026-09-11T02:00:00Z', cmd, result, is_error))
+        acts_ = R.my_actions([(i + 1, r) for i, r in enumerate(rr)], 'f', '/x/state', '/x')
+        return [(x['outcome'], x.get('id')) for x in acts_]
+    ck('landed: the success line carries the minted id',
+       one('./wd.sh owe add "a decision for him"', 'recorded D5 READY\nREADY for the owner'), [('landed', 'D5')])
+    ck('no_effect: clearing an absent id prints nothing, output undiverted',
+       one('./wd.sh owe done D1', 'READY for the owner -- he can answer these now: 0'), [('no_effect', 'D1')])
+    ck('failed: REFUSED from the one invocation that could print it',
+       one('./wd.sh answered', 'REFUSED: no delivered message'), [('failed', None)])
+    ck('failed: a queued item that does not exist, named',
+       one('./wd.sh sent1 Q9', 'no queued item Q9'), [('failed', 'Q9')])
+    ck('failed: exited non-zero, and it was the last command',
+       one('./wd.sh sent1 Q9', 'something', True), [('failed', 'Q9')])
+    ck('not_completed: no result was ever recorded',
+       one('./wd.sh sent1 Q9', None, no_result=True), [('not_completed', 'Q9')])
+    ck('a success line for ANOTHER id is not this one',
+       one('./wd.sh owe done D2', 'D1 answered and cleared'), [('no_effect', 'D2')])
+    ck('PENDING: silence behind >/dev/null proves nothing',
+       one('./wd.sh owe done D1 >/dev/null', ''), [(None, 'D1')])
+    ck('a line cannot be claimed by an invocation whose output went to a file',
+       one('./wd.sh queue add "first item text" >/dev/null; ./wd.sh queue add "second item text"', 'queued Q2'),
+       [(None, None), ('landed', 'Q2')])
+    ck('"queued" in prose is not a success line',
+       one('./wd.sh queue add "an item"', 'nine items are queued behind this'), [('no_effect', None)])
+    ck('"no queued item \'Q13\'" is a failure naming Q13',
+       one('./wd.sh queue hold Q13 "wait"', "no queued item 'Q13'"), [('failed', 'Q13')])
+    ck('an && link after a failed link never ran',
+       one('./wd.sh relayed && ./wd.sh answered',
+           'usage: wd_check.py [-h]\nwd_check.py: error: relayed <turn end_ts>', True),
+       [('failed', None), ('not_completed', None)])
+    ck('sent: a list of ids is matched as a list',
+       one('./wd.sh sent F1,F2 b7f7de7d', "recorded sent: ['F1', 'F2']"), [('landed', 'F1,F2')])
+    ck('outcome ids are names, not only F-numbers',
+       one('./wd.sh outcome LIST-turnover accepted "why"', 'LIST-turnover graded accepted'),
+       [('landed', 'LIST-turnover')])
 
     # result_map pairs a tool_use with its outcome, list-shaped results included
     rr = RS.bash('2026-09-11T02:00:00Z', './wd.sh owe add "x"', 'recorded D1 READY')
@@ -1577,7 +1608,7 @@ def test_actions_and_chains_real_shapes():
         fname = '80f99b89-real.jsonl'
         RS.write(os.path.join(d, fname), recs)
         numbered, bad = R.read_records(os.path.join(d, fname))
-        acts = R.my_actions(numbered, fname)
+        acts = R.my_actions(numbered, fname, '/x/state', '/x')
         recs_ = [r for _, r in numbered]
         owner, exc, peers, acct = R.owner_messages(recs_)
         my_text, sends = R.artifacts(recs_)
@@ -1691,7 +1722,7 @@ def test_repeats_and_peers():
     recs += RS.peer_reply(T(4), 'the head switch rule stands')                     # from local_target
     recs += RS.bash(T(4, 5), './wd.sh resolved K2', 'resolved K2 (open since T)')
     numbered = [(i + 1, r) for i, r in enumerate(recs)]
-    acts = R.my_actions(numbered, 'f')
+    acts = R.my_actions(numbered, 'f', '/x/state', '/x')
     _o, _e, peers, _a = R.owner_messages(recs)
     my_text, sends = R.artifacts(recs)
     rep = R.landed_replay(acts, R.turn_starts(numbered), my_text, sends, peers, {}, 'local_target')
@@ -1747,7 +1778,7 @@ def test_sends_to_target():
     recs += RS.send(T(11, 1), 'OWNER, VERBATIM: D2: settled, the contract already says so.')
     recs += RS.bash(T(11, 2), './wd.sh owe done D2', 'D2 answered and cleared')
     numbered = [(i + 1, r) for i, r in enumerate(recs)]
-    acts = R.my_actions(numbered, 'f')
+    acts = R.my_actions(numbered, 'f', '/x/state', '/x')
     owner, _e, peers, _a = R.owner_messages(recs)
     my_text, sends = R.artifacts(recs)
     rep = R.landed_replay(acts, R.turn_starts(numbered), my_text, sends, peers, {}, 'local_target')
@@ -1799,6 +1830,8 @@ def test_shell_reading():
     ck('tok: "$*" expands', (t['w'], t['expands']), ('$*', True))
     t = [x for x in R.sh_tokens("./wd.sh queue add 'costs $5 flat'") if 'w' in x][-1]
     ck('tok: single-quoted $5 does not expand', (t['w'], t['expands']), ('costs $5 flat', False))
+    ck('tok: a SINGLE-quoted python -c program is ONE word',
+       words('python3 -c \'t="./wd.sh owe done D1"\''), ['python3', '-c', 't="./wd.sh owe done D1"'])
     ck('tok: a quoted python -c program is ONE word',
        words('python3 -c "t=\'./wd.sh owe done D1\'"'), ['python3', '-c', "t='./wd.sh owe done D1'"])
     c = "cat > f <<'EOF'\n./wd.sh queue add \"x y z\"\nEOF\n./wd.sh sent1 Q2"
@@ -1950,9 +1983,12 @@ def main():
             if not ok:
                 fails.append(name)
 
-        acts = R.my_actions(numbered, fname)
-        opens = [x for x in acts if x['kind'] == 'open']
-        closes = [x for x in acts if x['kind'] == 'close']
+        acts = R.my_actions(numbered, fname, st, d)
+        opens = [x for x in acts if x['kind'] == 'open' and x['state'] == 'live']
+        closes = [x for x in acts if x['kind'] == 'close' and x['state'] == 'live']
+        ck('a scratch-state action is recorded as scratch, not dropped',
+           [(x['state'], x.get('id')) for x in acts if 'SCRATCH-STATE' in (x.get('text') or '')],
+           [('scratch', 'Q90')])
         landed = {c['id'] for c in closes if c['id'] and c['outcome'] == 'landed'}
 
         ck('opens: every invocation and only invocations', len(opens), TRUTH['opens'])
@@ -1977,8 +2013,8 @@ def main():
            any(c['id'] and '$' in c['id'] for c in closes), False)
         ck('a close its result says found nothing is failed, not landed',
            [c['outcome'] for c in closes if c['id'] == 'Q3'], ['landed', 'failed'])
-        ck('an id-less close takes its id from its result',
-           [c['id_from'] for c in closes if c['id'] == 'M7'], ['result'])
+        ck('queue clear records the message it cleared into',
+           [(c['id_from'], c['outcome']) for c in closes if c['id'] == 'M7'], [('command', 'landed')])
         ck('a decision asked but never closed is found',
            sorted(o['id'] for o in opens
                   if o['store'] == 'owner_decisions' and o['id'] and o['id'] not in landed),
@@ -1999,65 +2035,73 @@ def main():
         # Each entry disables ONE guard and states how the result must break. A mutation that
         # changes nothing means the guard protects nothing, and that FAILS the suite.
         print('\n--- mutation battery (each must break the result) ---')
-        import re as _re
-        saved = {'normalize': R.normalize, 'item_text': R.item_text, 'CLOSE_RX': R.CLOSE_RX,
-                 'FORLOOP': R.FORLOOP, 'OPEN_RX': list(R.OPEN_RX), 'SUCCESS': dict(R.SUCCESS)}
+        # Each entry changes ONE guard in the reader's SOURCE, loads the result as a fresh module
+        # and requires the answer to break. A mutation that changes nothing means the guard
+        # protects nothing, and that FAILS the suite.
+        import types as _types
+        lib_src = open(R.__file__).read()
 
-        def run():
-            a_ = R.my_actions(numbered, fname)
-            return ([x for x in a_ if x['kind'] == 'open'], [x for x in a_ if x['kind'] == 'close'])
+        def mutant(old, new):
+            assert lib_src.count(old) == 1, ('mutation site not unique', old[:60], lib_src.count(old))
+            mod = _types.ModuleType('wd_recon_lib_mutant')
+            mod.__file__ = R.__file__
+            exec(compile(lib_src.replace(old, new, 1), R.__file__, 'exec'), mod.__dict__)
+            return mod
 
-        def mutate(name, apply_fn, broke_fn):
-            apply_fn()
+        def run(mod):
+            a_ = mod.my_actions(numbered, fname, st, d)
+            live = [x for x in a_ if x['state'] == 'live']
+            return [x for x in live if x['kind'] == 'open'], [x for x in live if x['kind'] == 'close']
+
+        def mutate(name, old, new, broke_fn):
             try:
-                o, c = run()
+                o, c = run(mutant(old, new))
                 broke = broke_fn(o, c)
+            except AssertionError:
+                raise
             except Exception:
                 broke = True
-            finally:
-                for k, v in saved.items():
-                    setattr(R, k, list(v) if k == 'OPEN_RX' else (dict(v) if k == 'SUCCESS' else v))
             print('%-56s %s' % (name, 'PASS' if broke else 'FAIL (guard protects nothing)'))
             if not broke:
                 fails.append('mutation: ' + name)
 
         cmd_ids = lambda c: {x['id'] for x in c if x.get('id_from') == 'command'}
         landed_ids = lambda c: {x['id'] for x in c if x['id'] and x['outcome'] == 'landed'}
-        mutate('drop strip_heredocs -> a written document scores as actions',
-               lambda: setattr(R, 'normalize',
-                               lambda c: R.expand_loops(R.strip_echoes(R.strip_comments(c)))),
+        mutate('heredoc bodies read as commands -> a written document scores',
+               "                if op in ('<<', '<<-'):\n                    pending.append(",
+               "                if False:\n                    pending.append(",
                lambda o, c: len(o) > TRUTH['opens'])
-        mutate('drop strip_comments -> a commented example scores as an action',
-               lambda: setattr(R, 'normalize',
-                               lambda c: R.expand_loops(R.strip_echoes(R.strip_heredocs(c)))),
+        mutate('comments read as commands -> a trailing comment runs',
+               "        elif ch == '#' and word is None:",
+               "        elif False:",
                lambda o, c: len(o) > TRUTH['opens'])
-        mutate('drop strip_echoes -> echoed text scores as an action',
-               lambda: setattr(R, 'normalize',
-                               lambda c: R.expand_loops(R.strip_comments(R.strip_heredocs(c)))),
-               lambda o, c: len(o) > TRUTH['opens'])
-        mutate('drop expand_loops -> ids a loop states literally are lost',
-               lambda: setattr(R, 'normalize',
-                               lambda c: R.strip_echoes(R.strip_comments(R.strip_heredocs(c)))),
+        mutate('for loops not unrolled -> ids a loop states literally are lost',
+               "        is_for = w[:1] == ['for'] and len(w) >= 3",
+               "        is_for = False and w[:1] == ['for'] and len(w) >= 3",
                lambda o, c: not {'D1', 'D3', 'D5'} <= cmd_ids(c))
-        mutate('loop terminator matches `done` inside `owe done` -> D5 lost',
-               lambda: setattr(R, 'FORLOOP', _re.compile(
-                   r'for\s+(\w+)\s+in\s+([^;\n]+?)\s*;\s*do\b(.*?)\bdone\b', _re.S)),
+        mutate('`done` inside `owe done` ends the loop -> D5 lost',
+               "        if 'done' in kw:\n            depth -= kw.count('done')",
+               "        if 'done' in kw or 'done' in ww:\n            depth -= kw.count('done') + ww.count('done')",
                lambda o, c: 'D5' not in cmd_ids(c))
-        mutate('treat expanded text as literal -> "$*" becomes owner words',
-               lambda: setattr(R, 'item_text', lambda q, t: (t, True)),
+        mutate('expanded text treated as literal -> "$*" becomes owner words',
+               "            'text_resolved': (not any(aexp)) if text is not None else None,",
+               "            'text_resolved': True if text is not None else None,",
                lambda o, c: any(x['text'] == '$*' and x['text_resolved'] for x in o))
-        mutate('close id allows shell punctuation -> Q2 never lands',
-               lambda: setattr(R, 'CLOSE_RX', _re.compile(
-                   r'(?:^|[;&|]\s*|\s)(?:\./wd\.sh\s+(queue clear|sent1|owe done|owe ungate|'
-                   r'resolved|closed|nudged)|--(queue-clear|owe-clear|owe-ungate))\b(?:\s+(\S+))?')),
+        mutate('`;` glued into a word -> Q2 never lands',
+               "            if ch in ' \\t\\n<>' or s.startswith(SH_OPS, k):",
+               "            if ch in ' \\t\\n<>' or s.startswith(('&&', '||', '|', '&', '(', ')'), k):",
                lambda o, c: 'Q2' not in landed_ids(c))
-        mutate('OPEN_RX without --urgent -> the urgent item is lost',
-               lambda: setattr(R, 'OPEN_RX', [(rx, st_) for rx, st_ in saved['OPEN_RX']
-                                              if '--urgent' not in rx.pattern]),
-               lambda o, c: len(o) < TRUTH['opens'])
-        mutate('no success line for `queue clear` -> its message id is lost',
-               lambda: setattr(R, 'SUCCESS', {k: v for k, v in saved['SUCCESS'].items()
-                                              if k != 'queue clear'}),
+        mutate('--urgent not read -> the urgent item text is wrong',
+               "            if verb == 'queue add' and args[:1] == ['--urgent']:",
+               "            if False:",
+               lambda o, c: not all(any(x['text'] == t for x in o) for t in REAL_ITEMS))
+        mutate('every state treated as live -> a scratch item is reconciled',
+               "    state = 'live' if (live and state_dir == live) else 'scratch'",
+               "    state = 'live'",
+               lambda o, c: len(o) > TRUTH['opens'])
+        mutate('no success line for `queue clear` -> M7 is lost',
+               "    'queue clear': r'queue cleared into message (\\S+)',\n",
+               "",
                lambda o, c: 'M7' not in landed_ids(c))
 
         # reading only `user` records loses most of what he said

@@ -53,6 +53,7 @@ def _arg(cmd, verb):
 # ---------------------------------------------------------------- citation
 
 import hashlib
+import datetime
 
 
 def cite(fname, lineno):
@@ -85,15 +86,17 @@ def commands_in(rec):
 
 
 def extract_item(cmd):
-    """The item text a command DELIVERED, or None. None means REFUSE, never improvise. Uses
-    OPEN_RX, the same patterns my_actions reads -- there was a second copy here (ARGFORMS) that
-    lacked `ask` and would have drifted. Text the shell would have expanded is refused: the
-    literal between double quotes is not what the script stored."""
-    for rx, _store in OPEN_RX:
-        m = rx.search(cmd)
-        if m:
-            t, resolved = item_text(m.group('q'), m.group('t'))
-            return t if (resolved and t.strip()) else None
+    """The item text a command DELIVERED, or None. None means REFUSE, never improvise. Read by
+    the shell reader -- the same one my_actions uses, so actions and restores cannot drift apart.
+    Text the shell would have expanded is refused: the literal is not what the script stored."""
+    for inv in invocations(cmd, None):
+        if inv['verb'] in ('queue add', 'owe add'):
+            t, ok = inv['text'] or '', inv['text_resolved']
+        elif inv['verb'] == 'ask':
+            t, ok = ' '.join(inv['args'][1:]), not any(inv['arg_expands'][1:])
+        else:
+            continue
+        return t if (ok and t.strip()) else None
     return None
 
 
@@ -106,14 +109,12 @@ def restore_payload(fname, lineno, which=0):
         raise ValueError('%s:%d carries no Bash command' % (fname, lineno))
     if which >= len(cmds):
         raise ValueError('%s:%d has %d command(s), asked for #%d' % (fname, lineno, len(cmds), which))
-    # normalize() FIRST. Without it this path restored a heredoc's example text as the
-    # owner's words -- the same defect that once produced the literal `$*` as an item, still
-    # live here after every other caller was fixed. Found by the citation fixture, 2026-09-11.
-    cmd = normalize(cmds[which])
-    text = extract_item(cmd)
+    # read by the shell reader: a heredoc's example text, a comment or an echo is data, never an
+    # invocation (this path once restored a heredoc's example as the owner's words)
+    text = extract_item(cmds[which])
     if text is None or not is_real_item(text):
         raise ValueError('%s:%d command #%d carries no recognisable item argument -- REFUSED '
-                         '(no guessing: fix the citation or widen OPEN_RX with a control)'
+                         '(no guessing: fix the citation or extend the shell reader with a control)'
                          % (fname, lineno, which))
     return {'source': '%s:%d#%d' % (fname, lineno, which),
             'ts': rec.get('timestamp'),
@@ -135,26 +136,14 @@ def verify_payload(p):
     return fresh['sha256'] == p['sha256'], fresh['sha256']
 
 
-HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1(.*?)^\2\s*$",
-                     re.S | re.M)
-
-
-def strip_heredocs(cmd):
-    """Remove every heredoc BODY before matching. A command that WRITES a file containing
-    `--owe-add "$*"` is not an invocation of it, and three separate false results came from
-    reading wd.sh's own source as state changes (2026-09-11: 66 matches vs 63 real; four
-    bogus MISSTEERs; a citation that resolved to the literal shell variable `$*`)."""
-    return HEREDOC.sub(lambda m: '<<' + m.group(2) + '\n', cmd)
-
-
 SHELLISH = re.compile(r'^\s*(\$[\*@0-9{]|["\']?\$)')
 
 
 def is_real_item(text):
     """An item is the owner's words. A shell variable, an empty string or control bytes is not.
     There is NO length floor: a 25-character floor existed for parse artifacts (fragments cut at
-    an escaped quote), which the escape-aware OPEN_RX and normalize() now remove at the source,
-    and the floor then refused a genuine landed four-word ask. Length is not provenance."""
+    an escaped quote), which the shell reader no longer produces, and the floor then refused a
+    genuine landed four-word ask. Length is not provenance."""
     if not text or not text.strip() or SHELLISH.match(text):
         return False
     # Control characters are never the owner's words; a NUL in particular would otherwise have
@@ -163,22 +152,26 @@ def is_real_item(text):
 
 
 def selftest():
-    """Controls for the contamination that has produced a wrong answer three times.
-    Each must FAIL if the guard is removed."""
+    """Controls for the contamination that has produced a wrong answer three times, read by the
+    shell reader. Each must FAIL if its guard is removed."""
     ok = True
-    writes = ('cat > wd.sh <<\'EOF\'\n'
+    writes = ("cat > wd.sh <<'EOF'\n"
               'owe)    add) exec $PY --owe-add "$*" ;;\n'
-              'EOF\n')
-    if extract_item(strip_heredocs(writes)) is not None:
+              "EOF\n")
+    if extract_item(writes) is not None:
         print('FAIL: a file-writing heredoc still reads as an invocation'); ok = False
     else:
         print('pass: heredoc body ignored')
     real = './wd.sh owe add "DOES POSITION ALONE ESTABLISH IDENTITY? Flagged in the contract itself."'
-    got = extract_item(strip_heredocs(real))
+    got = extract_item(real)
     if got and is_real_item(got):
         print('pass: a real invocation still extracts (%r...)' % got[:34])
     else:
         print('FAIL: a real invocation no longer extracts: %r' % got); ok = False
+    if extract_item('./wd.sh queue add "$*"') is not None:
+        print('FAIL: text the shell would expand is restored as words'); ok = False
+    else:
+        print('pass: expanded text refused')
     if is_real_item('$*') or is_real_item('') or is_real_item('   ') or not is_real_item('fix it'):
         print('FAIL: is_real_item takes a shell variable or blank, or refuses a short real item')
         ok = False
@@ -186,84 +179,6 @@ def selftest():
         print('pass: shell variables and blanks refused, a short real item kept')
     print('SELFTEST %s' % ('PASS' if ok else 'FAIL'))
     return 0 if ok else 1
-
-
-
-
-FORLOOP = re.compile(r'for\s+(\w+)\s+in\s+([^;\n]+?)\s*;\s*do\b(.*?)(?:^|[;&\n])\s*done\b',
-                     re.S | re.M)
-
-
-def expand_loops(cmd):
-    """Unroll `for d in D1 D3; do ... $d ...; done` so ids bound to a loop variable are visible.
-
-    Found 2026-09-11 by hunting an id rather than trusting the join: D3 read as
-    'issued but never closed' -- a DROP that would have been reported to the owner -- because
-    its close ran inside a loop and the extractor captured the literal `$d`. An identifier that
-    never appears as a literal is invisible to any pattern over the command text."""
-    def sub(m):
-        var, items, body = m.group(1), m.group(2).split(), m.group(3)
-        if any(re.search(r'[$`]', it) for it in items):
-            # the list is a substitution, not literals: unrolling `for d in $(cat ids.txt)`
-            # word-splits the SUBSTITUTION TEXT and invents `ids.txt` as an id. Leave it
-            # unrolled so `$d` stays visibly unresolved; the ids live in the result.
-            return m.group(0).replace('for ', 'for\x00', 1)
-        out = []
-        for it in items:
-            it = it.strip('"\'')
-            b = body.replace('${%s}' % var, it).replace('$%s' % var, it)
-            out.append(b)
-        return ';'.join(out)
-    prev = None
-    while prev != cmd:
-        prev, cmd = cmd, FORLOOP.sub(sub, cmd)
-    return cmd.replace('for\x00', 'for ')
-
-
-COMMENT = re.compile(r'^\s*#.*$', re.M)
-ECHOED = re.compile(r"""\b(?:echo|printf)\s+(?:-\w+\s+)*(['"])(?:\\.|(?!\1).)*\1""", re.S)
-
-
-def strip_comments(cmd):
-    """A commented-out example is not an invocation. Found by fixture 2026-09-11: a line
-    beginning `# ./wd.sh queue add "..."` registered as a genuine owner item."""
-    return COMMENT.sub('', cmd)
-
-
-def strip_echoes(cmd):
-    """Text that only ever reached a terminal is not an invocation. Same fixture: an
-    `echo './wd.sh owe add "..."'` registered as a genuine decision."""
-    return ECHOED.sub('echo', cmd)
-
-
-WHILELOOP = re.compile(r'while\s+.*?;\s*do\b(.*?)(?:^|[;&\n])\s*done\b', re.S | re.M)
-UNRESOLVED = re.compile(r'\$\(|\$\{?\w+\}?')
-
-
-def unresolved_ids(cmd):
-    """Ids this pass could not resolve to a literal -- a `while read` variable, a `$(...)`
-    substitution, a leftover `$var`. These must be REPORTED, never silently recorded as an id
-    whose name is the substitution text. A `for` loop is unrolled; these cannot be."""
-    out = []
-    for m in CLOSE_RX.finditer(cmd):
-        arg = m.group(3)
-        if arg and UNRESOLVED.search(arg):
-            out.append({'verb': m.group(1) or m.group(2), 'literal': arg})
-    for m in WHILELOOP.finditer(cmd):
-        body = m.group(1)
-        for mm in CLOSE_RX.finditer(body):
-            if mm.group(3) and UNRESOLVED.search(mm.group(3)):
-                out.append({'verb': mm.group(1) or mm.group(2), 'literal': mm.group(3),
-                            'form': 'while-loop'})
-    return out
-
-
-def normalize(cmd):
-    """The ONE preprocessing path every matcher must use. Each step exists because its absence
-    produced a false item against a known-answer corpus: heredoc bodies (a document being
-    written), comments (an example), echoes (terminal output), and loops (an id that never
-    appears as a literal)."""
-    return expand_loops(strip_echoes(strip_comments(strip_heredocs(cmd))))
 
 
 def live_stores(state_dir):
@@ -290,20 +205,6 @@ def live_stores(state_dir):
             'owner_decision_seq': d.get('owner_decision_seq'),
             'all_keys': sorted(d.keys()),
             'raw': d}
-
-
-# ---------------------------------------------------------------- stage 1
-
-OPEN_RX = [
-    (re.compile(r"--queue-add\s+(?P<q>['\"])(?P<t>(?:\\.|(?!(?P=q)).)*)(?P=q)", re.S), 'owner_queue'),
-    (re.compile(r"--owe-add\s+(?:--gated-on\s+['\"].*?['\"]\s+)?(?P<q>['\"])(?P<t>(?:\\.|(?!(?P=q)).)*)(?P=q)", re.S), 'owner_decisions'),
-    (re.compile(r"\./wd\.sh\s+queue\s+add\s+(?:--urgent\s+)?(?P<q>['\"])(?P<t>(?:\\.|(?!(?P=q)).)*)(?P=q)", re.S), 'owner_queue'),
-    (re.compile(r"\./wd\.sh\s+owe\s+add\s+(?:--gated-on\s+['\"].*?['\"]\s+)?(?P<q>['\"])(?P<t>(?:\\.|(?!(?P=q)).)*)(?P=q)", re.S), 'owner_decisions'),
-    (re.compile(r"\./wd\.sh\s+ask\s+(?P<q>['\"])(?P<t>(?:\\.|(?!(?P=q)).)*)(?P=q)", re.S), 'open_questions'),
-]
-CLOSE_RX = re.compile(
-    r'(?:^|[;&|]\s*|\s)(?:\./wd\.sh\s+(queue clear|sent1|owe done|owe ungate|resolved|closed|nudged)'
-    r'|--(queue-clear|owe-clear|owe-ungate))\b(?:\s+([^\s;&|]+))?')
 
 
 # ---------------------------------------------------------------- stage 3
@@ -716,48 +617,6 @@ def result_map(recs):
     return out
 
 
-# What each verb prints when it TOOK EFFECT, from the scripts' own print statements.
-SUCCESS = {
-    'owe add': r'recorded (D\d+)', 'owe-add': r'recorded (D\d+)',
-    'owe done': r'(D\d+) answered and cleared', 'owe-clear': r'(D\d+) answered and cleared',
-    'owe ungate': r'(D\d+) is now READY', 'owe-ungate': r'(D\d+) is now READY',
-    'queue add': r'queued (\S+)', 'queue-add': r'queued (\S+)',
-    'queue clear': r'queue cleared into message (\S+)', 'queue-clear': r'queue cleared into message (\S+)',
-    'queue hold': r'(\S+) (?:HELD UNTIL:|released)', 'queue-hold': r'(\S+) (?:HELD UNTIL:|released)',
-    'sent1': r'item (\S+) marked sent at', 'relayed': r'relayed to the owner up to (\S+)',
-    'answered': r'answered at (\S+)', 'ask': r'open question (\S+) registered',
-    'resolved': r'resolved (\S+) \(open since', 'nudged': r'nudged (\S+) \(',
-    'closed': r'closed (\S+) under the one-line exception', 'conditional': r'PARKED (\S+)',
-    'fired': r'FIRED (\S+)', 'hold': r'holding (\S+)',
-    'sent': r'recorded sent: \[([^\]]*)\]', 'veto': r'recorded veto: \[([^\]]*)\]',
-    'outcome': r'(F\d+) graded \w+',
-}
-FAILED = re.compile(r'REFUSED|no queued item|no open question|Traceback \(most recent|'
-                    r'^\S*Error: |No such file|command not found', re.M)
-# The ONLY verdicts. Every one is a fact the record states; there is no "unknown" among them,
-# because everything here is answerable from the record (owner, 2026-09-11) -- a verdict the
-# instrument could not reach is work outstanding, not an answer.
-OUTCOMES = ('landed', 'failed', 'no_effect', 'not_completed')
-
-
-def outcome(verb, ident, result):
-    """What the record says happened to ONE action. `result` is (text, is_error) or None."""
-    if result is None:
-        return 'not_completed', 'no tool_result recorded -- the command did not complete'
-    text, is_err = result
-    rx = SUCCESS.get(verb)
-    if rx:
-        hits = [m.group(1) for m in re.finditer(rx, text)]
-        if hits and (ident is None or any(ident == h or ident in h for h in hits)):
-            return 'landed', 'result says: %s' % re.search(rx, text).group(0)[:80]
-    if is_err or FAILED.search(text):
-        m = FAILED.search(text)
-        return 'failed', 'result says: %s' % (m.group(0) if m else 'is_error')
-    return 'no_effect', 'result present, no success line for %s %s' % (verb, ident or '')
-
-
-# ================================================================ my actions, from their results
-
 def ts_formats(recs):
     """Timestamp formats present, by shape (digits -> 9). Events are ordered by comparing
     timestamps as STRINGS, which is sound only within one format: '...:00Z' sorts AFTER
@@ -765,6 +624,42 @@ def ts_formats(recs):
     timestamped record. Stage 1 refuses a corpus that mixes them."""
     return collections.Counter(re.sub(r'\d', '9', r['timestamp']) for r in recs
                                if isinstance(r.get('timestamp'), str) and r['timestamp'])
+
+
+# ================================================================ my actions, read by the shell reader
+#
+# An outcome is ESTABLISHED only by evidence that names the action. The result of a compound
+# command is not the result of one verb: on the real record the verb's own output was routinely
+# diverted (`>/dev/null`, `| tail -1`) and a listing printed after it, so "no success line" called
+# 30 of 34 queue adds and 11 of 11 owe adds `no_effect` while the very same result showed them
+# landed, and `queued (\S+)` matched prose ("queued behind this") into ids. Where no evidence names
+# the action yet, its outcome is PENDING: work the reconciliation still owes, never a verdict.
+
+SUCCESS = {  # what each verb prints at the START of a line when it took effect (the scripts' prints)
+    'queue add': r'queued (\S+)', 'owe add': r'recorded (D\d+)',
+    'ask': r'open question (\S+) registered', 'sent1': r'item (\S+) marked sent at',
+    'nudged': r'nudged (\S+) \(', 'resolved': r'resolved (\S+) \(open since',
+    'owe done': r'(D\d+) answered and cleared', 'owe ungate': r'(D\d+) is now READY',
+    'queue clear': r'queue cleared into message (\S+)',
+    'queue hold': r'(\S+) (?:HELD UNTIL:|released)',
+    'closed': r'closed (\S+) under the one-line exception',
+    'relayed': r'relayed to the owner up to (\S+)', 'answered': r'answered at (\S+)',
+    'hold': r'holding (\S+):', 'conditional': r'PARKED (\S+)', 'fired': r'FIRED (\S+)',
+    'outcome': r'(\S+) graded \w+',
+    'sent': r'recorded sent: \[([^\]]*)\]', 'veto': r'recorded veto: \[([^\]]*)\]',
+}
+NAMED_FAIL = re.compile(r"^(?:no queued item '?([^\s']+?)'?|no open question (\S+))\s*$", re.M)
+UNNAMED_FAIL = re.compile(r'^(?:REFUSED\b.*|usage: .*|Traceback \(most recent call last\):.*|'
+                          r'\S+: error: .*|answered takes no arguments.*|.*command not found.*)$', re.M)
+OUTCOMES = ('landed', 'failed', 'no_effect', 'not_completed')
+OPEN_STORE = {'queue add': 'owner_queue', 'owe add': 'owner_decisions', 'ask': 'open_questions'}
+CLOSE_VERBS = {'sent1', 'nudged', 'resolved', 'owe done', 'owe ungate', 'queue clear', 'closed',
+               'fired'}
+STATE_VERBS = set(SUCCESS)
+REQUIRED_ARGS = {'relayed': 1, 'hold': 2, 'closed': 1, 'ask': 2, 'nudged': 1, 'resolved': 1,
+                 'sent1': 1, 'owe done': 1, 'owe ungate': 1, 'queue clear': 1, 'queue hold': 1,
+                 'outcome': 2, 'sent': 1, 'veto': 1, 'conditional': 1, 'fired': 1,
+                 'queue add': 1, 'owe add': 1}
 
 
 def read_records(path):
@@ -779,110 +674,244 @@ def read_records(path):
     return out, bad
 
 
-ID_IN_RESULT = {'owe add': r'recorded (D\d+)', 'owe-add': r'recorded (D\d+)',
-                'queue add': r'queued (\S+)', 'queue-add': r'queued (\S+)',
-                'ask': r'open question (\S+) registered'}
-OPEN_VERB = {'owner_decisions': 'owe add', 'owner_queue': 'queue add', 'open_questions': 'ask'}
+def _invalid(inv):
+    """A fact the command itself establishes: this invocation could not have succeeded."""
+    v, args = inv['verb'], [a for a in inv['args']]
+    if inv.get('via') == 'wd_check.py' and '--target' not in inv['argv']:
+        return 'wd_check.py requires --target; argparse exits 2 without it'
+    if v == 'answered' and inv.get('via') == 'wd.sh' and args and args[0] != '--owner-ack':
+        return 'wd.sh answered takes no argument except --owner-ack; it exits 2'
+    need = REQUIRED_ARGS.get(v)
+    if need and len([a for a in args if a != '']) < need:
+        return '%s needs %d argument(s); the script refuses without them' % (v, need)
+    return None
 
 
-def item_text(q, t):
-    """(text as the shell delivered it, resolved?). Double quotes expand `$x`, `$(...)` and
-    backticks, so the literal between them is NOT what the script stored whenever it carries
-    one: that text is flagged unresolved and its words must come from the result or project
-    state, never from the command. Single quotes deliver the literal."""
-    if q == "'":
-        return t, True
-    delivered = re.sub(r'\\([\\"$`])', r'\1', t)
-    return delivered, not re.search(r'(?<!\\)(\$[\w{(*@#?!-]|`)', t)
+def _id_match(verb, ident, printed):
+    if ident is None:
+        return True
+    if verb in ('sent', 'veto'):
+        got = set(re.findall(r"'([^']*)'", printed)) or {printed}
+        want = {x.strip() for x in ident.split(',')}
+        return bool(got & want) or ident in got
+    if verb == 'relayed':
+        return printed >= ident                  # it records max(previous, this)
+    return printed == ident
 
 
-def my_actions(numbered, fname):
-    """Every state-changing action of mine, in order, each with ITS OWN recorded outcome.
+def my_actions(numbered, fname, live_state, cwd=None):
+    """Every state-changing action of mine, in order, read by the shell reader, each with the
+    outcome the evidence establishes -- or outcome None and `needs` saying what would establish it.
 
-    An open's id is read from its result (`recorded D5`, `queued Q12`), never inferred from a
-    counter: the id is minted by the script after the command, and the result is where it was
-    written down. Several mutations in one command share one result, so ids are consumed in
-    order and each close is matched to its own id inside the shared result."""
+    live_state is the state directory under reconciliation; actions on any other are recorded with
+    state='scratch' and are not reconciliations of the live state. cwd is the working directory a
+    command starts in when its record does not say (real records carry `cwd`)."""
     rm = result_map([r for _, r in numbered])
     acts = []
     for lineno, rec in numbered:
         if rec.get('type') != 'assistant':
             continue
         ts = rec.get('timestamp') or ''
+        here = rec.get('cwd') or cwd
         blocks = [b for b in ((rec.get('message') or {}).get('content') or [])
                   if isinstance(b, dict) and b.get('type') == 'tool_use' and b.get('name') == 'Bash']
         for j, b in enumerate(blocks):
-            c = normalize((b.get('input') or {}).get('command', ''))
-            res = rm.get(b.get('id'))
-            cite = '%s:%d#%d' % (fname, lineno, j)
-            minted = {}
-            for rx, store in OPEN_RX:
-                for m in rx.finditer(c):
-                    # Every invocation is an action and its result says what happened to it.
-                    # A length filter here DROPPED a landed short item: it existed for parse
-                    # artifacts, which normalize() and the escape-aware pattern now remove.
-                    t, resolved = item_text(m.group('q'), m.group('t'))
-                    verb = OPEN_VERB[store]
-                    ids = minted.setdefault(verb, re.findall(ID_IN_RESULT[verb], res[0]) if res else [])
-                    oid = ids.pop(0) if ids else None
-                    oc, why = outcome(verb, oid, res) if oid else (
-                        ('not_completed', 'no tool_result recorded') if res is None else
-                        ('failed' if (res[1] or FAILED.search(res[0])) else 'no_effect',
-                         'the result minted no id for this open'))
-                    acts.append({'ts': ts, 'cite': cite, 'verb': verb, 'kind': 'open',
-                                 'store': store, 'id': oid, 'text': t,
-                                 'text_resolved': resolved,
-                                 'sha256': hashlib.sha256(t.encode()).hexdigest(),
-                                 'outcome': oc, 'why': why})
-            literal, unresolved = [], []
-            for m in CLOSE_RX.finditer(c):
-                verb, arg = (m.group(1) or m.group(2)), m.group(3)
-                aid = (arg or '').strip('"\'') or None
-                (unresolved if aid and UNRESOLVED.search(aid) else literal).append((verb, aid, arg))
-            for verb, aid, _ in literal:
-                oc, why = outcome(verb, aid, res)
-                src = 'command' if aid else None
-                if aid is None and oc == 'landed':
-                    # `queue clear` takes no id; the message it cleared into is in the result
-                    h = re.search(SUCCESS[verb], res[0])
-                    aid, src = (h.group(1), 'result') if h else (None, None)
-                acts.append({'ts': ts, 'cite': cite, 'verb': verb, 'kind': 'close',
-                             'id': aid, 'id_from': src, 'outcome': oc, 'why': why})
-            # An id the command never states as a literal (`while read d`, `$(cat f)`) is NOT
-            # unknown: the script printed which ids it closed. Read them from the result, once
-            # per verb per command, minus any the literal closes in this command already claim.
-            for verb in dict.fromkeys(v for v, _, _ in unresolved):
-                claimed = {a for v, a, _ in literal if v == verb}
-                rx = SUCCESS.get(verb)
-                hits = [h for h in dict.fromkeys(re.findall(rx, res[0]) if (rx and res) else [])
-                        if h not in claimed]
-                forms = sorted({a for v, _, a in unresolved if v == verb})
-                if hits:
-                    for h in hits:
-                        acts.append({'ts': ts, 'cite': cite, 'verb': verb, 'kind': 'close',
-                                     'id': h, 'id_from': 'result', 'outcome': 'landed',
-                                     'why': 'id %s read from the result; the command bound it '
-                                            'through %s' % (h, ', '.join(forms))})
-                else:
-                    oc, why = outcome(verb, None, res)
-                    acts.append({'ts': ts, 'cite': cite, 'verb': verb, 'kind': 'close',
-                                 'id': None, 'id_from': None, 'unresolved': forms,
-                                 'outcome': oc if oc != 'landed' else 'no_effect',
-                                 'why': 'id bound through %s and the result names no id it '
-                                        'closed -- %s' % (', '.join(forms), why)})
-            for m in re.finditer(MUT, c):
-                verb = m.group(1) or m.group(2)
-                if verb in ID_IN_RESULT or verb in ('queue clear', 'sent1', 'owe done', 'owe ungate',
-                                                     'resolved', 'closed', 'nudged', 'queue-clear',
-                                                     'owe-clear', 'owe-ungate'):
-                    continue          # handled above as an open or a close
-                ident = _arg(c, verb)
-                if ident and UNRESOLVED.search(ident):
-                    ident = None
-                oc, why = outcome(verb, None, res)
-                acts.append({'ts': ts, 'cite': cite, 'verb': verb, 'kind': 'mark',
-                             'id': ident, 'outcome': oc, 'why': why})
+            cmd = (b.get('input') or {}).get('command', '')
+            invs = [x for x in invocations(cmd, live_state, here) if x['verb'] in STATE_VERBS]
+            if invs:
+                acts.extend(_command_actions(invs, rm.get(b.get('id')), ts,
+                                             '%s:%d#%d' % (fname, lineno, j)))
     return acts
+
+
+def _set(a, outcome, why):
+    a['outcome'], a['why'] = outcome, why
+    return a
+
+
+def _command_actions(invs, res, ts, cite):
+    txt, err = res if res else ('', False)
+    rows = []
+    for inv in invs:
+        v, args, aexp = inv['verb'], inv['args'], inv['arg_expands']
+        a = {'ts': ts, 'cite': cite, 'verb': v, 'state': inv['state'], 'diverted': inv['diverted'],
+             'op_before': inv['op_before'], 'loop': inv['loop'], 'outcome': None, 'why': None}
+        if v in OPEN_STORE:
+            a.update(kind='open', store=OPEN_STORE[v])
+            if v == 'ask':
+                key = args[0] if args else None
+                a['id'] = None if (not key or (aexp and aexp[0])) else key
+                t, resolved = ' '.join(args[1:]), not any(aexp[1:])
+            else:
+                a['id'], t, resolved = None, inv['text'] or '', bool(inv['text_resolved'])
+            a.update(text=t, text_resolved=resolved,
+                     sha256=hashlib.sha256(t.encode()).hexdigest())
+            if inv.get('gated_on') is not None:
+                a['gated_on'] = inv['gated_on']
+            if inv.get('urgent'):
+                a['urgent'] = True
+        else:
+            a['kind'] = 'close' if v in CLOSE_VERBS else 'mark'
+            ident = args[0] if args else None
+            if v == 'answered':
+                ident = None
+            if ident is not None and aexp and aexp[0]:
+                a.update(id=None, id_from=None, unresolved=[ident])
+            else:
+                a.update(id=ident, id_from='command' if ident else None)
+        rows.append((a, inv))
+    if res is None:
+        return [_set(a, 'not_completed', 'no tool_result recorded -- the command did not complete')
+                for a, _ in rows]
+    lines = {v: [(m.start(), m.group(1)) for m in re.finditer('^' + SUCCESS[v], txt, re.M)]
+             for v in {a['verb'] for a, _ in rows}}
+    claimed, extra = set(), []
+    # 1. facts: structural failures, && links that never ran, lines that name the action
+    for k, (a, inv) in enumerate(rows):
+        prev = rows[k - 1] if k else None
+        if (inv['op_before'] == '&&' and prev and prev[1]['cmd_index'] == inv['cmd_index'] - 1
+                and prev[0]['outcome'] in ('failed', 'not_completed')):
+            _set(a, 'not_completed', 'never ran: the && link before it did not succeed')
+            continue
+        v, L = a['verb'], lines.get(a['verb'], [])
+        free = [(p, i) for p, i in L if (v, p) not in claimed]
+        if a.get('unresolved'):
+            if free and not inv['to_file']:
+                for p, i in free:
+                    claimed.add((v, p))
+                    extra.append(dict(a, id=i, id_from='result', unresolved=None,
+                                      outcome='landed',
+                                      why='id %s read from the result; the command bound it '
+                                          'through %s' % (i, a['unresolved'][0])))
+                a['outcome'] = 'superseded'           # replaced by the per-id rows above
+            continue
+        if a['kind'] == 'open' and v != 'ask' or v == 'answered' or a.get('id') is None:
+            hit = free[0] if (free and not inv['to_file']) else None
+        else:
+            hit = next(((p, i) for p, i in free if _id_match(v, a['id'], i)), None)
+        if hit:
+            claimed.add((v, hit[0]))
+            if a['kind'] == 'open' and v != 'ask':
+                a['id'], a['id_from'] = hit[1], 'result'
+            elif a.get('id') is None and a['kind'] == 'close':
+                a['id'], a['id_from'] = hit[1], 'result'
+            _set(a, 'landed', 'result says: %s' % re.search('^' + SUCCESS[v], txt[hit[0]:], re.M).group(0)[:80])
+            continue
+        bad = _invalid(inv)
+        if bad:
+            _set(a, 'failed', bad)
+            continue
+        nf = next((m for m in NAMED_FAIL.finditer(txt)
+                   if a.get('id') and (m.group(1) or m.group(2)) == a['id']
+                   and ('F', m.start()) not in claimed), None)
+        if nf:
+            claimed.add(('F', nf.start()))
+            _set(a, 'failed', 'result says: %s' % nf.group(0)[:80])
+    # 2. a failure line that names nobody belongs to the one invocation that could have printed it
+    unnamed = [m.group(0) for m in UNNAMED_FAIL.finditer(txt)]
+    open_rows = [(a, inv) for a, inv in rows if a['outcome'] is None and not inv['to_file']]
+    if unnamed and len(open_rows) == 1:
+        _set(open_rows[0][0], 'failed', 'result says: %s' % unnamed[0][:80])
+    # 2b. a command that exited non-zero, whose LAST command was this invocation -- unconditional
+    #     and unpiped, so it ran and its exit status was the command's -- failed
+    if err:
+        for a, inv in rows:
+            if (a['outcome'] is None and inv.get('is_last') and not inv['piped']
+                    and inv['op_before'] not in ('&&', '||')):
+                _set(a, 'failed', 'the command exited non-zero and this invocation was its last command')
+    # 3. silence proves nothing unless the output reached the result
+    for a, inv in rows:
+        if a['outcome'] is not None:
+            continue
+        if (not inv['diverted'] and not (unnamed and len(open_rows) > 1)
+                and not (err and inv['op_before'] in ('&&', '||'))):
+            _set(a, 'no_effect', 'its output reached the result and printed no line of %s' % a['verb'])
+        else:
+            a['needs'] = ('its output was %s and the result shows no line naming it: establish it '
+                          'from project state or a snapshot'
+                          % ('diverted' if inv['diverted'] else 'possibly a failed link'))
+    return [a for a, _ in rows if a['outcome'] != 'superseded'] + extra
+
+
+# ---------------------------------------------------------------- evidence outside the result
+
+QLISTING = re.compile(r'^\s*(?:[-*]\s*)?([A-Z][A-Z0-9_-]*\d+)\s+\[(\d{4}-\d\d-\d\dT[\d:.]+Z)\]\s+(.+)$', re.M)
+DLISTING = re.compile(r'^\s{2}(D\d+)\s+(.+)$', re.M)
+EVIDENCE_WINDOW_S = 300
+
+
+def _dt(s):
+    """An ISO timestamp as an aware datetime. Project state writes some without a zone; the
+    watchdog writes UTC throughout, so an unzoned one is UTC (comparing naive with aware raised)."""
+    try:
+        d = datetime.datetime.fromisoformat(str(s).replace('Z', '+00:00'))
+    except Exception:
+        return None
+    return d if d.tzinfo else d.replace(tzinfo=datetime.timezone.utc)
+
+
+def _in_window(t, act_ts):
+    a, b = _dt(t), _dt(act_ts)
+    return bool(a and b) and -10 <= (a - b).total_seconds() <= EVIDENCE_WINDOW_S
+
+
+def _norm(s):
+    return ' '.join((s or '').split()).rstrip('…').rstrip('.')
+
+
+def resolve_from_evidence(acts, recs, state):
+    """Settle PENDING actions from evidence that names them: listing lines printed by later
+    commands (`Qn [queued-at] text`, `  Dn text`) and project state (queue items with their queued
+    and sent times; open and resolved questions). Nothing is settled from the absence of evidence:
+    what no source names stays pending, and the reconciliation is not complete while it does."""
+    ql, dl = [], []
+    for r in recs:
+        c = (r.get('message') or {}).get('content')
+        if not isinstance(c, list):
+            continue
+        for b in c:
+            if isinstance(b, dict) and b.get('type') == 'tool_result':
+                t = _block_text(b.get('content'))
+                ql += [(m.group(1), m.group(2), m.group(3)) for m in QLISTING.finditer(t)]
+                dl += [(r.get('timestamp') or '', m.group(1), m.group(2)) for m in DLISTING.finditer(t)]
+    items = [(x.get('id'), x.get('ts'), x.get('text'), x.get('sent_ts') or x.get('sent'))
+             for x in (state.get('owner_queue') or []) + (state.get('owner_queue_sent') or [])]
+    qs = dict(state.get('open_questions') or {})
+    qs.update(state.get('resolved_questions') or {})
+    for a in acts:
+        if a['outcome'] is not None or a.get('state') != 'live':
+            continue
+        head = _norm(a.get('text'))[:50]
+        v, hit = a['verb'], None
+        if v == 'queue add' and head:
+            ids = {i for i, t, x in ql if _in_window(t, a['ts']) and _norm(x).startswith(head)} | \
+                  {i for i, t, x, _s in items if _in_window(t, a['ts']) and _norm(x).startswith(head)}
+            if len(ids) == 1:
+                hit = (ids.pop(), 'listing/project state shows it queued within the window')
+        elif v == 'owe add' and head:
+            after = sorted((t, i) for t, i, x in dl if t >= a['ts'] and _norm(x).startswith(head))
+            if after and len({i for t, i in after if t == after[0][0]}) == 1:
+                hit = (after[0][1], 'the first owe listing after it shows it')
+        elif v == 'sent1' and a.get('id'):
+            if any(i == a['id'] and s and _in_window(s, a['ts']) for i, t, x, s in items):
+                hit = (a['id'], 'project state shows %s sent within the window' % a['id'])
+        elif v in ('ask', 'resolved') and a.get('id') in qs:
+            q = qs[a['id']]
+            t = q.get('asked_ts') if v == 'ask' else q.get('resolved_ts')
+            if t and _in_window(t, a['ts']):
+                hit = (a['id'], 'project state records it at %s' % t)
+        if hit:
+            a['id'] = a.get('id') or hit[0]
+            a['id_from'] = a.get('id_from') or 'evidence'
+            a.pop('needs', None)
+            _set(a, 'landed', hit[1])
+    return acts
+
+
+def outstanding(acts):
+    """Live actions whose outcome no evidence has established yet. The reconciliation OWES these:
+    each is a place Time Machine or a later record must be read, and none is a verdict."""
+    return [a for a in acts if a.get('state') == 'live' and a['outcome'] is None]
 
 
 def turn_starts(numbered):
@@ -940,10 +969,12 @@ def decision_chains(acts, owner, my_text, sends, target):
     if not target:
         raise ValueError('decision_chains needs the target session id: forwarding his answer '
                          'means a send TO THE TARGET, and a send elsewhere is not a forward')
+    acts = [a for a in acts if a.get('state', 'live') == 'live']
     decs = sorted((a for a in acts if a['kind'] == 'open' and a['store'] == 'owner_decisions'
                    and a['id']), key=lambda a: a['ts'])
+    # an ask with no id whose outcome is PENDING is outstanding work, not a failed ask
     failed_asks = [a for a in acts if a['kind'] == 'open' and a['store'] == 'owner_decisions'
-                   and not a['id']]
+                   and not a['id'] and a['outcome'] is not None]
     mintings = collections.defaultdict(list)
     for a in decs:
         mintings[a['id']].append(a)
@@ -983,6 +1014,12 @@ def decision_chains(acts, owner, my_text, sends, target):
                         and s['ts'] > answer['ts'] and carries(s['msg'], answer['text'])), None)
             cl = [c for c in closes.get(did, []) if inside(c['ts'])]
             landed = [c for c in cl if c['outcome'] == 'landed']
+            pend = [c for c in cl if c['outcome'] is None]
+            owed = []
+            if pend and not landed:
+                owed.append('a close of %s whose outcome is not yet established' % did)
+            if ask.get('outcome') is None:
+                owed.append('whether the ask of %s landed' % did)
             v = []
             if not put:
                 v.append('never_put_to_owner')
@@ -992,10 +1029,10 @@ def decision_chains(acts, owner, my_text, sends, target):
                 v.append('answered_not_forwarded')
             if landed and (not answer or landed[0]['ts'] < answer['ts']):
                 v.append('closed_without_answer')
-            if cl and not landed:
+            if cl and not landed and not pend:
                 v.append('close_failed' if any(c['outcome'] == 'failed' for c in cl)
                          else 'close_had_no_effect')
-            if answer and not landed:
+            if answer and not landed and not pend:
                 v.append('answered_not_closed')
             key = did if len(seq) == 1 else '%s#%d' % (did, k + 1)
             out[key] = {'asked': ask['ts'], 'ask_cite': ask['cite'],
@@ -1005,7 +1042,8 @@ def decision_chains(acts, owner, my_text, sends, target):
                         'forwarded': fwd['ts'] if fwd else None,
                         'closed': landed[0]['ts'] if landed else None,
                         'close_attempts': [(c['ts'], c['outcome']) for c in cl],
-                        'verdicts': v or ['complete'], 'text': ask['text'][:160]}
+                        'verdicts': v or ([] if owed else ['complete']), 'outstanding': owed,
+                        'text': ask['text'][:160]}
     for did, cs in closes.items():
         first = mintings[did][0]['ts'] if did in mintings else None
         for c in cs:
@@ -1062,6 +1100,10 @@ def landed_replay(acts, starts, my_text, sends, peers, state, target):
     asked = {a['id']: a['ts'] for a in acts if a['kind'] == 'open' and a['verb'] == 'ask' and a['id']}
     out = []
     for a in acts:
+        # a PENDING action (no evidence yet) is outstanding work, never a verdict; a scratch-state
+        # action did not touch the state under reconciliation
+        if a['outcome'] is None or a.get('state', 'live') != 'live':
+            continue
         v, why = a['outcome'], a['why']
         if v != 'landed':
             out.append(dict(a, verdict=v, why=why))
@@ -1465,7 +1507,8 @@ def invocations(cmd, live_state, cwd=None, _depth=0):
     or captured by a substitution): its silence then proves nothing."""
     live = os.path.normpath(live_state) if live_state else None
     out, env, shvars = [], {}, {}
-    for c in sh_commands(cmd):
+    cmds_ = sh_commands(cmd)
+    for ci, c in enumerate(cmds_):
         words = c['words']
         k, prefix = 0, {}
         while k < len(words) and re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', words[k]['w']) and not words[k]['quoted']:
@@ -1488,7 +1531,8 @@ def invocations(cmd, live_state, cwd=None, _depth=0):
             for sub in x.get('subs') or []:
                 if _depth < 4:
                     for inv in invocations(sub, live_state, cwd, _depth + 1):
-                        out.append(dict(inv, in_substitution=True, diverted=True))
+                        out.append(dict(inv, in_substitution=True, diverted=True, to_file=True,
+                                        piped=False, cmd_index=None))
         if not argv:
             continue
         # a script given to a shell as a string, or on stdin, runs too
@@ -1502,18 +1546,20 @@ def invocations(cmd, live_state, cwd=None, _depth=0):
             else:
                 src = next((r['heredoc'] for r in c['redirs'] if r.get('heredoc') is not None), None)
             if src and _depth < 4:
-                out.extend(invocations(src, live_state, cwd, _depth + 1))
+                out.extend(dict(x, cmd_index=None) for x in invocations(src, live_state, cwd, _depth + 1))
             continue
         env_here = dict(env)
         env_here.update(prefix)
         inv = _wd_invocation(av, argv, env_here, cwd, live)
         if inv is None:
             continue
-        diverted = any(r['redir'] in ('>', '>>', '>|', '&>', '&>>') and r['fd'] in ('1', 'both')
-                       or (r['redir'] == '>&' and r['fd'] == '1') for r in c['redirs']) \
-            or c['op_after'] in ('|', '|&')
-        inv.update(diverted=diverted, op_before=c['op_before'], op_after=c['op_after'],
-                   loop=c['loop'], in_substitution=False)
+        to_file = any(r['redir'] in ('>', '>>', '>|', '&>', '&>>') and r['fd'] in ('1', 'both')
+                      or (r['redir'] == '>&' and r['fd'] == '1') for r in c['redirs'])
+        piped = c['op_after'] in ('|', '|&')
+        inv.update(diverted=to_file or piped, to_file=to_file, piped=piped, cmd_index=ci,
+                   is_last=(ci == len(cmds_) - 1),
+                   op_before=c['op_before'], op_after=c['op_after'], loop=c['loop'],
+                   in_substitution=False)
         out.append(inv)
     return out
 
@@ -1531,7 +1577,7 @@ def _wd_invocation(av, argv, env, cwd, live):
         else:
             state_dir = os.path.join(wd_dir, 'state') if wd_dir else None
             state_literal = state_dir
-        rest, rexp = av[1:], exp[1:]
+        rest, rexp, via = av[1:], exp[1:], 'wd.sh'
         verb, args, aexp, urgent, gated = (rest[0] if rest else ''), rest[1:], rexp[1:], False, None
         if verb in ('queue', 'owe') and rest[1:]:
             verb = '%s %s' % (rest[0], rest[1])
@@ -1550,8 +1596,13 @@ def _wd_invocation(av, argv, env, cwd, live):
         if '--state-dir' in flags:
             j = flags.index('--state-dir')
             st = (flags[j + 1], fexp[j + 1]) if j + 1 < len(flags) else ('', True)
-        state_dir = (None if st[1] else _path_join(cwd, st[0])) if st else None
-        state_literal = st[0] if st else '(no --state-dir)'
+        script_path = _path_join(cwd, av[script])
+        if st:
+            state_dir, state_literal = (None if st[1] else _path_join(cwd, st[0])), st[0]
+        else:                                    # the scripts default to their own ./state
+            state_dir = os.path.join(os.path.dirname(script_path), 'state') if script_path else None
+            state_literal = state_dir or '(script path unresolved)'
+        via = os.path.basename(av[script])
         verb, args, aexp, urgent, gated = None, [], [], False, None
         if os.path.basename(av[script]) == 'wd_wake.py':
             for j, f in enumerate(flags):
@@ -1587,11 +1638,11 @@ def _wd_invocation(av, argv, env, cwd, live):
     return {'verb': verb, 'args': args, 'arg_expands': aexp, 'text': text,
             'text_resolved': (not any(aexp)) if text is not None else None,
             'urgent': urgent, 'gated_on': gated, 'state': state,
-            'state_dir': state_dir or state_literal, 'argv': av}
+            'state_dir': state_dir or state_literal, 'argv': av, 'via': via}
 
 
-# At the END of the module: selftest() uses OPEN_RX and friends, defined above. Mid-module
-# it ran before they existed and the direct entry point died with NameError.
+# At the END of the module: selftest() uses the shell reader, defined above. Mid-module it ran
+# before its dependencies existed and the direct entry point died with NameError.
 if __name__ == '__main__':
     import sys as _s
     _s.exit(selftest())
