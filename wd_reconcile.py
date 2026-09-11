@@ -198,49 +198,60 @@ def status_line(L):
 
 def run_stage(n, L, S, a):
     """RUN a stage and write what it measured into the ledger. Coverage is computed from these
-    numbers, never typed -- the whole point of the instrument is that finishing cannot be
-    asserted."""
+    numbers, never typed -- finishing cannot be asserted."""
     import wd_recon_lib as RL
+    import collections as _c
     cov = L.setdefault('coverage', {})
+
+    def _world():
+        path = RL.transcript_for(a.self_prefix, a.proj)
+        numbered, bad = RL.read_records(path)
+        recs = [r for _, r in numbered]
+        acts = RL.my_actions(numbered, os.path.basename(path))
+        owner, exc, peers, acct = RL.owner_messages(recs)
+        my_text, sends = RL.artifacts(recs)
+        return path, numbered, bad, recs, acts, owner, exc, peers, acct, my_text, sends
+
     if n == 1:
-        opens, closes, unres = RL.stage1(a.self_prefix, proj=a.proj)
-        join = RL.stage1_join(opens, closes, S, unres)
-        L['stage1'] = {'ts': now_iso(), 'opens': len(opens), 'closes': len(closes),
-                       'join': join,
-                       'items': [{'cite': o['cite'], 'ts': o['ts'], 'store': o['store'],
-                                  'sha256': o['sha256'], 'text': o['text']} for o in opens]}
+        path, numbered, bad, recs, acts, owner, exc, peers, acct, my_text, sends = _world()
+        opens = [x for x in acts if x['kind'] == 'open']
         live = RL.live_stores(S)
+        inv = acct['seen'] == acct['attributed'] + acct['excluded_total'] + acct.get('batch_deliveries', 0)
+        L['stage1'] = {'ts': now_iso(), 'transcript': os.path.basename(path),
+                       'records': len(numbered), 'unparseable': bad,
+                       'actions': len(acts), 'opens': len(opens),
+                       'by_outcome': dict(_c.Counter(x['outcome'] for x in acts)),
+                       'owner_messages': len(owner), 'owner_accounting': acct,
+                       'owner_accounting_holds': inv, 'excluded': exc, 'peer_replies': len(peers),
+                       'items': [{'cite': o['cite'], 'ts': o['ts'], 'store': o['store'],
+                                  'id': o['id'], 'sha256': o['sha256'], 'text': o['text'],
+                                  'outcome': o['outcome']} for o in opens]}
         cov['state_keys'] = [len(live['all_keys']), len(live['all_keys'])]
-        cov['actions'] = [0, len(opens) + len(closes)]
-        print('stage 1: %d opens, %d closes, %d state keys examined'
-              % (len(opens), len(closes), len(live['all_keys'])))
-        for k, v in join.items():
-            print('   %-28s %s' % (k, v))
+        # an unparseable line is unreconciled content, so it holds record coverage below 100
+        cov['records'] = [len(numbered), len(numbered) + bad]
+        cov['actions'] = [0, len(acts)]
+        print('stage 1: %d records (%d unparseable), %d actions of mine, %d opens, '
+              '%d owner messages, %d state keys'
+              % (len(numbered), bad, len(acts), len(opens), len(owner), len(live['all_keys'])))
+        print('   outcomes: %s' % dict(_c.Counter(x['outcome'] for x in acts)))
+        print('   owner corpus accounting %s: %s' % ('HOLDS' if inv else 'BROKEN', acct))
+        print('   excluded from the owner corpus, counted: %s' % exc)
         return True
     if n == 3:
         if 'stage1' not in L:
             raise SystemExit('run --stage 1 first: stage 3 replays the actions it found')
-        mine, tgt = RL.load(a.self_prefix)
-        acts, art = RL.timeline(mine, tgt)
-        adj = RL.stage3(acts, art)
-        import collections as _c
-        tally = _c.Counter(x['verdict'] for x in adj)
-        L['stage3'] = {'ts': now_iso(), 'tally': dict(tally),
-                       'missteers': [{'ts': x['ts'], 'verb': x['verb'], 'arg': x.get('arg'),
-                                      'why': x['why']} for x in adj if x['verdict'] == 'MISSTEER']}
-        # commits are actions too, and "it exists in my tree" is not "it landed on the
-        # branch the other agent reads" -- so each claimed sha is checked for the object AND
-        # for a ref.
+        path, numbered, bad, recs, acts, owner, exc, peers, acct, my_text, sends = _world()
+        starts = RL.turn_starts(numbered)
+        rep = RL.landed_replay(acts, starts, my_text, sends, peers, RL.live_stores(S)['raw'])
+        tally = _c.Counter(x['verdict'] for x in rep)
+        ch = RL.decision_chains(acts, owner, my_text, sends)
+        broken = {k: v for k, v in ch.items() if v['verdicts'] != ['complete']}
         import subprocess as _sp
-        # A sha I quoted may belong to EITHER repo -- the watchdog's own, or the project it
-        # watches. Probing only one reported 291 of 354 claims as missteers, which was the
-        # instrument looking in the wrong place, not 291 false claims.
-        repos = [r for r in ([a.proj] if a.proj else []) +
-                 [os.path.dirname(os.path.abspath(__file__))] +
-                 [(L.get('repos') or [])] if isinstance(r, str)]
-        for extra in (L.get('repos') or []):
-            if extra not in repos:
-                repos.append(extra)
+        repos = []
+        for r in ([a.proj] if a.proj else []) + [os.path.dirname(os.path.abspath(__file__))] \
+                + list(L.get('repos') or []):
+            if isinstance(r, str) and r not in repos:
+                repos.append(r)
 
         def _probe(sha):
             for repo in repos:
@@ -256,30 +267,25 @@ def run_stage(n, L, S, a):
                     continue
             return False, []
 
-        commits = RL.verify_commits(RL.claimed_commits(art['my_text']), _probe)
+        commits = RL.verify_commits(RL.claimed_commits(my_text), _probe)
         ctally = _c.Counter(x['verdict'] for x in commits)
-        L['stage3']['commits'] = {'tally': dict(ctally),
-                                  'missteers': [{'ts': x['ts'], 'sha': x['sha']}
-                                                for x in commits if x['verdict'] == 'MISSTEER'][:50]}
-        # DECISION CHAINS: a close is not a completed chain. Owner, 2026-09-11: "a decision is
-        # put to me, you record my decision and then never forward it. or you get an owed
-        # answer acknowledge it but never track or correct what it responds to."
-        if 'stage1' in L:
-            opens1, closes1, _u1 = RL.stage1(a.self_prefix, proj=a.proj)
-            ch = RL.chains(opens1, closes1, art,
-                           seq_base=RL.live_stores(S).get('owner_decision_seq'))
-            broken = {k: v for k, v in ch.items() if v['verdicts'] != ['complete']}
-            L['stage3']['chains'] = ch
-            print('         %d decision chain(s): %d complete, %d broken'
-                  % (len(ch), len(ch) - len(broken), len(broken)))
-            for did, v in sorted(broken.items()):
-                print('   CHAIN %-4s %-46s %s' % (did, '+'.join(v['verdicts']), v['text'][:60]))
-        decided = tally.get('ok', 0) + tally.get('MISSTEER', 0)
-        cov['actions'] = [decided, len(adj)]
-        print('stage 3: %d actions replayed -- %s' % (len(adj), dict(tally)))
+        L['stage3'] = {'ts': now_iso(), 'tally': dict(tally),
+                       'findings': [{'ts': x['ts'], 'cite': x['cite'], 'verb': x['verb'],
+                                     'id': x.get('id'), 'verdict': x['verdict'], 'why': x['why']}
+                                    for x in rep if x['verdict'] != 'ok'],
+                       'chains': ch,
+                       'commits': {'tally': dict(ctally),
+                                   'not_ok': [{'ts': x['ts'], 'sha': x['sha'], 'verdict': x['verdict']}
+                                              for x in commits if x['verdict'] != 'ok']}}
+        cov['actions'] = [len(rep), len(rep)]
+        print('stage 3: %d actions replayed -- %s' % (len(rep), dict(tally)))
+        print('         %d decision chain(s): %d complete, %d broken'
+              % (len(ch), len(ch) - len(broken), len(broken)))
+        for did, v in sorted(broken.items()):
+            print('   CHAIN %-8s %s' % (did, '+'.join(v['verdicts'])))
         print('         %d commit claim(s) -- %s' % (len(commits), dict(ctally)))
-        for m in L['stage3']['missteers'][:20]:
-            print('   MISSTEER %s %-10s %s' % (m['ts'][:19], m['verb'], m['why']))
+        for f in L['stage3']['findings'][:30]:
+            print('   %-13s %s %-10s %s' % (f['verdict'], f['ts'][:19], f['verb'], f['why']))
         return True
     if n == 2:
         raise SystemExit('stage 2 needs the Time Machine wrapper; drive it with --stage 2 once '
@@ -290,16 +296,15 @@ def run_stage(n, L, S, a):
         if not rs:
             print('stage 4: nothing restored yet, so nothing to check for supersession')
             return False
-        mine, tgt = RL.load(a.self_prefix)
-        _, art = RL.timeline(mine, tgt)
-        recs = [{'ts': o['ts'], 'text': o['text'], 'kind': o['kind']} for o in art['owner']]
+        path, numbered, bad, recs, acts, owner, exc, peers, acct, my_text, sends = _world()
+        later = [{'ts': o['ts'], 'text': o['text'], 'kind': 'owner'} for o in owner]
         for i, r in enumerate(rs):
             if r.get('validated_pass') == L.get('pass', 0):
                 continue
             ev = RL.stage4_evidence({'cite': r.get('evidence'), 'ts': r.get('ts'),
-                                     'text': r['what']}, recs)
+                                     'text': r['what']}, later)
             r['supersession_evidence'] = ev
-            print('restore #%d: %d record(s) after it, %d possible supersession(s)'
+            print('restore #%d: %d owner message(s) after it, %d touching it'
                   % (i, ev['records_after'], len(ev['hits'])))
             for h in ev['hits'][:3]:
                 print('     %s  %s' % (h['ts'][:19], h['excerpt'][:110].replace(chr(10), ' ')))

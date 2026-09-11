@@ -16,9 +16,10 @@ real record, so every guard has a case that fails without it:
 
 Run: python3 tests/test_reconcile.py
 """
-import os, sys, json, tempfile, shutil
+import os, re, sys, json, tempfile, shutil
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wd_recon_lib as R
 
 
@@ -40,108 +41,113 @@ REAL_ITEMS = [
     'An item carrying unicode and punctuation: the peak drifts 340 -> 660 -> 160, +-2 lines, 99% of units.',
 ]
 TRUTH = {
-    'opens': len(REAL_ITEMS),
-    'closed_ids': {'D1', 'D3', 'D5', 'Q1', 'Q2', 'Q3'},
+    # every INVOCATION is an action: the six genuine items, the "$*" ask (failed) and the
+    # short ask (landed). Decoys -- heredoc bodies, comments, echoes -- are not invocations.
+    'opens': 8,
+    'landed_open_ids': ['D2', 'D4', 'Q10', 'Q11', 'Q12', 'Q13', 'Q14'],
+    'landed_close_ids': {'D1', 'D3', 'D5', 'Q1', 'Q2', 'Q3', 'Q4', 'M7'},
     'never_closed': ['D2', 'D4'],
+    'owner': ['do not clear any queues', 'keep going until it is built', 'stop all your hooks now'],
 }
 
 
 def build(dirpath):
-    """A corpus of every form that could make the search wrong. Each entry is annotated with
-    what it is there to defeat; the count of genuine opens is fixed in TRUTH above."""
-    L = [
-        # --- forms that must NOT register as state changes -------------------------------
-        # 1. heredoc writing a document that contains real-looking invocation text
-        rec('2026-09-09T10:00:00Z', cmds=[
-            "cat > doc.md <<'EOF'\n"
-            "Example for the docs, NOT a real invocation:\n"
-            "  ./wd.sh queue add \"THIS SENTENCE IS ONLY AN EXAMPLE IN A DOCUMENT and must "
-            "never be restored as one of the owner's items.\"\n"
-            "  exec $PY \"$D/wd_wake.py\" --owe-add \"$*\" ;;\n"
-            "EOF\n"]),
-        # 2. heredoc with an UNQUOTED delimiter
-        rec('2026-09-09T10:01:00Z', cmds=[
-            "cat > other.md <<EOF\n"
-            "./wd.sh owe add \"ANOTHER DOCUMENT EXAMPLE that must never be taken as a real "
-            "decision the owner owes.\"\nEOF\n"]),
-        # 3. a python heredoc whose body writes the syntax
-        rec('2026-09-09T10:02:00Z', cmds=[
-            "python3 - <<'PY'\ns='./wd.sh queue add \"NOT AN ITEM, this lives inside a python "
-            "string literal and is only ever written to a file.\"'\nopen('f','w').write(s)\nPY\n"]),
-        # 4. a shell COMMENT containing the syntax
-        rec('2026-09-09T10:03:00Z', cmds=[
-            "# ./wd.sh queue add \"A COMMENTED-OUT EXAMPLE that was never executed at all.\"\n"
-            "echo done"]),
-        # 5. echo of the syntax
-        rec('2026-09-09T10:04:00Z', cmds=[
-            "echo './wd.sh owe add \"AN ECHOED EXAMPLE that only ever reached a terminal.\"'"]),
-        # 6. item text that is a bare shell variable
-        rec('2026-09-09T10:05:00Z', cmds=['./wd.sh queue add "$*"']),
-        # 7. item text too short to be words
-        rec('2026-09-09T10:06:00Z', cmds=['./wd.sh queue add "short"']),
-        # 8. an empty command, and whitespace only
-        rec('2026-09-09T10:07:00Z', cmds=['', '   \n  ']),
-        # 9. a non-Bash tool call
-        {'type': 'assistant', 'timestamp': '2026-09-09T10:08:00Z',
-         'message': {'role': 'assistant', 'content': [
-             {'type': 'tool_use', 'name': 'Read',
-              'input': {'file_path': './wd.sh queue add "NOT A COMMAND AT ALL, a file path."'}}]}},
-        # 10. a tool_RESULT that echoes the syntax back
-        {'type': 'user', 'timestamp': '2026-09-09T10:09:00Z',
-         'message': {'role': 'user', 'content': [
-             {'type': 'tool_result',
-              'content': './wd.sh queue add "OUTPUT ECHOED BACK BY A TOOL, never an invocation."'}]}},
+    """A corpus of every form that could make the search wrong, in the REAL record shapes
+    (tests/realshape.py): every command carries the tool_result that says what happened to it,
+    and the owner speaks through the channels he actually uses. The first version of this
+    fixture invented an attachment shape and carried no results, and passed while the extractor
+    read nothing on real data."""
+    import realshape as RS
+    L = []
+    # --- forms that must NOT register as actions ---------------------------------------
+    # 1. heredoc writing a document that contains real-looking invocation text
+    L += RS.bash('2026-09-09T10:00:00Z',
+                 "cat > doc.md <<'EOF'\n"
+                 "Example for the docs, NOT a real invocation:\n"
+                 "  ./wd.sh queue add \"THIS SENTENCE IS ONLY AN EXAMPLE IN A DOCUMENT and must "
+                 "never be restored as one of the owner's items.\"\n"
+                 "  exec $PY \"$D/wd_wake.py\" --owe-add \"$*\" ;;\n"
+                 "EOF\n", '')
+    # 2. heredoc with an UNQUOTED delimiter
+    L += RS.bash('2026-09-09T10:01:00Z',
+                 "cat > other.md <<EOF\n"
+                 "./wd.sh owe add \"ANOTHER DOCUMENT EXAMPLE that must never be taken as a real "
+                 "decision the owner owes.\"\nEOF\n", '')
+    # 3. a python heredoc whose body writes the syntax
+    L += RS.bash('2026-09-09T10:02:00Z',
+                 "python3 - <<'PY'\ns='./wd.sh queue add \"NOT AN ITEM, this lives inside a python "
+                 "string literal and is only ever written to a file.\"'\nopen('f','w').write(s)\nPY\n", '')
+    # 4. a shell COMMENT containing the syntax
+    L += RS.bash('2026-09-09T10:03:00Z',
+                 "# ./wd.sh queue add \"A COMMENTED-OUT EXAMPLE that was never executed at all.\"\n"
+                 "echo done", 'done')
+    # 5. echo of the syntax -- and a RESULT that carries the syntax back
+    L += RS.bash('2026-09-09T10:04:00Z',
+                 "echo './wd.sh owe add \"AN ECHOED EXAMPLE that only ever reached a terminal.\"'",
+                 './wd.sh owe add "AN ECHOED EXAMPLE that only ever reached a terminal."')
+    # 6. item text the SHELL expanded: the literal between double quotes is not what was stored
+    L += RS.bash('2026-09-09T10:05:00Z', './wd.sh queue add "$*"', 'REFUSED: an item needs text')
+    # 7. a genuine SHORT ask that landed: kept, never length-filtered away
+    L += RS.bash('2026-09-09T10:06:00Z', './wd.sh queue add "fix it"', 'queued Q14')
+    # 8. an empty command, and whitespace only
+    L += RS.bash('2026-09-09T10:07:00Z', '', '')
+    L += RS.bash('2026-09-09T10:07:30Z', '   \n  ', '')
+    # 9. a non-Bash tool call
+    L.append({'type': 'assistant', 'timestamp': '2026-09-09T10:08:00Z',
+              'message': {'role': 'assistant', 'content': [
+                  {'type': 'tool_use', 'id': 'toolu_read', 'name': 'Read',
+                   'input': {'file_path': './wd.sh queue add "NOT A COMMAND AT ALL, a file path."'}}]}})
+    # 10. an unpaired tool_RESULT that echoes the syntax back
+    L.append({'type': 'user', 'timestamp': '2026-09-09T10:09:00Z',
+              'message': {'role': 'user', 'content': [
+                  {'type': 'tool_result', 'tool_use_id': 'toolu_none',
+                   'content': './wd.sh queue add "OUTPUT ECHOED BACK BY A TOOL, never an invocation."'}]}})
 
-        # --- genuine opens ---------------------------------------------------------------
-        rec('2026-09-09T11:00:00Z', cmds=['cd /x && ./wd.sh queue add "%s"' % REAL_ITEMS[0]]),
-        rec('2026-09-11T01:13:00Z', cmds=['cd /x && ./wd.sh owe add "%s"' % REAL_ITEMS[1]]),
-        rec('2026-09-11T01:19:00Z', cmds=['cd /x && python3 wd_wake.py --owe-add "%s"' % REAL_ITEMS[2]]),
-        # an item whose text contains an apostrophe, inside a double-quoted argument
-        rec('2026-09-11T01:20:00Z', cmds=['./wd.sh queue add "%s"' % REAL_ITEMS[3]]),
-        # a multi-line item
-        rec('2026-09-11T01:21:00Z', cmds=['./wd.sh queue add "%s"' % REAL_ITEMS[4]]),
-        # --urgent, and unicode
-        rec('2026-09-11T01:22:00Z', cmds=['./wd.sh queue add --urgent "%s"' % REAL_ITEMS[5]]),
+    # --- genuine opens, each with the result that minted its id ------------------------
+    L += RS.bash('2026-09-09T11:00:00Z', 'cd /x && ./wd.sh queue add "%s"' % REAL_ITEMS[0], 'queued Q10')
+    L += RS.bash('2026-09-11T01:13:00Z', 'cd /x && ./wd.sh owe add "%s"' % REAL_ITEMS[1],
+                 'recorded D2 READY\nREADY for the owner: 1')
+    L += RS.bash('2026-09-11T01:19:00Z', 'cd /x && python3 wd_wake.py --owe-add "%s"' % REAL_ITEMS[2],
+                 'recorded D4 READY')
+    L += RS.bash('2026-09-11T01:20:00Z', './wd.sh queue add "%s"' % REAL_ITEMS[3], 'queued Q11')
+    L += RS.bash('2026-09-11T01:21:00Z', './wd.sh queue add "%s"' % REAL_ITEMS[4], 'queued Q12')
+    L += RS.bash('2026-09-11T01:22:00Z', './wd.sh queue add --urgent "%s"' % REAL_ITEMS[5],
+                 'queued Q13 (urgent)')
 
-        # --- closes in every form --------------------------------------------------------
-        # 11. id bound by a for-loop, $d form
-        rec('2026-09-11T02:00:00Z', cmds=[
-            'cd /x && for d in D1 D3; do python3 wd_wake.py --owe-clear $d; done']),
-        # 12. ${d} form, quoted items, inside a pipeline
-        rec('2026-09-11T02:01:00Z', cmds=[
-            'for d in "D5"; do ./wd.sh owe done ${d} | tail -1; done']),
-        # 13. plain literal close
-        rec('2026-09-11T03:00:00Z', cmds=['cd /x && ./wd.sh sent1 Q1']),
-        # 14. close whose id is followed by shell punctuation
-        rec('2026-09-11T03:01:00Z', cmds=['./wd.sh sent1 Q2; echo ok']),
-        # 15. the SAME id closed twice
-        rec('2026-09-11T03:02:00Z', cmds=['./wd.sh sent1 Q3']),
-        rec('2026-09-11T03:03:00Z', cmds=['./wd.sh sent1 Q3']),
-        # 16. a close with no id at all
-        rec('2026-09-11T03:04:00Z', cmds=['./wd.sh queue clear']),
+    # --- closes in every form ------------------------------------------------------------
+    # 11. ids bound by a for-loop, $d form
+    L += RS.bash('2026-09-11T02:00:00Z',
+                 'cd /x && for d in D1 D3; do python3 wd_wake.py --owe-clear $d; done',
+                 'D1 answered and cleared\nD3 answered and cleared')
+    # 12. ${d} form, quoted items, inside a pipeline
+    L += RS.bash('2026-09-11T02:01:00Z', 'for d in "D5"; do ./wd.sh owe done ${d} | tail -1; done',
+                 'D5 answered and cleared')
+    # 13. plain literal close
+    L += RS.bash('2026-09-11T03:00:00Z', 'cd /x && ./wd.sh sent1 Q1', 'item Q1 marked sent at T')
+    # 14. close whose id is followed by shell punctuation
+    L += RS.bash('2026-09-11T03:01:00Z', './wd.sh sent1 Q2; echo ok', 'item Q2 marked sent at T\nok')
+    # 15. the SAME id closed twice: the second found nothing to close
+    L += RS.bash('2026-09-11T03:02:00Z', './wd.sh sent1 Q3', 'item Q3 marked sent at T')
+    L += RS.bash('2026-09-11T03:03:00Z', './wd.sh sent1 Q3', 'no queued item Q3')
+    # 16. a close with no id argument: the id is in its result
+    L += RS.bash('2026-09-11T03:04:00Z', './wd.sh queue clear', 'queue cleared into message M7')
 
-        # --- record shapes that must not be silently dropped -----------------------------
-        # 17. the owner mid-turn, as attachment and as queue-operation, not `user`
-        {'type': 'attachment', 'timestamp': '2026-09-11T04:00:00Z',
-         'message': {'role': 'user', 'content': [{'type': 'text', 'text': 'stop all your hooks now'}]}},
-        {'type': 'queue-operation', 'timestamp': '2026-09-11T04:01:00Z',
-         'message': {'role': 'user', 'content': [{'type': 'text', 'text': 'do not clear any queues'}]}},
-        # 18. the owner as an ordinary user record too
-        {'type': 'user', 'timestamp': '2026-09-11T04:02:00Z',
-         'message': {'role': 'user', 'content': [{'type': 'text', 'text': 'keep going until it is built'}]}},
-        # 19. a record with NO timestamp
-        {'type': 'assistant', 'message': {'role': 'assistant',
-                                          'content': [{'type': 'text', 'text': 'no timestamp here'}]}},
-    ]
+    # --- the owner, through the channels he actually uses -----------------------------
+    L += RS.owner_midturn('2026-09-11T04:00:00Z', 'stop all your hooks now')
+    L.append(RS.enqueue('2026-09-11T04:01:00Z', 'do not clear any queues'))
+    L += RS.owner_turn('2026-09-11T04:02:00Z', 'keep going until it is built')
+    # 17. a record with NO timestamp
+    L.append({'type': 'assistant', 'message': {'role': 'assistant',
+                                               'content': [{'type': 'text', 'text': 'no timestamp here'}]}})
     p = os.path.join(dirpath, '80f99b89-fixture.jsonl')
     with open(p, 'w') as f:
         for r in L:
             f.write(json.dumps(r) + '\n')
-        # 20. an unparseable line, which must not stop the scan
+        # 18. an unparseable line, which must not stop the scan
         f.write('{ this is not json\n')
-        # 21. a genuine open AFTER the bad line, to prove the scan continued
-        f.write(json.dumps(rec('2026-09-11T05:00:00Z',
-                               cmds=['./wd.sh sent1 Q4'])) + '\n')
+        # 19. a genuine close AFTER the bad line, to prove the scan continued
+        for r in RS.bash('2026-09-11T05:00:00Z', './wd.sh sent1 Q4', 'item Q4 marked sent at T'):
+            f.write(json.dumps(r) + '\n')
     st = os.path.join(dirpath, 'state')
     os.makedirs(st, exist_ok=True)
     json.dump({'owner_queue': [], 'owner_decisions': {}, 'open_questions': {},
@@ -151,6 +157,8 @@ def build(dirpath):
 
 # ---- stage 3: did the action LAND? ------------------------------------------------------
 def test_stage3():
+    """landed_replay: the action's own outcome first, then the artifact that must exist in the
+    same turn if the action was honest. Every verdict is a fact; nothing is undecidable."""
     fails = []
     def ck(name, got, want):
         ok = got == want
@@ -159,38 +167,66 @@ def test_stage3():
         if not ok:
             fails.append(name)
 
-    art = {'sends': [{'ts': '2026-09-11T05:00:30Z', 'msg': 'here is item Q7 verbatim'}],
-           'my_text': [{'ts': '2026-09-11T06:00:10Z', 'text': 'x' * 500}],
-           'target': [{'ts': '2026-09-11T06:59:00Z', 'text': 'the target answered'}],
-           'owner': []}
-    acts = [
-        {'ts': '2026-09-11T05:00:00Z', 'verb': 'sent1', 'arg': 'Q7'},      # send names it -> ok
-        {'ts': '2026-09-11T05:00:00Z', 'verb': 'sent1', 'arg': 'Q9'},      # send exists, wrong id
-        {'ts': '2026-09-11T09:00:00Z', 'verb': 'sent1', 'arg': 'Q8'},      # no send at all
-        {'ts': '2026-09-11T06:00:00Z', 'verb': 'relayed', 'arg': None},    # substantial reply -> ok
-        {'ts': '2026-09-11T20:00:00Z', 'verb': 'relayed', 'arg': None},    # nothing said
-        {'ts': '2026-09-11T07:00:00Z', 'verb': 'resolved', 'arg': 'K1'},   # target spoke first
-        {'ts': '2026-09-11T01:00:00Z', 'verb': 'resolved', 'arg': 'K2'},   # nothing from target
-        {'ts': '2026-09-11T05:00:00Z', 'verb': 'answered', 'arg': None},   # a send exists
-    ]
-    v = [x['verdict'] for x in R.stage3(acts, art)]
-    ck('sent1 with a send naming the id', v[0], 'ok')
-    ck('sent1 with a send that names a DIFFERENT id -> undecidable', v[1], 'undecidable')
-    ck('sent1 with no send at all -> MISSTEER', v[2], 'MISSTEER')
-    ck('relayed with a substantial reply', v[3], 'ok')
-    ck('relayed with nothing said -> MISSTEER', v[4], 'MISSTEER')
-    ck('resolved after the target spoke', v[5], 'ok')
-    ck('resolved with no target output -> MISSTEER', v[6], 'MISSTEER')
-    ck('answered with a send behind it', v[7], 'ok')
-    ck('undecidable is never rounded to ok',
-       any(x == 'undecidable' for x in v), True)
+    T = lambda h, m=0: '2026-09-11T%02d:%02d:00Z' % (h, m)
+    Q7 = 'item seven is a sentence the owner actually said to me'
+    Q9 = 'item nine is a completely different sentence entirely'
 
-    # a commit claim is landed only if it exists AND sits on a ref
+    def act(kind, verb, ident, ts, outcome='landed', **kw):
+        return dict({'kind': kind, 'verb': verb, 'id': ident, 'ts': ts, 'cite': 'f:%s' % ts,
+                     'outcome': outcome, 'why': 'result'}, **kw)
+
+    acts = [
+        act('open', 'queue add', 'Q7', T(4), store='owner_queue', text=Q7, text_resolved=True),
+        act('open', 'queue add', 'Q9', T(4, 1), store='owner_queue', text=Q9, text_resolved=True),
+        act('open', 'queue add', 'Q11', T(4, 2), store='owner_queue', text='$*', text_resolved=False),
+        act('open', 'ask', 'K1', T(7), store='open_questions', text='what does the target think?'),
+        act('open', 'ask', 'K2', T(8), store='open_questions', text='and this one?'),
+        act('close', 'sent1', 'Q7', T(5, 1)),       # a send in the turn carries Q7 -> ok
+        act('close', 'sent1', 'Q9', T(5, 2)),       # the turn's send carries Q7, not Q9
+        act('close', 'sent1', 'Q8', T(9)),          # no text for Q8 anywhere
+        act('close', 'sent1', 'Q11', T(9, 30)),     # its only text is the unexpanded "$*"
+        act('close', 'sent1', 'Q10', T(10, 1), text=None),  # the send comes AFTER the mark
+        act('mark', 'relayed', None, T(6, 1)),      # text to the owner in the same turn
+        act('mark', 'relayed', None, T(20)),        # nothing said in that turn
+        act('close', 'resolved', 'K1', T(7, 5)),    # the target replied after K1 was asked
+        act('close', 'resolved', 'K2', T(8, 5)),    # no reply from the target
+        act('mark', 'answered', None, T(5, 3)),     # a send in the same turn precedes it
+        act('mark', 'nudged', None, T(21, 1)),      # a nudge with no send at all
+        act('close', 'sent1', 'Q12', T(22), outcome='failed'),   # its own result failed
+    ]
+    starts = [T(5), T(6), T(7), T(8), T(9), T(10), T(20), T(21), T(22)]
+    my_text = [{'ts': T(6), 'text': 'here is what the target said, relayed to you'}]
+    sends = [{'ts': T(5), 'msg': 'OWNER: ' + Q7},
+             {'ts': T(10, 2), 'msg': 'OWNER: the tenth item text sent after it was marked'}]
+    peers = [{'ts': T(7, 2), 'from': 'local_target', 'text': 'here is my answer'}]
+    state = {'owner_queue_sent': [{'id': 'Q10', 'text': 'the tenth item text sent after it was marked'}]}
+    rep = R.landed_replay(acts, starts, my_text, sends, peers, state)
+    v = {(x['verb'], x.get('id'), x['ts']): x['verdict'] for x in rep}
+    ck('sent1 with a same-turn send carrying its text -> ok', v[('sent1', 'Q7', T(5, 1))], 'ok')
+    ck('sent1 whose turn sent a DIFFERENT item -> MISSTEER', v[('sent1', 'Q9', T(5, 2))], 'MISSTEER')
+    ck('sent1 with no text anywhere -> MISSTEER', v[('sent1', 'Q8', T(9))], 'MISSTEER')
+    ck('an unexpanded "$*" is never taken as the item text',
+       v[('sent1', 'Q11', T(9, 30))], 'MISSTEER')
+    ck('a send AFTER the mark does not make the mark honest',
+       v[('sent1', 'Q10', T(10, 1))], 'MISSTEER')
+    ck('project state supplies text the record lacks (owner_queue_sent)',
+       'Q10' in R.item_texts(state, acts), True)
+    ck('relayed with text to the owner in the same turn -> ok', v[('relayed', None, T(6, 1))], 'ok')
+    ck('relayed with nothing said -> MISSTEER', v[('relayed', None, T(20))], 'MISSTEER')
+    ck('resolved after the target replied -> ok', v[('resolved', 'K1', T(7, 5))], 'ok')
+    ck('resolved with no reply -> MISSTEER', v[('resolved', 'K2', T(8, 5))], 'MISSTEER')
+    ck('answered with a send before it in the turn -> ok', v[('answered', None, T(5, 3))], 'ok')
+    ck('nudged with no send -> MISSTEER', v[('nudged', None, T(21, 1))], 'MISSTEER')
+    ck('an action whose own result failed stays failed', v[('sent1', 'Q12', T(22))], 'failed')
+    ck('every verdict is in the declared vocabulary',
+       all(x['verdict'] in R.REPLAY_VERDICTS for x in rep), True)
+
+    # a commit claim: three FACTS, none of them unknown
     probe = {'aaaaaaa': (True, ['origin/main']), 'bbbbbbb': (True, []), 'ccccccc': (False, [])}
     res = R.verify_commits([{'ts': 't', 'sha': k} for k in ('aaaaaaa', 'bbbbbbb', 'ccccccc')],
                            lambda sha: probe[sha])
     ck('commit on a ref -> ok', res[0]['verdict'], 'ok')
-    ck('commit that exists on NO ref -> undecidable', res[1]['verdict'], 'undecidable')
+    ck('commit that exists on NO ref -> on_no_ref, a fact', res[1]['verdict'], 'on_no_ref')
     ck('commit that does not exist -> MISSTEER', res[2]['verdict'], 'MISSTEER')
     return fails
 
@@ -603,7 +639,8 @@ def test_citation():
 
         # is_real_item, directly
         ck('is_real_item rejects a shell variable', R.is_real_item('$*'), False)
-        ck('is_real_item rejects a fragment', R.is_real_item('short'), False)
+        ck('is_real_item accepts a short genuine item (no length floor)',
+           R.is_real_item('short'), True)
         ck('is_real_item rejects empty', R.is_real_item(''), False)
         ck('is_real_item accepts a sentence', R.is_real_item(REAL_ITEMS[0]), True)
 
@@ -618,8 +655,16 @@ def test_citation():
         ck('and still unrolls the loop in the same pass',
            ('owe done D7' in norm and 'owe done D8' in norm), True)
 
-        # the library's own selftest must pass
+        # the library's own selftest must pass -- imported AND as a direct entry point: the
+        # __main__ block once sat mid-module and died with NameError before OPEN_RX existed,
+        # while the imported call (made after the whole module loaded) still passed
         ck('wd_recon_lib.selftest() passes', R.selftest(), 0)
+        import subprocess
+        lib = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           'wd_recon_lib.py')
+        r = subprocess.run([sys.executable, lib], capture_output=True, text=True)
+        ck('`python3 wd_recon_lib.py` runs its selftest and exits 0',
+           (r.returncode, 'SELFTEST PASS' in r.stdout), (0, True))
         return fails
     finally:
         R.PROJ = old_proj
@@ -740,15 +785,37 @@ def test_remaining_units():
         _, st = build(d)
         R.PROJ = d
 
-        # load(): every timestamped record, sorted, mine separated from the target's
-        mine, tgt = R.load('80f99b89')
-        ck('load returns the corpus', len(mine) > 0, True)
-        ck('load sorts chronologically',
-           [r['timestamp'] for r in mine] == sorted(r['timestamp'] for r in mine), True)
-        ck('load skips untimestamped records rather than crashing',
-           all(r.get('timestamp') for r in mine), True)
-        ck('load survives the unparseable line', True, True)
-        ck('no target transcript in this corpus', len(tgt), 0)
+        # read_records(): every parseable record, with the file's own line numbers, and the
+        # unparseable ones COUNTED -- a record is never dropped silently
+        p = os.path.join(d, '80f99b89-fixture.jsonl')
+        numbered, bad = R.read_records(p)
+        ck('read_records returns the corpus', len(numbered) > 0, True)
+        ck('line numbers are the file\'s own', numbered[0][0], 1)
+        ck('an untimestamped record is kept, not dropped',
+           any(not r.get('timestamp') for _, r in numbered), True)
+        ck('the unparseable line is counted', bad, 1)
+        ck('transcript_for finds the corpus by prefix',
+           R.transcript_for('80f99b89', d), p)
+        refused = False
+        try:
+            R.transcript_for('no-such-prefix', d)
+        except ValueError:
+            refused = True
+        ck('transcript_for with no match refuses by name', refused, True)
+        mt, sd = R.artifacts([r for _, r in numbered])
+        ck('artifacts: my text to the owner is read', any('no timestamp' in t['text'] for t in mt), True)
+        ck('artifacts: no send in this corpus', sd, [])
+
+        # a corpus with NO owner text: accounting is zeros, never a missing key (this crashed
+        # stage 1 with KeyError('seen') on the corner-case corpus)
+        _m, _e, _p, acct0 = R.owner_messages([r for _, r in numbered
+                                             if r.get('type') == 'assistant'])
+        # .get, so a missing key reports FAIL here instead of raising and hiding the next check
+        ck('owner accounting on a corpus with no owner text is all zeros',
+           tuple(acct0.get(k) for k in ('seen', 'attributed', 'excluded_total',
+                                         'batch_deliveries')), (0, 0, 0, 0))
+        ck('owner accounting on an EMPTY corpus is all zeros',
+           R.owner_messages([])[3].get('seen'), 0)
 
         # live_stores(): reads every key, and never invents one
         ls = R.live_stores(st)
@@ -780,9 +847,12 @@ def test_remaining_units():
         res = R.verify_commits(list(cc)[:1], lambda sha: (True, ['origin/main']))
         ck('a probed commit carries its refs', res[0]['refs'], ['origin/main'])
 
-        # the retired duplicate must be GONE, not merely unused
-        ck('adjudicate() is deleted, not left as a second source of truth',
-           hasattr(R, 'adjudicate'), False)
+        # every retired duplicate must be GONE, not merely unused: two sources of truth is how
+        # the Unknown-type verdicts survived the rewrite
+        for gone in ('adjudicate', 'load', 'timeline', '_near', 'stage1', 'stage1_join',
+                     'stage3', 'chains', 'ARGFORMS'):
+            ck('%s is deleted, not left as a second source of truth' % gone,
+               hasattr(R, gone), False)
         return fails
     finally:
         R.PROJ = old
@@ -830,8 +900,10 @@ def test_corner_cases():
        R.is_real_item('a real multi-line item\nwith a second line here'), True)
     ck('a tab is allowed', R.is_real_item('a real item\twith a tab in it, long enough'), True)
     ck('whitespace-only is rejected', R.is_real_item('   \n  \t '), False)
-    ck('exactly-at-threshold text is accepted', R.is_real_item('x' * 25), True)
-    ck('one char under threshold is rejected', R.is_real_item('x' * 24), False)
+    # there is NO length floor: it refused a genuine landed four-word ask. Length is not
+    # provenance; the result says whether the item landed.
+    ck('a short genuine item is accepted', R.is_real_item('fix it'), True)
+    ck('a one-word genuine item is accepted', R.is_real_item('no'), True)
 
     # --- ids that cannot be resolved to a literal --------------------------------------
     u = R.unresolved_ids('while read d; do ./wd.sh owe done $d; done')
@@ -844,39 +916,66 @@ def test_corner_cases():
 
     d = tempfile.mkdtemp(prefix='recon-corner-')
     try:
+        import realshape as RS
         p2 = os.path.join(d, '80f99b89-corner.jsonl')
-        with open(p2, 'w') as f:
-            for r in [
-                # open AND close in one command
-                rec('2026-09-11T01:00:00Z', cmds=[
-                    './wd.sh queue add "an item added and closed in the same command line"'
-                    ' && ./wd.sh sent1 QX']),
-                # an id that cannot be resolved
-                rec('2026-09-11T02:00:00Z', cmds=[
-                    'for d in $(cat ids.txt); do ./wd.sh owe done $d; done']),
-                # a heredoc whose BODY mentions its own delimiter
-                rec('2026-09-11T03:00:00Z', cmds=[
-                    "cat <<'EOF'\nthe word EOF appears here\n"
-                    "./wd.sh queue add \"this must not leak out of the heredoc body at all\"\nEOF"]),
-                # close before open, chronologically
-                rec('2026-09-11T00:30:00Z', cmds=['./wd.sh sent1 QY']),
-                rec('2026-09-11T04:00:00Z', cmds=[
-                    './wd.sh queue add "an item opened after its own close, out of order"']),
-                # an id reused after being closed
-                rec('2026-09-11T05:00:00Z', cmds=['./wd.sh sent1 QX']),
-            ]:
-                f.write(json.dumps(r) + '\n')
-        opens, closes, unres = R.stage1('80f99b89', proj=d)
+        L = []
+        # open AND close in one command, sharing one result
+        L += RS.bash('2026-09-11T01:00:00Z',
+                     './wd.sh queue add "an item added and closed in the same command line"'
+                     ' && ./wd.sh sent1 QX', 'queued QX\nitem QX marked sent at T')
+        # ids bound through a SUBSTITUTION: never unrolled (that invented `ids.txt` as an id);
+        # the script printed which ids it closed, so they are read from the result
+        L += RS.bash('2026-09-11T02:00:00Z',
+                     'for d in $(cat ids.txt); do ./wd.sh owe done $d; done',
+                     'D7 answered and cleared\nD8 answered and cleared')
+        # the same kind of loop with NO result: reported unresolved, never invented
+        L += RS.bash_no_result('2026-09-11T02:05:00Z',
+                               'while read d; do ./wd.sh owe done $d; done < ids.txt')
+        # a while-read loop whose result names what it closed
+        L += RS.bash('2026-09-11T02:10:00Z',
+                     'while read d; do ./wd.sh owe done $d; done < ids.txt', 'D9 answered and cleared')
+        # a heredoc whose BODY mentions its own delimiter
+        L += RS.bash('2026-09-11T03:00:00Z',
+                     "cat <<'EOF'\nthe word EOF appears here\n"
+                     "./wd.sh queue add \"this must not leak out of the heredoc body at all\"\nEOF", '')
+        # item text with ESCAPED quotes inside double quotes (the old pattern cut it at `\`)
+        L += RS.bash('2026-09-11T03:30:00Z',
+                     './wd.sh queue add "he said \\"no\\" and meant it"', 'queued QE')
+        # close before open, chronologically
+        L += RS.bash('2026-09-11T00:30:00Z', './wd.sh sent1 QY', 'item QY marked sent at T')
+        L += RS.bash('2026-09-11T04:00:00Z',
+                     './wd.sh queue add "an item opened after its own close, out of order"',
+                     'queued QZ')
+        # an id reused after being closed: the second found nothing to close
+        L += RS.bash('2026-09-11T05:00:00Z', './wd.sh sent1 QX', 'no queued item QX')
+        RS.write(p2, L)
+        numbered, _bad = R.read_records(p2)
+        acts = R.my_actions(numbered, os.path.basename(p2))
+        opens = [x for x in acts if x['kind'] == 'open']
+        closes = [x for x in acts if x['kind'] == 'close']
         ids = [c['id'] for c in closes]
         ck('an open and a close in ONE command are both seen',
-           ('QX' in ids and any('same command line' in o['text'] for o in opens)), True)
+           ('QX' in ids and any(o['id'] == 'QX' for o in opens)), True)
         ck('a heredoc mentioning its own delimiter does not leak',
            any('must not leak' in o['text'] for o in opens), False)
-        ck('an unresolvable loop id is reported, not invented', bool(unres), True)
-        ck('and no substitution text is recorded as an id',
+        # EXACT set, not one spelling of the invented id: with the guard removed it comes out
+        # as `ids.txt)`, and a check for exactly 'ids.txt' passed over it
+        ck('every close id is one the record states (no substitution unrolled)',
+           sorted({i for i in ids if i}), ['D7', 'D8', 'D9', 'QX', 'QY'])
+        ck('ids bound through a substitution are read from the result',
+           sorted(c['id'] for c in closes
+                  if c.get('id_from') == 'result' and c['id'] in ('D7', 'D8', 'D9')),
+           ['D7', 'D8', 'D9'])
+        ck('with no result the id is reported unresolved, not invented',
+           [(c['outcome'], c.get('unresolved')) for c in closes if c['id'] is None],
+           [('not_completed', ['$d'])])
+        ck('no substitution text is ever recorded as an id',
            any(i and '$' in i for i in ids), False)
+        ck('escaped quotes survive into the item text',
+           [o['text'] for o in opens if o['id'] == 'QE'], ['he said "no" and meant it'])
         ck('a close with no matching open is still recorded', 'QY' in ids, True)
-        ck('an id closed twice is recorded twice', ids.count('QX'), 2)
+        ck('an id closed twice is recorded twice, each with its outcome',
+           [c['outcome'] for c in closes if c['id'] == 'QX'], ['landed', 'failed'])
 
         # --- CLI corner cases ----------------------------------------------------------
         here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -905,10 +1004,14 @@ def test_corner_cases():
         run('2026-09-11T00:00:00Z', '2026-09-11T06:00:00Z', '--init')
         rc, out = run('--stage', '1', '--proj', d)
         led = json.load(open(os.path.join(st, 'reconcile.json')))
-        n1 = led['stage1']['opens']
+        ck('stage 1 runs on a corpus with NO owner text',
+           ('stage1' in led, 'Traceback' in out), (True, False))
+        n1 = (led.get('stage1') or {}).get('opens')
+        ck('stage 1 counts every open in the corpus', n1, 3)
         rc, out = run('--stage', '1', '--proj', d)
         led2 = json.load(open(os.path.join(st, 'reconcile.json')))
-        ck('running stage 1 twice does not double its result', led2['stage1']['opens'], n1)
+        ck('running stage 1 twice does not double its result',
+           (led2.get('stage1') or {}).get('opens'), n1)
 
         rc, out = run('--validate', '99', '--evidence', 'x')
         ck('--validate out of range refuses', rc != 0, True)
@@ -1009,8 +1112,14 @@ def test_robustness():
                                    cmds=['./wd.sh sent1 QBAD'])).encode() + b'\n')
             f.write(json.dumps(rec('2026-09-11T01:00:00Z',
                                    cmds=['./wd.sh sent1 QGOOD'])).encode() + b'\n')
-        opens, closes, _ = R.stage1('80f99b89', proj=d)
+        numbered, bad = R.read_records(p2)
+        acts = R.my_actions(numbered, os.path.basename(p2))
+        opens = [a for a in acts if a['kind'] == 'open']
+        closes = [a for a in acts if a['kind'] == 'close']
+        ck('the garbage line is counted, not dropped', bad, 1)
         ck('a high-byte item still parses', len(opens), 1)
+        ck('a command with no result is not_completed, not dropped',
+           [a['outcome'] for a in opens], ['not_completed'])
         ck('a binary garbage line does not stop the scan',
            'QGOOD' in [c['id'] for c in closes], True)
         ck('a malformed timestamp is kept, not crashed on',
@@ -1033,68 +1142,64 @@ def test_robustness():
 # ======================================================================================
 
 CHAIN_DECISIONS = [
-    # (id, question text, answered?, forwarded?, closed?)  -- the truth, fixed here
+    # (id, question, put to him?, answered?, forwarded?, closed?) -- the truth, fixed here
     ('D1', 'CHAIN COMPLETE: does the engine change to match the rule-8 ruling on partial lines',
-     True, True, True),
+     True, True, True, True),
     ('D2', 'ANSWERED BUT NEVER FORWARDED: which nominal threshold applies to the level cut',
-     True, False, True),
-    ('D3', 'CLOSED WITH NO ANSWER AT ALL: should the harness keep the fitted comb tolerance',
-     False, False, True),
+     True, True, False, True),
+    ('D3', 'PUT AND NEVER ANSWERED, CLOSED ANYWAY: keep the fitted comb tolerance or not',
+     True, False, False, True),
     ('D4', 'ANSWERED AND STILL OPEN: does position alone establish the head switch identity',
-     True, True, False),
+     True, True, True, False),
 ]
 CHAIN_TRUTH = {
     'D1': ['complete'],
     'D2': ['answered_not_forwarded'],
-    'D3': ['closed_without_matched_answer'],
-    'D4': ['answered_not_closed', 'forwarded_not_tracked'],
+    # D3 was put and got no reply. D4's reply (which names no id) comes AFTER D4 was put, so it
+    # belongs to D4's turn -- it must not be taken as D3's answer.
+    'D3': ['put_not_answered', 'closed_without_answer'],
+    'D4': ['answered_not_closed'],
 }
 
 
 def build_chain_world(dirpath):
-    """Transcript + snapshot series for the decision-chain cases."""
-    L, t = [], 0
+    """Transcript + snapshot series for the decision-chain cases, in REAL record shapes."""
+    import realshape as RS
+    L = []
 
-    def ts(h):
-        return '2026-09-10T%02d:00:00Z' % h
+    def ts(h, m=0):
+        return '2026-09-10T%02d:%02d:00Z' % (h, m)
 
-    for n, (did, text, answered, forwarded, closed) in enumerate(CHAIN_DECISIONS):
+    for n, (did, text, put, answered, forwarded, closed) in enumerate(CHAIN_DECISIONS):
         base = 1 + n * 4
-        L.append(rec(ts(base), cmds=['./wd.sh owe add "%s"' % text]))
+        L += RS.bash(ts(base), './wd.sh owe add "%s"' % text, 'recorded %s READY' % did)
+        if put:
+            L += RS.say(ts(base, 10), '%s for you: %s' % (did, text))
+        ruling = 'ruling on that: ' + text.split(':', 1)[1].strip()
         if answered:
-            # his answer arrives mid-turn, as an attachment -- not a `user` record
-            L.append({'type': 'attachment', 'timestamp': ts(base + 1),
-                      'message': {'role': 'user', 'content': [{'type': 'text',
-                                  'text': 'ruling on that: ' + text.split(':', 1)[1].strip()}]}})
+            # his answer arrives mid-turn, as a queued_command attachment -- not a `user` record
+            L += RS.owner_midturn(ts(base + 1), ruling)
         if forwarded:
-            L.append({'type': 'assistant', 'timestamp': ts(base + 2),
-                      'message': {'role': 'assistant', 'content': [
-                          {'type': 'tool_use', 'name': 'mcp__ccd_session_mgmt__send_message',
-                           'input': {'session_id': 'local_target',
-                                     'message': 'OWNER, VERBATIM: ' + text.split(':', 1)[1].strip()}}]}})
+            L += RS.send(ts(base + 2), 'OWNER, VERBATIM: ' + ruling)
         if closed:
-            L.append(rec(ts(base + 3), cmds=['./wd.sh owe done %s' % did]))
+            L += RS.bash(ts(base + 3), './wd.sh owe done %s' % did, '%s answered and cleared' % did)
 
     p = os.path.join(dirpath, '80f99b89-chain.jsonl')
-    with open(p, 'w') as f:
-        for r in L:
-            f.write(json.dumps(r) + '\n')
+    RS.write(p, L)
 
     # (b) the SNAPSHOT SERIES: state.json as it stood at each backup, evolving with the
-    # transcript above. D2's row disappears between 04 and 05 without a close in between.
+    # transcript above.
     snaps = {}
-    live_q = []
     live_d = {}
-    for n, (did, text, answered, forwarded, closed) in enumerate(CHAIN_DECISIONS):
+    for n, (did, text, put, answered, forwarded, closed) in enumerate(CHAIN_DECISIONS):
         base = 1 + n * 4
         live_d = dict(live_d)
         live_d[did] = {'text': text}
-        snaps['2026-09-10-%02d0000' % base] = {'owner_queue': list(live_q),
-                                               'owner_decisions': dict(live_d),
+        snaps['2026-09-10-%02d0000' % base] = {'owner_queue': [], 'owner_decisions': dict(live_d),
                                                'open_questions': {}, 'owner_decision_seq': n + 1}
         if closed:
             live_d = {k: v for k, v in live_d.items() if k != did}
-        snaps['2026-09-10-%02d0000' % (base + 3)] = {'owner_queue': list(live_q),
+        snaps['2026-09-10-%02d0000' % (base + 3)] = {'owner_queue': [],
                                                      'owner_decisions': dict(live_d),
                                                      'open_questions': {},
                                                      'owner_decision_seq': n + 1}
@@ -1108,7 +1213,7 @@ def build_chain_world(dirpath):
 
 def test_decision_chains():
     """A decision is a CHAIN and every link breaks independently. A store diff sees only the
-    close and calls all four of these complete."""
+    close and calls all four of these complete. Transcript and snapshot series must agree."""
     fails = []
     def ck(name, got, want):
         ok = got == want
@@ -1119,32 +1224,27 @@ def test_decision_chains():
 
     d = tempfile.mkdtemp(prefix='recon-chain-')
     try:
-        _, st, snaps = build_chain_world(d)
-        opens, closes, _ = R.stage1('80f99b89', proj=d)
-        mine, tgt = R.load('80f99b89') if R.PROJ == d else ([], [])
-        # load() reads R.PROJ; drive it explicitly instead
-        old = R.PROJ
-        R.PROJ = d
-        try:
-            mine, tgt = R.load('80f99b89')
-            acts, art = R.timeline(mine, tgt)
-        finally:
-            R.PROJ = old
+        p, st, snaps = build_chain_world(d)
+        numbered, bad = R.read_records(p)
+        recs = [r for _, r in numbered]
+        acts = R.my_actions(numbered, os.path.basename(p))
+        owner, _exc, _peers, _acct = R.owner_messages(recs)
+        my_text, sends = R.artifacts(recs)
 
-        ck('all four decisions are seen as opened', len(opens), 4)
+        ck('all four decisions are seen as asked, ids from results',
+           sorted(a['id'] for a in acts if a['kind'] == 'open'), ['D1', 'D2', 'D3', 'D4'])
         ck('the forwarding sends are seen',
-           len(art['sends']), sum(1 for _, _, _, f, _ in CHAIN_DECISIONS if f))
-        ck('his answers are read from attachment records',
-           len(art['owner']), sum(1 for _, _, a_, _, _ in CHAIN_DECISIONS if a_))
+           len(sends), sum(1 for x in CHAIN_DECISIONS if x[4]))
+        ck('his answers are read from queued_command attachments',
+           len(owner), sum(1 for x in CHAIN_DECISIONS if x[3]))
 
-        ch = R.chains(opens, closes, art, seq_base=len(CHAIN_DECISIONS))
+        ch = R.decision_chains(acts, owner, my_text, sends)
         for did, want in CHAIN_TRUTH.items():
             ck('%s -> %s' % (did, '+'.join(want)), sorted(ch[did]['verdicts']), sorted(want))
-
-        ck('a complete chain records all four timestamps',
-           all(ch['D1'][k] for k in ('asked', 'answered', 'forwarded', 'closed')), True)
+        ck('a complete chain records every timestamp',
+           all(ch['D1'][k] for k in ('asked', 'put', 'answered', 'forwarded', 'closed')), True)
         ck('an answered-not-forwarded chain has no forward', ch['D2']['forwarded'], None)
-        ck('a closed-without-answer chain has no answer', ch['D3']['answered'], None)
+        ck('an unanswered put does not take a LATER put\'s reply', ch['D3']['answered'], None)
         ck('an answered-not-closed chain has no close', ch['D4']['closed'], None)
 
         # --- the SNAPSHOT half, agreeing with the transcript --------------------------
@@ -1155,12 +1255,10 @@ def test_decision_chains():
            bool(dis['first_absent'].get('owner_decisions/D1')), True)
         ck('a decision still present at the end is not reported absent',
            'owner_decisions/D4' in dis['first_absent'], False)
-
-        # the two halves must AGREE: every dated disappearance has a close in the transcript
-        closed_ids = {c['id'] for c in closes if c['id']}
+        landed = {a['id'] for a in acts if a['kind'] == 'close' and a['outcome'] == 'landed'}
         dated = {k.split('/')[1] for k in dis['first_absent'] if k.startswith('owner_decisions/')}
-        ck('every snapshot-dated disappearance has a transcript close',
-           dated <= closed_ids, True)
+        ck('every snapshot-dated disappearance has a LANDED transcript close',
+           dated <= landed, True)
         return fails
     finally:
         shutil.rmtree(d, ignore_errors=True)
@@ -1168,9 +1266,9 @@ def test_decision_chains():
 
 
 def test_chain_edges():
-    """The chain's own corner cases. Each of these gave a WRONG answer when probed, and a
-    wrong attribution is worse than an admitted gap -- it reports a genuinely unanswered
-    decision as answered, or a closed one as still open against him."""
+    """The chain's own corner cases. Each gave a WRONG answer when probed, and a wrong
+    attribution is worse than an admitted gap: it reports an unanswered decision as answered,
+    or a closed one as still open against him."""
     fails = []
     def ck(name, got, want):
         ok = got == want
@@ -1179,71 +1277,372 @@ def test_chain_edges():
         if not ok:
             fails.append(name)
 
-    empty = {'owner': [], 'sends': []}
+    T = lambda h, m=0: '2026-09-10T%02d:%02d:00Z' % (h, m)
 
-    # a window that starts mid-history: the first ask here is D5, not D1
-    opens = [{'store': 'owner_decisions', 'ts': '2026-09-10T05:00:00Z', 'cite': 'f:1#0',
-              'text': 'a decision asked long after the first four already existed here'}]
-    closes = [{'ts': '2026-09-10T06:00:00Z', 'id': 'D5', 'verb': 'owe done', 'cite': 'f:2#0'}]
-    ch = R.chains(opens, closes, empty, seq_base=5)
-    ck('a mid-history window keys the ask as D5, not D1', list(ch), ['D5'])
+    def ask(did, ts, text='a question put to the owner that is long enough to be words'):
+        return {'kind': 'open', 'store': 'owner_decisions', 'verb': 'owe add', 'id': did,
+                'ts': ts, 'cite': 'f:%s' % ts, 'text': text, 'text_resolved': True,
+                'outcome': 'landed' if did else 'failed', 'why': 'result'}
+
+    def close(did, ts, oc='landed'):
+        return {'kind': 'close', 'verb': 'owe done', 'id': did, 'ts': ts, 'cite': 'c:%s' % ts,
+                'outcome': oc, 'why': 'result'}
+
+    say = lambda ts, text: {'ts': ts, 'text': text}
+    send = lambda ts, msg: {'ts': ts, 'msg': msg}
+    dc = R.decision_chains
+
+    # a window that starts mid-history: the id is whatever the RESULT minted
+    ch = dc([ask('D5', T(5)), close('D5', T(6, 30))], [say(T(5, 30), 'yes')],
+            [say(T(5, 10), 'D5 for you')], [send(T(6), 'OWNER, VERBATIM: yes')])
+    ck('the id comes from the result, not a counter', list(ch), ['D5'])
     ck('and its close is matched', bool(ch['D5']['closed']), True)
-    ck('so it is not reported as still open against him',
-       'answered_not_closed' in ch['D5']['verdicts'], False)
 
-    # the counter cannot key them: report unkeyed rather than guess
-    ch2 = R.chains(opens, closes, empty, seq_base=None)
-    ck('with no counter the chain is UNKEYED, not assumed to be D1',
-       list(ch2)[0].startswith('UNKEYED:'), True)
-    ch3 = R.chains(opens, closes, empty, seq_base=0)
-    ck('a counter smaller than the ask count is refused too',
-       list(ch3)[0].startswith('UNKEYED:'), True)
+    # two put together, reply names neither -> it answers both (the turn that put them)
+    ch = dc([ask('D1', T(1)), ask('D2', T(1, 1))], [say(T(2), 'no to both of those')],
+            [say(T(1, 5), 'D1 and D2 for you')], [])
+    ck('a reply to a turn that put two answers both',
+       [bool(ch[k]['answered']) for k in ('D1', 'D2')], [True, True])
 
-    # two decisions worded alike: one ruling must not be claimed by both
-    o2 = [{'store': 'owner_decisions', 'ts': '2026-09-10T01:00:00Z', 'cite': 'f:1#0',
-           'text': 'does position alone establish the head switch identity here'},
-          {'store': 'owner_decisions', 'ts': '2026-09-10T02:00:00Z', 'cite': 'f:2#0',
-           'text': 'does position alone establish the head switch identity here too'}]
-    a2 = {'owner': [{'ts': '2026-09-10T03:00:00Z', 'kind': 'user',
-                     'text': 'position alone does not establish head switch identity'}],
-          'sends': []}
-    c2 = R.chains(o2, [], a2, seq_base=2)
-    ck('an answer claimed by two decisions is attributed to neither',
-       [c2[k]['answered'] for k in sorted(c2)], [None, None])
-    ck('and both are marked ambiguous, not unanswered',
-       all('answer_ambiguous' in c2[k]['verdicts'] for k in c2), True)
+    # two put together, reply names D1 only -> D2 is still unanswered
+    ch = dc([ask('D1', T(1)), ask('D2', T(1, 1))], [say(T(2), 'D1: no.')],
+            [say(T(1, 5), 'D1 and D2 for you')], [])
+    ck('a reply naming a sibling does not answer this one', ch['D2']['answered'], None)
+    ck('and the named one is answered', bool(ch['D1']['answered']), True)
 
-    # a terse reply cannot be matched by shared terms -- say so rather than call it unanswered
-    o3 = [{'store': 'owner_decisions', 'ts': '2026-09-10T01:00:00Z', 'cite': 'f:1#0',
-           'text': 'keep the fitted comb tolerance or drop it entirely now please'}]
-    c3 = R.chains(o3, [{'ts': '2026-09-10T03:00:00Z', 'id': 'D1', 'verb': 'owe done',
-                        'cite': 'f:2#0'}],
-                  {'owner': [{'ts': '2026-09-10T02:00:00Z', 'kind': 'user', 'text': 'drop it'}],
-                   'sends': []}, seq_base=1)
-    ck('a terse answer yields "no MATCHED answer", not "no answer"',
-       c3['D1']['verdicts'], ['closed_without_matched_answer'])
+    # an unanswered earlier put must not take the reply to a LATER put
+    ch = dc([ask('D1', T(1)), ask('D2', T(3))], [say(T(4), 'drop it')],
+            [say(T(1, 5), 'D1 for you'), say(T(3, 5), 'D2 for you')], [])
+    ck('an earlier put does not steal a later put\'s reply', ch['D1']['answered'], None)
+    ck('the later put gets its reply', bool(ch['D2']['answered']), True)
+
+    # ...but a message that NAMES the earlier one still answers it, whenever it comes
+    ch = dc([ask('D1', T(1)), ask('D2', T(3))], [say(T(4), 'D1: keep it.')],
+            [say(T(1, 5), 'D1 for you'), say(T(3, 5), 'D2 for you')], [])
+    ck('a later message naming D1 answers D1', bool(ch['D1']['answered']), True)
+    ck('and does not answer D2', ch['D2']['answered'], None)
+
+    # his message naming Dn BEFORE it was put to him is not its answer
+    ch = dc([ask('D1', T(1))], [say(T(1, 2), 'D1: whatever it is, no')],
+            [say(T(1, 5), 'D1 for you')], [])
+    ck('a message before the put is not the answer', ch['D1']['answered'], None)
+
+    # my text naming D1 BEFORE the ask is not a put
+    ch = dc([ask('D1', T(2))], [], [say(T(1), 'D1 from last week is closed')], [])
+    ck('text before the ask is not a put', ch['D1']['verdicts'], ['never_put_to_owner'])
+
+    # a terse reply IS the answer
+    ch = dc([ask('D1', T(1)), close('D1', T(3))], [say(T(2), 'drop it')],
+            [say(T(1, 5), 'D1 for you')], [send(T(2, 5), 'OWNER, VERBATIM: drop it')])
+    ck('a terse reply ("drop it") is the answer', ch['D1']['answer_text'], 'drop it')
+    ck('and the chain is complete', ch['D1']['verdicts'], ['complete'])
 
     # a forward that precedes the answer is not a forward
-    o4 = [{'store': 'owner_decisions', 'ts': '2026-09-10T01:00:00Z', 'cite': 'f:1#0',
-           'text': 'which nominal threshold ruling words here now applies to the cut'}]
-    a4 = {'owner': [{'ts': '2026-09-10T05:00:00Z', 'kind': 'user',
-                     'text': 'nominal threshold ruling words here now applies'}],
-          'sends': [{'ts': '2026-09-10T02:00:00Z', 'msg': 'nominal threshold ruling words here now'}]}
-    ck('a send BEFORE the answer is not counted as forwarding it',
-       R.chains(o4, [], a4, seq_base=1)['D1']['forwarded'], None)
+    ch = dc([ask('D1', T(1))], [say(T(5), 'the nominal threshold applies to the cut')],
+            [say(T(1, 5), 'D1 for you')], [send(T(2), 'the nominal threshold applies to the cut')])
+    ck('a send BEFORE the answer is not forwarding it', ch['D1']['forwarded'], None)
 
-    # empty input
-    ck('no decisions yields no chains', R.chains([], [], empty, seq_base=0), {})
+    # a forward that PARAPHRASES is not the owner's words
+    ch = dc([ask('D1', T(1))], [say(T(2), 'the nominal threshold applies to the level cut only')],
+            [say(T(1, 5), 'D1 for you')], [send(T(3), 'he says to use the nominal cut')])
+    ck('a paraphrase is not a forward (relays are verbatim)',
+       'answered_not_forwarded' in ch['D1']['verdicts'], True)
+
+    # a close that took no effect, then one that did
+    ch = dc([ask('D1', T(1)), close('D1', T(3), 'no_effect'), close('D1', T(4))],
+            [say(T(2), 'drop it')], [say(T(1, 5), 'D1 for you')],
+            [send(T(2, 5), 'OWNER, VERBATIM: drop it')])
+    ck('a no-effect close followed by a landed one is closed', bool(ch['D1']['closed']), True)
+    ck('and both attempts are recorded', [o for _, o in ch['D1']['close_attempts']],
+       ['no_effect', 'landed'])
+
+    # a close that FAILED leaves the decision open
+    ch = dc([ask('D1', T(1)), close('D1', T(3), 'failed')], [say(T(2), 'drop it')],
+            [say(T(1, 5), 'D1 for you')], [send(T(2, 5), 'OWNER, VERBATIM: drop it')])
+    ck('a failed close -> close_failed + answered_not_closed',
+       sorted(ch['D1']['verdicts']), ['answered_not_closed', 'close_failed'])
+
+    # a close BEFORE the answer
+    ch = dc([ask('D1', T(1)), close('D1', T(2))], [say(T(3), 'drop it')],
+            [say(T(1, 5), 'D1 for you')], [send(T(3, 5), 'OWNER, VERBATIM: drop it')])
+    ck('closed before he answered -> closed_without_answer',
+       'closed_without_answer' in ch['D1']['verdicts'], True)
+
+    # an ask whose result minted no id
+    ch = dc([ask(None, T(1))], [], [], [])
+    ck('an ask that did not land is reported, keyed by its citation',
+       [v['verdicts'] for v in ch.values()], [['ask_did_not_land']])
+
+    # a close of an id never asked in the window
+    ch = dc([close('D9', T(1))], [], [], [])
+    ck('a close with no ask in the window is an orphan_close', ch['D9']['verdicts'], ['orphan_close'])
+
+    ck('no decisions yields no chains', dc([], [], [], []), {})
     return fails
+
+
+
+def test_real_shapes():
+    """The owner corpus and action outcomes, on records in the REAL shapes."""
+    import realshape as RS
+    fails = []
+    def ck(name, got, want):
+        ok = got == want
+        print('%-56s %s%s' % (name, 'PASS' if ok else 'FAIL',
+                              '' if ok else '  got=%r want=%r' % (got, want)))
+        if not ok:
+            fails.append(name)
+
+    recs = []
+    recs += RS.owner_turn('2026-09-11T01:00:00Z', 'first ruling, typed while you were idle')
+    recs += RS.owner_midturn('2026-09-11T01:05:00Z', 'drop it')
+    recs += RS.task_note('2026-09-11T01:06:00Z')
+    recs += RS.peer_reply('2026-09-11T01:07:00Z', 'the target reporting back')
+    recs.append(RS.user_str('2026-09-11T01:08:00Z', 'This session is being continued from a previous conversation...'))
+    recs.append(RS.user_str('2026-09-11T01:09:00Z', '[Request interrupted by user]'))
+    recs.append(RS.user_str('2026-09-11T01:10:00Z', 'a meta record', meta=True))
+
+    msgs, excluded, peers, _acct = R.owner_messages(recs)
+    ck('owner words are read from the REAL channels', [m['text'] for m in msgs],
+       ['first ruling, typed while you were idle', 'drop it'])
+    ck('a turn-delivered message is counted ONCE, not twice', len(msgs), 2)
+    ck('its sources are both listed', msgs[0]['sources'], ['enqueue', 'user'])
+    ck('a mid-turn message is counted ONCE (enqueue + queued_command)',
+       msgs[1]['sources'], ['enqueue', 'queued_command'])
+    ck('a terse ruling survives', msgs[1]['text'], 'drop it')
+    ck('task notifications are excluded AND counted', excluded.get('task_notification'), 2)
+    ck('peer messages are excluded from the owner corpus', excluded.get('peer_message'), 2)
+    ck('but kept as peer replies', [p['text'] for p in peers][:1], ['the target reporting back'])
+    ck('compaction summaries are excluded AND counted', excluded.get('compaction_summary'), 1)
+    ck('interrupt markers are excluded AND counted', excluded.get('interrupt_marker'), 1)
+    ck('meta records are excluded AND counted', excluded.get('meta'), 1)
+
+    # the old extractor on the same records: proves the shape defect was real
+    old = [x for r in recs if r.get('type') in ('attachment', 'queue-operation')
+           for x in R._texts((r.get('message') or {}).get('content'))]
+    ck('(the old message.content reader sees NONE of the mid-turn words)', old, [])
+
+    # outcomes: every verdict is a fact the record states
+    ck('OUTCOMES has no unknown-like class',
+       any(w in v for v in R.OUTCOMES for w in ('unknown', 'undecid', 'ambig', 'unkey')), False)
+    ck('landed: the result carries the success line with the id',
+       R.outcome('owe add', 'D5', ('recorded D5 READY\nREADY for the owner', False))[0], 'landed')
+    ck('landed: id read from the result even when not supplied',
+       R.outcome('owe add', None, ('recorded D7 READY', False))[0], 'landed')
+    ck('no_effect: clearing an id that is not there prints nothing',
+       R.outcome('owe done', 'D1', ('READY for the owner -- he can answer these now: 0', False))[0],
+       'no_effect')
+    ck('failed: REFUSED', R.outcome('answered', None, ('REFUSED: no delivered message', False))[0],
+       'failed')
+    ck('failed: a queued item that does not exist',
+       R.outcome('sent1', 'Q9', ('no queued item Q9', False))[0], 'failed')
+    ck('failed: is_error set', R.outcome('sent1', 'Q9', ('something', True))[0], 'failed')
+    ck('not_completed: no result was ever recorded', R.outcome('sent1', 'Q9', None)[0],
+       'not_completed')
+    ck('landed on the RIGHT id only',
+       R.outcome('owe done', 'D2', ('D1 answered and cleared', False))[0], 'no_effect')
+
+    # result_map pairs a tool_use with its outcome, list-shaped results included
+    rr = RS.bash('2026-09-11T02:00:00Z', './wd.sh owe add "x"', 'recorded D1 READY')
+    rr += RS.bash('2026-09-11T02:01:00Z', './wd.sh sent1 Q1',
+                  [{'type': 'text', 'text': 'item Q1 marked sent at T'}])
+    rm = R.result_map(rr)
+    ck('result_map pairs every tool_use with its result', len(rm), 2)
+    ck('list-shaped results are read as text',
+       any('marked sent' in t for t, e in rm.values()), True)
+    return fails
+
+
+
+def test_actions_and_chains_real_shapes():
+    """my_actions, decision_chains and landed_replay on a world built ONLY from real shapes,
+    with every chain verdict present and its truth fixed here."""
+    import realshape as RS
+    fails = []
+    def ck(name, got, want):
+        ok = got == want
+        print('%-56s %s%s' % (name, 'PASS' if ok else 'FAIL',
+                              '' if ok else '  got=%r want=%r' % (got, want)))
+        if not ok:
+            fails.append(name)
+
+    Q = ('keep the fitted comb tolerance, or drop it, before the harness is locked down?',
+         'which nominal threshold applies to the level cut, now that the basis is accepted?',
+         'does position alone establish the head switch identity on this source?',
+         'should captions ever move the crop when the geometry disagrees with them?',
+         'is the box re-measured on every unit, or held once acquired?')
+    T = lambda h, m=0: '2026-09-10T%02d:%02d:00Z' % (h, m)
+    recs = []
+    # D1 COMPLETE: asked, put, answered naming it, forwarded verbatim, closed
+    recs += RS.bash(T(1), './wd.sh owe add "%s"' % Q[0], 'recorded D1 READY\nREADY for the owner: 1')
+    recs += RS.say(T(1, 5), 'D1 for you: ' + Q[0])
+    recs += RS.owner_turn(T(1, 10), 'D1: drop the fitted tolerance, it was only ever a crutch.')
+    recs += RS.send(T(1, 20), 'OWNER, VERBATIM: D1: drop the fitted tolerance, it was only ever a crutch.')
+    recs += RS.bash(T(1, 30), './wd.sh owe done D1', 'D1 answered and cleared\nREADY: 0')
+    # D2 ANSWERED TERSELY, NEVER FORWARDED, CLOSED
+    recs += RS.bash(T(2), './wd.sh owe add "%s"' % Q[1], 'recorded D2 READY')
+    recs += RS.say(T(2, 5), 'D2: ' + Q[1])
+    recs += RS.owner_midturn(T(2, 10), 'drop it')
+    recs += RS.bash(T(2, 30), './wd.sh owe done D2', 'D2 answered and cleared')
+    # D3 NEVER PUT TO HIM, CLOSED ANYWAY
+    recs += RS.bash(T(3), './wd.sh owe add "%s"' % Q[2], 'recorded D3 READY')
+    recs += RS.bash(T(3, 30), './wd.sh owe done D3', 'D3 answered and cleared')
+    # D4 + D5 PUT TOGETHER; his reply names D4 only -> D5 is NOT answered by it
+    recs += RS.bash(T(4), './wd.sh owe add "%s"' % Q[3], 'recorded D4 READY')
+    recs += RS.bash(T(4, 1), './wd.sh owe add "%s"' % Q[4], 'recorded D5 READY')
+    recs += RS.say(T(4, 5), 'Two for you. D4: %s D5: %s' % (Q[3], Q[4]))
+    recs += RS.owner_turn(T(4, 10), 'D4: never. captions confirm, geometry decides.')
+    recs += RS.send(T(4, 20), 'OWNER, VERBATIM: D4: never. captions confirm, geometry decides.')
+    # D4's close ran but TOOK NO EFFECT (the id was not there to clear)
+    recs += RS.bash(T(4, 30), './wd.sh owe done D4', 'READY for the owner: 1')
+    # an owe add that FAILED -- no id was minted
+    recs += RS.bash(T(5), './wd.sh owe add "a decision whose ask never landed at all, crashed"',
+                    'Traceback (most recent call last):\n  File "wd_wake.py"\nKeyError: seq', True)
+    # a close for an id that was never asked
+    recs += RS.bash(T(6), './wd.sh owe done D99', 'D99 answered and cleared')
+    # a batched delivery: two queued messages dequeued as ONE user record
+    recs += [RS.enqueue(T(7), 'what the fuck'), RS.enqueue(T(7, 1), 'unless its in owed?'),
+             RS.dequeue(T(7, 2)), RS.dequeue(T(7, 2)),
+             RS.user_str(T(7, 2), 'what the fuck\nunless its in owed?')]
+    # a queue item, marked sent: once with a real send, once with none
+    recs += RS.bash(T(8), './wd.sh queue add "the box drawing is still wrong, draw it over the video"',
+                    'queued Q1')
+    recs += RS.send(T(8, 5), 'OWNER: the box drawing is still wrong, draw it over the video')
+    recs += RS.bash(T(8, 6), './wd.sh sent1 Q1', 'item Q1 marked sent at T')
+    recs += RS.bash(T(9), './wd.sh queue add "an item that was marked sent and never actually sent"',
+                    'queued Q2')
+    recs += RS.bash(T(9, 6), './wd.sh sent1 Q2', 'item Q2 marked sent at T')
+    # `answered` with no send in its turn, and one with a send
+    recs += RS.owner_turn(T(10), 'status please')
+    recs += RS.bash(T(10, 1), './wd.sh answered', 'answered at T')
+    recs += RS.send(T(10, 2), 'here is the status')
+    recs += RS.bash(T(10, 3), './wd.sh answered', 'answered at T (delivered message at T)')
+    # a command whose result never arrived
+    recs += RS.bash_no_result(T(11), './wd.sh sent1 Q7')
+
+    d = tempfile.mkdtemp(prefix='recon-real-')
+    try:
+        fname = '80f99b89-real.jsonl'
+        RS.write(os.path.join(d, fname), recs)
+        numbered, bad = R.read_records(os.path.join(d, fname))
+        acts = R.my_actions(numbered, fname)
+        recs_ = [r for _, r in numbered]
+        owner, exc, peers, acct = R.owner_messages(recs_)
+        my_text = [{'ts': r['timestamp'], 'text': b['text']} for r in recs_
+                   if r.get('type') == 'assistant'
+                   for b in (r['message']['content']) if b.get('type') == 'text']
+        sends = [{'ts': r['timestamp'], 'msg': b['input']['message']} for r in recs_
+                 if r.get('type') == 'assistant' for b in r['message']['content']
+                 if b.get('type') == 'tool_use' and 'send_message' in b.get('name', '')]
+
+        # --- batch delivery + accounting ---
+        ck('a batched delivery does not double-count its messages',
+           sum(1 for m in owner if 'unless its in owed' in m['text']), 1)
+        ck('and is recorded as a batch delivery', acct.get('batch_deliveries'), 1)
+        ck('ACCOUNTING: seen == attributed + excluded + batches',
+           acct['seen'], acct['attributed'] + acct['excluded_total'] + acct.get('batch_deliveries', 0))
+
+        # --- ids from results ---
+        opens = [a for a in acts if a['kind'] == 'open']
+        ck('open ids are read from the RESULT', [a['id'] for a in opens if a['id']],
+           ['D1', 'D2', 'D3', 'D4', 'D5', 'Q1', 'Q2'])
+        ck('an open whose result minted no id is recorded failed',
+           [a['outcome'] for a in opens if not a['id']], ['failed'])
+
+        ch = R.decision_chains(acts, owner, my_text, sends)
+        want = {
+            'D1': ['complete'],
+            'D2': ['answered_not_forwarded'],
+            'D3': ['never_put_to_owner', 'closed_without_answer'],
+            'D4': ['close_had_no_effect', 'answered_not_closed'],
+            'D5': ['put_not_answered'],
+            'D99': ['orphan_close'],
+        }
+        for did, w in want.items():
+            ck('%s -> %s' % (did, '+'.join(w)), sorted(ch.get(did, {}).get('verdicts', [])), sorted(w))
+        ck('a terse reply ("drop it") IS the answer to the turn that put it',
+           ch['D2']['answer_text'], 'drop it')
+        ck('a reply naming a sibling does not answer this one', ch['D5']['answered'], None)
+        ck('the failed ask is reported as not landed',
+           any(v['verdicts'] == ['ask_did_not_land'] for v in ch.values()), True)
+        ck('every chain verdict is in the declared vocabulary',
+           all(x in R.CHAIN_VERDICTS for v in ch.values() for x in v['verdicts']), True)
+
+        starts = R.turn_starts(numbered)
+        rep = R.landed_replay(acts, starts, my_text, sends, peers,
+                              {'owner_queue': [], 'owner_queue_sent': []})
+        by = lambda verb, ident: [x['verdict'] for x in rep if x['verb'] == verb and x.get('id') == ident]
+        ck('sent1 Q1 with a send carrying it -> ok', by('sent1', 'Q1'), ['ok'])
+        ck('sent1 Q2 marked sent, never sent -> MISSTEER', by('sent1', 'Q2'), ['MISSTEER'])
+        ck('sent1 whose result never arrived -> not_completed', by('sent1', 'Q7'), ['not_completed'])
+        ans = [x['verdict'] for x in rep if x['verb'] == 'answered']
+        ck('answered with no send in its turn -> MISSTEER, then ok', ans, ['MISSTEER', 'ok'])
+        ck('a close that took no effect is no_effect, not ok',
+           by('owe done', 'D4'), ['no_effect'])
+        ck('every replay verdict is in the declared vocabulary',
+           all(x['verdict'] in R.REPLAY_VERDICTS for x in rep), True)
+        ck('NO verdict anywhere is an unknown-like class',
+           any(w in x['verdict'].lower() for x in rep for w in ('unknown', 'undecid', 'ambig'))
+           or any(w in v.lower() for c in ch.values() for v in c['verdicts']
+                  for w in ('unknown', 'unkey', 'ambig', 'unmatched')), False)
+        return fails
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_vocabulary():
+    """Unknown is not an answer class: everything is answerable from my actions, project state or
+    what the owner owes me, so an item the instrument could not settle is WORK OUTSTANDING, and a
+    terminal 'unknown' verdict would route around the 100% gate. This scans every verdict-like
+    string the instrument can emit, and proves the scan fires on a planted one."""
+    import ast
+    fails = []
+    def ck(name, got, want):
+        ok = got == want
+        print('%-56s %s%s' % (name, 'PASS' if ok else 'FAIL',
+                              '' if ok else '  got=%r want=%r' % (got, want)))
+        if not ok:
+            fails.append(name)
+
+    banned = re.compile(r'unknown|undecid|unkeyed|ambig|unmatched|inconclusive|indetermin', re.I)
+
+    def verdict_like(src):
+        return sorted({n.value for n in ast.walk(ast.parse(src))
+                       if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                       and re.fullmatch(r'[A-Za-z][\w\-:]*', n.value) and banned.search(n.value)})
+
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for mod in ('wd_recon_lib.py', 'wd_reconcile.py'):
+        ck('%s emits no unknown-type verdict' % mod,
+           verdict_like(open(os.path.join(here, mod)).read()), [])
+    ck('the declared vocabularies contain none',
+       [v for v in R.CHAIN_VERDICTS + R.REPLAY_VERDICTS + R.OUTCOMES if banned.search(v)], [])
+    planted = open(os.path.join(here, 'wd_recon_lib.py')).read() + "\nX = 'undecidable'\n"
+    ck('CONTROL: the scan fires on a planted unknown-type verdict',
+       verdict_like(planted), ['undecidable'])
+    return fails
+
+
+def _guarded(fn):
+    """A test that CRASHES is a failure with a name. Before this, one KeyError in the corner
+    cases ended the run and every later test -- including the control written for that very
+    defect -- never reported."""
+    try:
+        return fn()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print('%-56s CRASHED: %r' % (fn.__name__, e))
+        return ['CRASHED %s: %r' % (fn.__name__, e)]
 
 
 def main():
     d = tempfile.mkdtemp(prefix='recon-fixture-')
     fails = []
     try:
-        _, st = build(d)
-        opens, closes, _u = R.stage1(self_prefix='80f99b89', proj=d)
-        join = R.stage1_join(opens, closes, st, _u)
+        p, st = build(d)
+        fname = os.path.basename(p)
+        numbered, bad = R.read_records(p)
 
         def ck(name, got, want):
             ok = got == want
@@ -1252,151 +1651,163 @@ def main():
             if not ok:
                 fails.append(name)
 
-        ck('opens: only the genuine items (heredoc ignored)', join['opens'], TRUTH['opens'])
-        ck('no shell variable was taken as an item',
-           any(o['text'].strip() in ('$*', '"$*"') for o in opens), False)
-        ck('every open carries a citation', all(':' in o['cite'] and '#' in o['cite'] for o in opens), True)
-        ck('every open carries a verbatim hash', all(len(o['sha256']) == 64 for o in opens), True)
-        closed = {c['id'] for c in closes if c['id']}
-        ck('close ids include the loop-bound D3', 'D3' in closed, True)
-        ck('close ids include the loop-bound D1', 'D1' in closed, True)
-        ck('the literal `$d` is never recorded as an id', '$d' in closed, False)
-        ck('literal close still found', 'Q1' in closed, True)
-        ck('decision issued but never closed is found', join['decision_ids_never_closed'],
-           TRUTH['never_closed'])
+        acts = R.my_actions(numbered, fname)
+        opens = [x for x in acts if x['kind'] == 'open']
+        closes = [x for x in acts if x['kind'] == 'close']
+        landed = {c['id'] for c in closes if c['id'] and c['outcome'] == 'landed'}
 
-        # the owner's mid-turn words must be readable where they actually live
-        mine, tgt = [], []
-        for line in open(os.path.join(d, '80f99b89-fixture.jsonl')):
-            try:
-                mine.append(json.loads(line))
-            except Exception:
-                continue
-        mine = [m for m in mine if m.get('timestamp')]
-        acts, art = R.timeline(sorted(mine, key=lambda r: r['timestamp']), tgt)
-        ck('owner words read from attachment + queue-operation + user', len(art['owner']), 3)
-        kinds = {o['kind'] for o in art['owner']}
-        ck('all three owner record kinds are read', kinds,
-           {'attachment', 'queue-operation', 'user'})
+        ck('opens: every invocation and only invocations', len(opens), TRUTH['opens'])
+        ck('open ids are read from the RESULTS',
+           sorted(o['id'] for o in opens if o['id']), TRUTH['landed_open_ids'])
+        ck('every genuine item is recorded verbatim',
+           all(any(o['text'] == t for o in opens) for t in REAL_ITEMS), True)
+        ck('the "$*" ask is FAILED and its text flagged unresolved',
+           [(o['outcome'], o['text_resolved']) for o in opens if o['text'] == '$*'],
+           [('failed', False)])
+        ck('a landed SHORT item is kept, not length-filtered away',
+           [o['id'] for o in opens if o['text'] == 'fix it'], ['Q14'])
+        ck('every open carries a citation',
+           all(':' in o['cite'] and '#' in o['cite'] for o in opens), True)
+        ck('every open carries a verbatim hash', all(len(o['sha256']) == 64 for o in opens), True)
+        ck('landed closes are exactly the truth', landed, TRUTH['landed_close_ids'])
+        ck('loop-bound ids come from the COMMAND where it states them',
+           sorted(c['id'] for c in closes
+                  if c.get('id_from') == 'command' and c['id'] in ('D1', 'D3', 'D5')),
+           ['D1', 'D3', 'D5'])
+        ck('the literal `$d` is never recorded as an id',
+           any(c['id'] and '$' in c['id'] for c in closes), False)
+        ck('a close its result says found nothing is failed, not landed',
+           [c['outcome'] for c in closes if c['id'] == 'Q3'], ['landed', 'failed'])
+        ck('an id-less close takes its id from its result',
+           [c['id_from'] for c in closes if c['id'] == 'M7'], ['result'])
+        ck('a decision asked but never closed is found',
+           sorted(o['id'] for o in opens
+                  if o['store'] == 'owner_decisions' and o['id'] and o['id'] not in landed),
+           TRUTH['never_closed'])
+        ck('the unparseable line is COUNTED, not dropped', bad, 1)
+        ck('the scan continues past the unparseable line', 'Q4' in landed, True)
+
+        # the owner's words, where they actually live
+        owner, _exc, _peers, acct = R.owner_messages([r for _, r in numbered])
+        ck('owner words read from every real channel, once each',
+           sorted(m['text'] for m in owner), TRUTH['owner'])
+        ck('all three owner channels are read',
+           {x for m in owner for x in m['sources']} >= {'enqueue', 'queued_command', 'user'}, True)
+        ck('owner accounting holds: seen == attributed + excluded + batches',
+           acct['seen'], acct['attributed'] + acct['excluded_total'] + acct.get('batch_deliveries', 0))
 
         # --- MUTATION BATTERY: every guard must be LOAD-BEARING ------------------------
         # Each entry disables ONE guard and states how the result must break. A mutation that
         # changes nothing means the guard protects nothing, and that FAILS the suite.
         print('\n--- mutation battery (each must break the result) ---')
-        import copy as _copy
-        base_opens, base_closes, _bu = R.stage1('80f99b89', proj=d)
-        base_ids = {c['id'] for c in base_closes if c['id']}
-        saved = {'normalize': R.normalize, 'is_real_item': R.is_real_item,
-                 'CLOSE_RX': R.CLOSE_RX, 'FORLOOP': R.FORLOOP, 'OPEN_RX': list(R.OPEN_RX)}
+        import re as _re
+        saved = {'normalize': R.normalize, 'item_text': R.item_text, 'CLOSE_RX': R.CLOSE_RX,
+                 'FORLOOP': R.FORLOOP, 'OPEN_RX': list(R.OPEN_RX), 'SUCCESS': dict(R.SUCCESS)}
 
         def run():
-            o, c, _ = R.stage1('80f99b89', proj=d)
-            return o, {x['id'] for x in c if x['id']}
+            a_ = R.my_actions(numbered, fname)
+            return ([x for x in a_ if x['kind'] == 'open'], [x for x in a_ if x['kind'] == 'close'])
 
         def mutate(name, apply_fn, broke_fn):
             apply_fn()
             try:
-                o, ids = run()
-                broke = broke_fn(o, ids)
-            except Exception as e:
+                o, c = run()
+                broke = broke_fn(o, c)
+            except Exception:
                 broke = True
             finally:
-                R.normalize = saved['normalize']; R.is_real_item = saved['is_real_item']
-                R.CLOSE_RX = saved['CLOSE_RX']; R.FORLOOP = saved['FORLOOP']
-                R.OPEN_RX = list(saved['OPEN_RX'])
+                for k, v in saved.items():
+                    setattr(R, k, list(v) if k == 'OPEN_RX' else (dict(v) if k == 'SUCCESS' else v))
             print('%-56s %s' % (name, 'PASS' if broke else 'FAIL (guard protects nothing)'))
             if not broke:
                 fails.append('mutation: ' + name)
 
-        import re as _re
-        mutate('drop strip_heredocs -> a written document scores as items',
+        cmd_ids = lambda c: {x['id'] for x in c if x.get('id_from') == 'command'}
+        landed_ids = lambda c: {x['id'] for x in c if x['id'] and x['outcome'] == 'landed'}
+        mutate('drop strip_heredocs -> a written document scores as actions',
                lambda: setattr(R, 'normalize',
                                lambda c: R.expand_loops(R.strip_echoes(R.strip_comments(c)))),
-               lambda o, i: len(o) > TRUTH['opens'])
-        mutate('drop strip_comments -> a commented example scores as an item',
+               lambda o, c: len(o) > TRUTH['opens'])
+        mutate('drop strip_comments -> a commented example scores as an action',
                lambda: setattr(R, 'normalize',
                                lambda c: R.expand_loops(R.strip_echoes(R.strip_heredocs(c)))),
-               lambda o, i: len(o) > TRUTH['opens'])
-        mutate('drop strip_echoes -> echoed text scores as an item',
+               lambda o, c: len(o) > TRUTH['opens'])
+        mutate('drop strip_echoes -> echoed text scores as an action',
                lambda: setattr(R, 'normalize',
                                lambda c: R.expand_loops(R.strip_comments(R.strip_heredocs(c)))),
-               lambda o, i: len(o) > TRUTH['opens'])
-        mutate('drop expand_loops -> loop-bound ids vanish',
+               lambda o, c: len(o) > TRUTH['opens'])
+        mutate('drop expand_loops -> ids a loop states literally are lost',
                lambda: setattr(R, 'normalize',
                                lambda c: R.strip_echoes(R.strip_comments(R.strip_heredocs(c)))),
-               lambda o, i: not {'D1', 'D3', 'D5'} <= i)
-        mutate('loop terminator matches `done` inside `owe done` -> D5 vanishes',
+               lambda o, c: not {'D1', 'D3', 'D5'} <= cmd_ids(c))
+        mutate('loop terminator matches `done` inside `owe done` -> D5 lost',
                lambda: setattr(R, 'FORLOOP', _re.compile(
                    r'for\s+(\w+)\s+in\s+([^;\n]+?)\s*;\s*do\b(.*?)\bdone\b', _re.S)),
-               lambda o, i: 'D5' not in i)
-        mutate('drop is_real_item -> `$*` and fragments become owner items',
-               lambda: setattr(R, 'is_real_item', lambda t: bool(t)),
-               lambda o, i: len(o) > TRUTH['opens'])
-        mutate('close id allows shell punctuation -> `Q2;` never matches `Q2`',
+               lambda o, c: 'D5' not in cmd_ids(c))
+        mutate('treat expanded text as literal -> "$*" becomes owner words',
+               lambda: setattr(R, 'item_text', lambda q, t: (t, True)),
+               lambda o, c: any(x['text'] == '$*' and x['text_resolved'] for x in o))
+        mutate('close id allows shell punctuation -> Q2 never lands',
                lambda: setattr(R, 'CLOSE_RX', _re.compile(
                    r'(?:^|[;&|]\s*|\s)(?:\./wd\.sh\s+(queue clear|sent1|owe done|owe ungate|'
                    r'resolved|closed|nudged)|--(queue-clear|owe-clear|owe-ungate))\b(?:\s+(\S+))?')),
-               lambda o, i: 'Q2' not in i)
+               lambda o, c: 'Q2' not in landed_ids(c))
         mutate('OPEN_RX without --urgent -> the urgent item is lost',
-               lambda: setattr(R, 'OPEN_RX', [(rx, st) for rx, st in saved['OPEN_RX']
+               lambda: setattr(R, 'OPEN_RX', [(rx, st_) for rx, st_ in saved['OPEN_RX']
                                               if '--urgent' not in rx.pattern]),
-               lambda o, i: len(o) < TRUTH['opens'])
+               lambda o, c: len(o) < TRUTH['opens'])
+        mutate('no success line for `queue clear` -> its message id is lost',
+               lambda: setattr(R, 'SUCCESS', {k: v for k, v in saved['SUCCESS'].items()
+                                              if k != 'queue clear'}),
+               lambda o, c: 'M7' not in landed_ids(c))
 
         # reading only `user` records loses most of what he said
-        allrecs = []
-        for line in open(os.path.join(d, '80f99b89-fixture.jsonl')):
-            try:
-                allrecs.append(json.loads(line))
-            except Exception:
-                continue
-        only_user = sum(1 for r in allrecs if r.get('type') == 'user'
-                        and any(b.get('type') == 'text'
-                                for b in ((r.get('message') or {}).get('content') or [])
-                                if isinstance(b, dict)))
+        only_user = [t for _, r in numbered if r.get('type') == 'user'
+                     for _src, t in R.channel_texts(r) if t.strip()]
         print('%-56s %s' % ('reading only `user` loses owner words',
-                            'PASS' if only_user < 3 else 'FAIL'))
-        if only_user >= 3:
+                            'PASS' if len(only_user) < len(TRUTH['owner']) else 'FAIL'))
+        if len(only_user) >= len(TRUTH['owner']):
             fails.append('mutation: user-only read loses nothing')
 
         # records without a timestamp must be COUNTED, never silently dropped
-        nots = sum(1 for r in allrecs if not r.get('timestamp'))
+        nots = sum(1 for _, r in numbered if not r.get('timestamp'))
         print('%-56s %s' % ('corpus contains untimestamped records to account for',
                             'PASS' if nots else 'FAIL'))
         if not nots:
             fails.append('fixture has no untimestamped record')
 
-        # the scan must survive an unparseable line and keep going
-        print('%-56s %s' % ('scan continues past an unparseable line',
-                            'PASS' if 'Q4' in base_ids else 'FAIL'))
-        if 'Q4' not in base_ids:
-            fails.append('scan stopped at the bad line')
-
         print('\n--- stage 3: landed-replay ---')
-        fails.extend(test_stage3())
+        fails.extend(_guarded(test_stage3))
         print('\n--- stage 4: supersession evidence ---')
-        fails.extend(test_stage4())
+        fails.extend(_guarded(test_stage4))
         print('\n--- stage 2: Time Machine (synthesized) ---')
-        fails.extend(test_stage2())
+        fails.extend(_guarded(test_stage2))
         print('\n--- tm reader (synthesized) ---')
-        fails.extend(test_tm_reader())
+        fails.extend(_guarded(test_tm_reader))
+        print('\n--- real record shapes: owner corpus and outcomes ---')
+        fails.extend(_guarded(test_real_shapes))
+        print('\n--- actions, chains and replay in real shapes ---')
+        fails.extend(_guarded(test_actions_and_chains_real_shapes))
         print('\n--- decision chains + snapshot series ---')
-        fails.extend(test_decision_chains())
+        fails.extend(_guarded(test_decision_chains))
         print('\n--- decision chain edges ---')
-        fails.extend(test_chain_edges())
+        fails.extend(_guarded(test_chain_edges))
         print('\n--- corner cases and error handling ---')
-        fails.extend(test_corner_cases())
+        fails.extend(_guarded(test_corner_cases))
         print('\n--- robustness: concurrency, crash residue, hostile input ---')
-        fails.extend(test_robustness())
+        fails.extend(_guarded(test_robustness))
         print('\n--- remaining units ---')
-        fails.extend(test_remaining_units())
+        fails.extend(_guarded(test_remaining_units))
         print('\n--- citation: the certainty mechanism ---')
-        fails.extend(test_citation())
+        fails.extend(_guarded(test_citation))
         print('\n--- CLI: stages actually run ---')
-        fails.extend(test_cli_stages())
+        fails.extend(_guarded(test_cli_stages))
         print('\n--- CLI: stages 2-5 and the supersession fixed point ---')
-        fails.extend(test_cli_all_stages())
+        fails.extend(_guarded(test_cli_all_stages))
         print('\n--- stage 5: additive repair ---')
-        fails.extend(test_stage5())
+        fails.extend(_guarded(test_stage5))
+        print('\n--- vocabulary: no unknown-type verdict ---')
+        fails.extend(_guarded(test_vocabulary))
 
         print('\nRESULT: %s' % ('all controls pass' if not fails else '%d FAILED: %s'
                                 % (len(fails), ', '.join(fails))))

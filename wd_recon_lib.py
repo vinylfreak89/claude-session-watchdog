@@ -34,9 +34,6 @@ DIRECT = r'--(queue-add|queue-clear|queue-hold|owe-add|owe-clear|owe-ungate|ask|
 MUT = re.compile(WRAP + '|' + DIRECT)
 
 # What must exist for each action to have been honest.
-NEEDS_SEND = {'sent1', 'nudged', 'answered', 'queue clear', 'queue-clear'}
-NEEDS_RELAY_TEXT = {'relayed'}
-NEEDS_TARGET_REPLY = {'resolved', 'closed'}
 
 
 def _texts(c):
@@ -48,79 +45,9 @@ def _texts(c):
     return []
 
 
-def load(self_prefix='80f99b89'):
-    """Every record of every transcript, once, in time order. No sampling: 'Everything.'"""
-    mine, target, = [], []
-    for f in sorted(os.listdir(PROJ)):
-        if not f.endswith('.jsonl'):
-            continue
-        is_mine = f.startswith(self_prefix)
-        for line in open(os.path.join(PROJ, f), 'rb'):
-            try:
-                r = json.loads(line)
-            except Exception:
-                continue
-            if not r.get('timestamp'):
-                continue
-            (mine if is_mine else target).append(r)
-    mine.sort(key=lambda r: r['timestamp'])
-    target.sort(key=lambda r: r['timestamp'])
-    return mine, target
-
-
-def timeline(mine, target):
-    """MY actions in chronological order, each with the artifacts available to corroborate it."""
-    actions, sends, my_text, owner_msgs = [], [], [], []
-    for r in mine:
-        ts, t = r['timestamp'], r.get('type')
-        m = r.get('message') or {}
-        if t in ('user', 'attachment', 'queue-operation'):
-            for x in _texts(m.get('content') if isinstance(m, dict) else None):
-                if x.startswith('<') or 'system-reminder' in x[:200] or 'tool_result' in x[:40]:
-                    continue
-                owner_msgs.append({'ts': ts, 'kind': t, 'text': x})
-        if t != 'assistant':
-            continue
-        for b in (m.get('content') or []):
-            if not isinstance(b, dict):
-                continue
-            if b.get('type') == 'text' and b.get('text'):
-                my_text.append({'ts': ts, 'text': b['text']})
-            if b.get('type') != 'tool_use':
-                continue
-            nm, inp = b.get('name'), (b.get('input') or {})
-            if nm and 'send_message' in nm:
-                sends.append({'ts': ts, 'msg': inp.get('message') or ''})
-            if nm == 'Bash':
-                # normalize FIRST. Without it a test fixture's example text, a heredoc body or
-                # a commented example is replayed as a real action -- measured 2026-09-11 on
-                # the live record, it produced four false MISSTEERs dated to the hour the
-                # fixtures were written. Same bypass restore_payload had.
-                c = normalize(inp.get('command', ''))
-                for mm in re.finditer(MUT, c):
-                    verb = mm.group(1) or mm.group(2)
-                    actions.append({'ts': ts, 'verb': verb, 'hour': ts[:13],
-                                    'arg': _arg(c, verb), 'cmd': c[:500]})
-    tgt_text = [{'ts': r['timestamp'], 'text': x}
-                for r in target if r.get('type') == 'assistant'
-                for x in _texts((r.get('message') or {}).get('content'))]
-    return actions, {'sends': sends, 'my_text': my_text, 'target': tgt_text,
-                     'owner': owner_msgs}
-
-
 def _arg(cmd, verb):
     m = re.search(re.escape(verb) + r'\s+(?:--urgent\s+)?["\']?([^"\'\s]{1,80})', cmd)
     return m.group(1) if m else None
-
-
-def _near(items, ts, before_s=900, after_s=900):
-    """Artifacts within a window of the action. A relay or a send belongs to the same turn."""
-    import datetime
-    def p(s):
-        return datetime.datetime.fromisoformat(s.replace('Z', '+00:00'))
-    t0 = p(ts)
-    return [x for x in items
-            if -before_s <= (p(x['ts']) - t0).total_seconds() <= after_s]
 
 
 # ---------------------------------------------------------------- citation
@@ -157,22 +84,16 @@ def commands_in(rec):
     return out
 
 
-# The argument forms that carry the owner's words into a store. A restore extracts the text
-# with these and NEVER by hand; if none matches, it refuses rather than storing a guess.
-ARGFORMS = [
-    re.compile(r"--queue-add\s+(?P<q>['\"])(?P<t>.*?)(?P=q)", re.S),
-    re.compile(r"--owe-add\s+(?P<q>['\"])(?P<t>.*?)(?P=q)", re.S),
-    re.compile(r"\./wd\.sh\s+queue\s+add\s+(?:--urgent\s+)?(?P<q>['\"])(?P<t>.*?)(?P=q)", re.S),
-    re.compile(r"\./wd\.sh\s+owe\s+add\s+(?:--gated-on\s+['\"].*?['\"]\s+)?(?P<q>['\"])(?P<t>.*?)(?P=q)", re.S),
-]
-
-
 def extract_item(cmd):
-    """The verbatim item text a command carried, or None. None means REFUSE, never improvise."""
-    for rx in ARGFORMS:
+    """The item text a command DELIVERED, or None. None means REFUSE, never improvise. Uses
+    OPEN_RX, the same patterns my_actions reads -- there was a second copy here (ARGFORMS) that
+    lacked `ask` and would have drifted. Text the shell would have expanded is refused: the
+    literal between double quotes is not what the script stored."""
+    for rx, _store in OPEN_RX:
         m = rx.search(cmd)
-        if m and m.group('t').strip():
-            return m.group('t')
+        if m:
+            t, resolved = item_text(m.group('q'), m.group('t'))
+            return t if (resolved and t.strip()) else None
     return None
 
 
@@ -192,7 +113,7 @@ def restore_payload(fname, lineno, which=0):
     text = extract_item(cmd)
     if text is None or not is_real_item(text):
         raise ValueError('%s:%d command #%d carries no recognisable item argument -- REFUSED '
-                         '(no guessing: fix the citation or widen ARGFORMS with a control)'
+                         '(no guessing: fix the citation or widen OPEN_RX with a control)'
                          % (fname, lineno, which))
     return {'source': '%s:%d#%d' % (fname, lineno, which),
             'ts': rec.get('timestamp'),
@@ -230,15 +151,15 @@ SHELLISH = re.compile(r'^\s*(\$[\*@0-9{]|["\']?\$)')
 
 
 def is_real_item(text):
-    """An item is the owner's words. A shell variable, an empty string, or a fragment shorter
-    than a sentence is a parse artifact -- REFUSE rather than reinstate it."""
-    if not text or SHELLISH.match(text):
+    """An item is the owner's words. A shell variable, an empty string or control bytes is not.
+    There is NO length floor: a 25-character floor existed for parse artifacts (fragments cut at
+    an escaped quote), which the escape-aware OPEN_RX and normalize() now remove at the source,
+    and the floor then refused a genuine landed four-word ask. Length is not provenance."""
+    if not text or not text.strip() or SHELLISH.match(text):
         return False
-    # Control characters are never the owner's words; a NUL in particular sailed through the
-    # length test and would have been restored as an item.
-    if any(ord(c) < 32 and c not in '\t\n\r' for c in text):
-        return False
-    return len(text.strip()) >= 25
+    # Control characters are never the owner's words; a NUL in particular would otherwise have
+    # been restored as an item.
+    return not any(ord(c) < 32 and c not in '\t\n\r' for c in text)
 
 
 def selftest():
@@ -258,17 +179,15 @@ def selftest():
         print('pass: a real invocation still extracts (%r...)' % got[:34])
     else:
         print('FAIL: a real invocation no longer extracts: %r' % got); ok = False
-    if is_real_item('$*') or is_real_item('') or is_real_item('short'):
-        print('FAIL: a shell variable or fragment passes is_real_item'); ok = False
+    if is_real_item('$*') or is_real_item('') or is_real_item('   ') or not is_real_item('fix it'):
+        print('FAIL: is_real_item takes a shell variable or blank, or refuses a short real item')
+        ok = False
     else:
-        print('pass: shell variables and fragments refused')
+        print('pass: shell variables and blanks refused, a short real item kept')
     print('SELFTEST %s' % ('PASS' if ok else 'FAIL'))
     return 0 if ok else 1
 
 
-if __name__ == '__main__':
-    import sys as _s
-    _s.exit(selftest())
 
 
 FORLOOP = re.compile(r'for\s+(\w+)\s+in\s+([^;\n]+?)\s*;\s*do\b(.*?)(?:^|[;&\n])\s*done\b',
@@ -284,6 +203,11 @@ def expand_loops(cmd):
     never appears as a literal is invisible to any pattern over the command text."""
     def sub(m):
         var, items, body = m.group(1), m.group(2).split(), m.group(3)
+        if any(re.search(r'[$`]', it) for it in items):
+            # the list is a substitution, not literals: unrolling `for d in $(cat ids.txt)`
+            # word-splits the SUBSTITUTION TEXT and invents `ids.txt` as an id. Leave it
+            # unrolled so `$d` stays visibly unresolved; the ids live in the result.
+            return m.group(0).replace('for ', 'for\x00', 1)
         out = []
         for it in items:
             it = it.strip('"\'')
@@ -293,7 +217,7 @@ def expand_loops(cmd):
     prev = None
     while prev != cmd:
         prev, cmd = cmd, FORLOOP.sub(sub, cmd)
-    return cmd
+    return cmd.replace('for\x00', 'for ')
 
 
 COMMENT = re.compile(r'^\s*#.*$', re.M)
@@ -371,119 +295,18 @@ def live_stores(state_dir):
 # ---------------------------------------------------------------- stage 1
 
 OPEN_RX = [
-    (re.compile(r"--queue-add\s+(?P<q>['\"])(?P<t>.*?)(?P=q)", re.S), 'owner_queue'),
-    (re.compile(r"--owe-add\s+(?:--gated-on\s+['\"].*?['\"]\s+)?(?P<q>['\"])(?P<t>.*?)(?P=q)", re.S), 'owner_decisions'),
-    (re.compile(r"\./wd\.sh\s+queue\s+add\s+(?:--urgent\s+)?(?P<q>['\"])(?P<t>.*?)(?P=q)", re.S), 'owner_queue'),
-    (re.compile(r"\./wd\.sh\s+owe\s+add\s+(?:--gated-on\s+['\"].*?['\"]\s+)?(?P<q>['\"])(?P<t>.*?)(?P=q)", re.S), 'owner_decisions'),
-    (re.compile(r"\./wd\.sh\s+ask\s+(?P<q>['\"])(?P<t>.*?)(?P=q)", re.S), 'open_questions'),
+    (re.compile(r"--queue-add\s+(?P<q>['\"])(?P<t>(?:\\.|(?!(?P=q)).)*)(?P=q)", re.S), 'owner_queue'),
+    (re.compile(r"--owe-add\s+(?:--gated-on\s+['\"].*?['\"]\s+)?(?P<q>['\"])(?P<t>(?:\\.|(?!(?P=q)).)*)(?P=q)", re.S), 'owner_decisions'),
+    (re.compile(r"\./wd\.sh\s+queue\s+add\s+(?:--urgent\s+)?(?P<q>['\"])(?P<t>(?:\\.|(?!(?P=q)).)*)(?P=q)", re.S), 'owner_queue'),
+    (re.compile(r"\./wd\.sh\s+owe\s+add\s+(?:--gated-on\s+['\"].*?['\"]\s+)?(?P<q>['\"])(?P<t>(?:\\.|(?!(?P=q)).)*)(?P=q)", re.S), 'owner_decisions'),
+    (re.compile(r"\./wd\.sh\s+ask\s+(?P<q>['\"])(?P<t>(?:\\.|(?!(?P=q)).)*)(?P=q)", re.S), 'open_questions'),
 ]
 CLOSE_RX = re.compile(
     r'(?:^|[;&|]\s*|\s)(?:\./wd\.sh\s+(queue clear|sent1|owe done|owe ungate|resolved|closed|nudged)'
     r'|--(queue-clear|owe-clear|owe-ungate))\b(?:\s+([^\s;&|]+))?')
 
 
-def stage1(self_prefix='80f99b89', proj=None):
-    """CHRONOLOGICAL REPLAY OF MY OWN ACTIONS.
-
-    Owner: "a replay of your entire set of actions to catch things that you steered
-    incorrectly, be they owed info, nudges, queues, owner requests, anything you own."
-
-    Every command passes through normalize() -- heredoc bodies removed, shell loops unrolled --
-    because each of those produced a WRONG ANSWER when it was missing: heredocs read a file
-    being written as state changes (three times), and a loop hid D3's close so it read as a
-    dropped decision. Returns opens, closes and the per-id join. Decides nothing."""
-    root = proj or PROJ
-    p = None
-    for f in sorted(os.listdir(root)):
-        if f.startswith(self_prefix) and f.endswith('.jsonl'):
-            p = os.path.join(root, f)
-    if not p:
-        raise ValueError('no transcript for %s' % self_prefix)
-    opens, closes, unresolved = [], [], []
-    for i, line in enumerate(open(p, 'rb'), 1):
-        try:
-            rec = json.loads(line)
-        except Exception:
-            continue
-        ts = rec.get('timestamp') or ''
-        for j, raw in enumerate(commands_in(rec)):
-            c = normalize(raw)
-            for rx, store in OPEN_RX:
-                for m in rx.finditer(c):
-                    t = m.group('t')
-                    if is_real_item(t):
-                        opens.append({'ts': ts, 'cite': '%s:%d#%d' % (os.path.basename(p), i, j),
-                                      'store': store, 'text': t,
-                                      'sha256': hashlib.sha256(t.encode()).hexdigest()})
-            for u in unresolved_ids(c):
-                unresolved.append(dict(u, ts=ts,
-                                       cite='%s:%d#%d' % (os.path.basename(p), i, j)))
-            for m in CLOSE_RX.finditer(c):
-                verb, arg = (m.group(1) or m.group(2)), m.group(3)
-                aid = (arg or '').strip('"\'') or None
-                if aid and UNRESOLVED.search(aid):
-                    aid = None        # never record a substitution as if it were an id
-                closes.append({'ts': ts, 'cite': '%s:%d#%d' % (os.path.basename(p), i, j),
-                               'verb': verb, 'id': aid})
-    return opens, closes, unresolved
-
-
-def stage1_join(opens, closes, state_dir, unresolved=()):
-    """Which created items are accounted for, and which are candidates for restore."""
-    live = live_stores(state_dir)
-    closed_ids = collections.Counter(c['id'] for c in closes if c['id'])
-    seq = live.get('owner_decision_seq') or 0
-    ids = ['D%d' % n for n in range(1, seq + 1)]
-    never = [i for i in ids if i not in closed_ids]
-    dupes = {i: n for i, n in closed_ids.items() if n > 1 and re.fullmatch(r'D\d+|Q\d+', i or '')}
-    return {'opens': len(opens), 'closes': len(closes),
-            'ids_unresolvable': len(unresolved),
-            'unresolvable_detail': [dict(u) for u in unresolved][:20],
-            'decision_ids_issued': seq, 'decision_ids_closed': len([i for i in ids if i in closed_ids]),
-            'decision_ids_never_closed': never,
-            'closed_more_than_once': dupes,
-            'live_owner_queue': len(live['owner_queue']),
-            'live_owner_decisions': len(live['owner_decisions'])}
-
-
 # ---------------------------------------------------------------- stage 3
-
-def stage3(actions, art, git_probe=None):
-    """LANDED-REPLAY: did each action I claimed actually happen?
-
-    Owner: "Then go back in the transcript and confirm every action landed. Do it as a replay."
-    Distinct from stage 1, which finds the ITEMS I lost; this finds the ACTIONS I claimed.
-
-    A verdict is OK / MISSTEER / UNDECIDABLE. Undecidable is a real outcome and is never
-    rounded to OK -- silence is not success. `git_probe` is injected so the corpus can be
-    synthetic; it answers "does this sha exist and on which refs"."""
-    out = []
-    for a in actions:
-        v, ident = a['verb'], a.get('arg')
-        verdict, why = 'undecidable', 'no artifact rule for this verb'
-        if v in ('sent1', 'nudged'):
-            near = _near(art['sends'], a['ts'])
-            if not near:
-                verdict, why = 'MISSTEER', 'no message to the target within 15 min'
-            elif ident and any(ident in s['msg'][:6000] for s in near):
-                verdict, why = 'ok', 'a send names %s' % ident
-            else:
-                verdict, why = 'undecidable', '%d send(s) near, none names %s' % (len(near), ident)
-        elif v == 'answered':
-            near = _near(art['sends'], a['ts'])
-            verdict, why = ('ok', '%d send(s) near' % len(near)) if near else \
-                           ('MISSTEER', '`answered` recorded with no send behind it')
-        elif v == 'relayed':
-            near = [x for x in _near(art['my_text'], a['ts'], 1800, 300) if len(x['text']) > 400]
-            verdict, why = ('ok', '%d substantial reply/ies to the owner' % len(near)) if near else \
-                           ('MISSTEER', '`relayed` with nothing said to the owner around it')
-        elif v in ('resolved', 'closed'):
-            near = _near(art['target'], a['ts'], 3600, 0)
-            verdict, why = ('ok', '%d target turn(s) precede it' % len(near)) if near else \
-                           ('MISSTEER', 'resolved with no target output before it')
-        out.append(dict(a, verdict=verdict, why=why))
-    return out
-
 
 SHA = re.compile(r'\b([0-9a-f]{7,40})\b')
 
@@ -508,8 +331,10 @@ def verify_commits(claims, git_probe):
     for c in claims:
         exists, refs = git_probe(c['sha'])
         out.append(dict(c, exists=exists, refs=refs,
+                        # three FACTS: on a ref; exists but reachable from no ref (rewritten
+                        # away or dangling); does not exist. None of them is unknown.
                         verdict='ok' if exists and refs else
-                                'MISSTEER' if not exists else 'undecidable'))
+                                'MISSTEER' if not exists else 'on_no_ref'))
     return out
 
 
@@ -742,98 +567,508 @@ def tm_state_at(raw):
 
 # ---------------------------------------------------------------- decision chains
 
-FORWARD_HINT = re.compile(r'\b(owner|his words|verbatim|he (?:says|said|ruled|answered))\b', re.I)
 
 
-def chains(opens, closes, art, seq_base=None, snapshots=None):
-    """A DECISION IS A CHAIN, and every link can break independently.
+# ================================================================ record-shape truth
+# Established from the REAL transcript on 2026-09-11, not assumed. The first fixture invented
+# an `attachment` with message.content -- a shape the real records do not have -- so on real
+# data the extractor read NONE of the owner's mid-turn words and the fixture still passed.
+#
+#   queue-operation  top-level `content` (str); operation enqueue | dequeue | remove.
+#                    enqueue carries the owner's words AND <task-notification> events.
+#   attachment       `attachment` dict; type queued_command carries the words in `prompt`.
+#                    Every queued_command duplicates an enqueue -- the same message, delivered
+#                    mid-turn -- so a naive union double-counts every mid-turn message.
+#   user             message.content: str, or a list of blocks (text / tool_result).
+#   tool_result      content: str, or a list of blocks; is_error True | False | None.
 
-    Owner, 2026-09-11: "decisions can follow a chain. for example, a decision is put to me, you
-    record my decision and then never forward it. or you get an owed answer acknowledge it but
-    never track or correct what it responds to."
+# Everything that arrives on an owner channel but is not his words. Each is COUNTED when
+# excluded -- "Missing is not a value": a silent filter is how a ruling vanishes.
+NOT_OWNER = [
+    ('task_notification', re.compile(r'^\s*<task-notification')),
+    ('system_reminder', re.compile(r'^\s*<system-reminder')),
+    ('peer_message', re.compile(r'^\s*(<cross-session-message|Another Claude session sent a message)')),
+    ('compaction_summary', re.compile(r'^\s*This session is being continued')),
+    ('interrupt_marker', re.compile(r'^\s*\[Request interrupted')),
+    ('slash_command', re.compile(r'^\s*<(command-name|command-message|command-args|local-command)')),
+    ('skill_load', re.compile(r'^\s*Base directory for this skill')),
+]
+PEER = re.compile(r'<cross-session-message\s+from="([^"]+)"[^>]*>(.*?)(?:</cross-session-message>|$)', re.S)
 
-        ASKED      `owe add` -- the question put to him
-        ANSWERED   his own words in the record, after the ask
-        FORWARDED  a message to the target carrying that answer
-        CLOSED     `owe done` / `owe-clear`
-        TRACKED    the thing the answer responds to is updated or closed after it
 
-    A store diff sees only CLOSED and calls the chain complete. These are the breaks it cannot
-    see, each a separate verdict rather than one 'incomplete':
+def _block_text(c):
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        return '\n'.join(b.get('text', '') for b in c
+                         if isinstance(b, dict) and b.get('type') == 'text' and b.get('text'))
+    return ''
 
-      answered_not_forwarded  he answered, I closed it, the target never received it
-      closed_without_answer   closed with nothing from him in the record
-      forwarded_not_tracked   relayed, but what it answers was never updated or closed
-      answered_not_closed     he answered and the item still sits open against him
-    """
-    # IDS COME FROM THE RECORD, NOT FROM POSITION. `wd_wake` assigns D<seq> from a counter
-    # that persists across the whole history, so "the first ask in this window is D1" is only
-    # true when the window starts at the beginning. Measured 2026-09-11: a decision genuinely
-    # numbered D5 was relabelled D1, and its close -- recorded against D5 -- went unmatched, so
-    # a closed chain reported answered_not_closed.
-    #
-    # The ask carries no id (the id is minted by the script, after the command), so the link is
-    # the ORDER of asks against the decision counter's base: if the store's seq is N and this
-    # window contains k asks, the last ask is D<N> and they count back from there. When that
-    # cannot be established the id is UNKNOWN and the chain is reported as unkeyed rather than
-    # guessed at.
-    asks = sorted([o for o in opens if o['store'] == 'owner_decisions'], key=lambda o: o['ts'])
-    seq = None
-    if isinstance(seq_base, int) and seq_base >= len(asks):
-        seq = seq_base
-    keyed = {}
-    for n, o in enumerate(asks):
-        if seq is not None:
-            did = 'D%d' % (seq - len(asks) + 1 + n)
-        else:
-            did = 'UNKEYED:%s' % o['cite']
-        keyed[did] = {'asked': o['ts'], 'text': o['text'], 'cite': o['cite']}
-    seq_map = keyed
-    for c in closes:
-        if c['id'] in seq_map:
-            seq_map[c['id']].setdefault('closed', c['ts'])
-    owner = sorted(art.get('owner') or [], key=lambda r: r['ts'])
-    sends = sorted(art.get('sends') or [], key=lambda r: r['ts'])
+
+def channel_texts(rec):
+    """(source, text) pairs a record carries on an owner-facing channel, in REAL shapes."""
+    t = rec.get('type')
+    if t == 'queue-operation':
+        if rec.get('operation') == 'enqueue' and isinstance(rec.get('content'), str):
+            return [('enqueue', rec['content'])]
+        return []
+    if t == 'attachment':
+        a = rec.get('attachment')
+        if isinstance(a, dict) and a.get('type') == 'queued_command' and isinstance(a.get('prompt'), str):
+            return [('queued_command', a['prompt'])]
+        return []
+    if t == 'user':
+        c = (rec.get('message') or {}).get('content')
+        if isinstance(c, str):
+            return [('user', c)]
+        if isinstance(c, list):
+            txt = _block_text(c)
+            return [('user', txt)] if txt else []
+    return []
+
+
+def owner_messages(recs):
+    """The owner's words, once each, with provenance and an exclusion ledger.
+
+    Dedupe is by text, and it must handle BATCHED DELIVERY: several queued messages are
+    dequeued together into ONE user record whose text is their newline-join. Measured on the
+    real record: exact-text dedupe counted those words twice -- once per enqueue and once as the
+    merged record. A delivery whose text is the join of pending enqueues is attributed to them.
+
+    Returns (messages, excluded, peers, accounting). accounting satisfies
+        seen == attributed + excluded_total + batch_deliveries
+    so no text leaves the corpus uncounted."""
+    seen, excluded, peers = {}, collections.Counter(), []
+    # Every key present from the start: a corpus with no owner text at all (a subagent's
+    # transcript, a window before he spoke) crashed stage 1 with KeyError('seen'). Zero is a
+    # measured count here -- every record was examined and none carried his words.
+    acct = collections.Counter({'seen': 0, 'attributed': 0, 'batch_deliveries': 0})
+    for r in recs:
+        if r.get('isMeta'):
+            excluded['meta'] += 1
+            acct['seen'] += 1
+            continue
+        for src, txt in channel_texts(r):
+            acct['seen'] += 1
+            if not txt or not txt.strip():
+                excluded['empty'] += 1
+                continue
+            cls = next((name for name, rx in NOT_OWNER if rx.match(txt)), None)
+            if cls:
+                excluded[cls] += 1
+                if cls == 'peer_message':
+                    m = PEER.search(txt)
+                    peers.append({'ts': r.get('timestamp') or '', 'from': m.group(1) if m else '',
+                                  'text': (m.group(2) if m else txt).strip()})
+                continue
+            key = txt.strip()
+            ts = r.get('timestamp') or ''
+            if key in seen:
+                seen[key]['sources'].add(src)
+                if ts and ts < seen[key]['ts']:
+                    seen[key]['ts'] = ts
+                acct['attributed'] += 1
+                continue
+            parts = [x.strip() for x in key.split('\n')]
+            if src != 'enqueue' and len(parts) > 1 and all(x in seen for x in parts if x):
+                for x in parts:
+                    if x:
+                        seen[x]['sources'].add(src + '(batch)')
+                acct['batch_deliveries'] += 1
+                continue
+            seen[key] = {'ts': ts, 'text': key, 'sources': {src}, 'uuid': r.get('uuid')}
+            acct['attributed'] += 1
+    msgs = sorted(seen.values(), key=lambda m: m['ts'])
+    for m in msgs:
+        m['sources'] = sorted(m['sources'])
+    acct['excluded_total'] = sum(excluded.values())
+    return msgs, dict(excluded), sorted(peers, key=lambda p: p['ts']), dict(acct)
+
+
+# ================================================================ action outcomes
+
+def result_map(recs):
+    """tool_use id -> (result text, is_error). The OUTCOME of every action lives here."""
     out = {}
-    for did, rec in seq_map.items():
-        terms = _terms(rec['text'])
-        need = max(2, len(terms) // 5)
-        cands = [o for o in owner if o['ts'] > rec['asked']
-                 and sum(1 for t in terms if t in o['text'].lower()) >= need]
-        answer, ambiguous = (cands[0] if cands else None), False
-        # An answer claimed by more than one decision is attributed to NONE of them: a wrong
-        # attribution reports a genuinely unanswered decision as answered, which is worse than
-        # an admitted gap. Measured: two similarly worded decisions both claimed one ruling.
-        if answer is not None:
-            rivals = [d for d in seq_map.values()
-                      if d is not rec and d['asked'] < answer['ts']
-                      and sum(1 for t in _terms(d['text']) if t in answer['text'].lower()) >= need]
-            if rivals:
-                answer, ambiguous = None, True
-        fwd = None
-        if answer:
-            fwd = next((s for s in sends if s['ts'] > answer['ts']
-                        and sum(1 for t in terms if t in s['msg'].lower()) >= need), None)
-        verdicts = []
-        if ambiguous:
-            # not "unanswered": the record may hold his answer and this cannot tell which
-            # decision it belongs to.
-            verdicts.append('answer_ambiguous')
-        elif not answer and rec.get('closed'):
-            # a close with no MATCHED answer is only evidence of a missing answer when the
-            # record could have matched one; a terse reply ("drop it") shares no terms with the
-            # question and is unmatchable by this means.
-            verdicts.append('closed_without_matched_answer')
-        if answer and not fwd:
-            verdicts.append('answered_not_forwarded')
-        if answer and not rec.get('closed'):
-            verdicts.append('answered_not_closed')
-        if fwd and not rec.get('closed'):
-            verdicts.append('forwarded_not_tracked')
-        out[did] = {'asked': rec['asked'], 'cite': rec['cite'],
-                    'answered': answer['ts'] if answer else None,
-                    'forwarded': fwd['ts'] if fwd else None,
-                    'closed': rec.get('closed'),
-                    'verdicts': verdicts or ['complete'],
-                    'text': rec['text'][:120]}
+    for r in recs:
+        c = (r.get('message') or {}).get('content')
+        if not isinstance(c, list):
+            continue
+        for b in c:
+            if isinstance(b, dict) and b.get('type') == 'tool_result' and b.get('tool_use_id'):
+                out[b['tool_use_id']] = (_block_text(b.get('content')), bool(b.get('is_error')))
     return out
+
+
+# What each verb prints when it TOOK EFFECT, from the scripts' own print statements.
+SUCCESS = {
+    'owe add': r'recorded (D\d+)', 'owe-add': r'recorded (D\d+)',
+    'owe done': r'(D\d+) answered and cleared', 'owe-clear': r'(D\d+) answered and cleared',
+    'owe ungate': r'(D\d+) is now READY', 'owe-ungate': r'(D\d+) is now READY',
+    'queue add': r'queued (\S+)', 'queue-add': r'queued (\S+)',
+    'queue clear': r'queue cleared into message (\S+)', 'queue-clear': r'queue cleared into message (\S+)',
+    'queue hold': r'(\S+) (?:HELD UNTIL:|released)', 'queue-hold': r'(\S+) (?:HELD UNTIL:|released)',
+    'sent1': r'item (\S+) marked sent at', 'relayed': r'relayed to the owner up to (\S+)',
+    'answered': r'answered at (\S+)', 'ask': r'open question (\S+) registered',
+    'resolved': r'resolved (\S+) \(open since', 'nudged': r'nudged (\S+) \(',
+    'closed': r'closed (\S+) under the one-line exception', 'conditional': r'PARKED (\S+)',
+    'fired': r'FIRED (\S+)', 'hold': r'holding (\S+)',
+    'sent': r'recorded sent: \[([^\]]*)\]', 'veto': r'recorded veto: \[([^\]]*)\]',
+    'outcome': r'(F\d+) graded \w+',
+}
+FAILED = re.compile(r'REFUSED|no queued item|no open question|Traceback \(most recent|'
+                    r'^\S*Error: |No such file|command not found', re.M)
+# The ONLY verdicts. Every one is a fact the record states; there is no "unknown" among them,
+# because everything here is answerable from the record (owner, 2026-09-11) -- a verdict the
+# instrument could not reach is work outstanding, not an answer.
+OUTCOMES = ('landed', 'failed', 'no_effect', 'not_completed')
+
+
+def outcome(verb, ident, result):
+    """What the record says happened to ONE action. `result` is (text, is_error) or None."""
+    if result is None:
+        return 'not_completed', 'no tool_result recorded -- the command did not complete'
+    text, is_err = result
+    rx = SUCCESS.get(verb)
+    if rx:
+        hits = [m.group(1) for m in re.finditer(rx, text)]
+        if hits and (ident is None or any(ident == h or ident in h for h in hits)):
+            return 'landed', 'result says: %s' % re.search(rx, text).group(0)[:80]
+    if is_err or FAILED.search(text):
+        m = FAILED.search(text)
+        return 'failed', 'result says: %s' % (m.group(0) if m else 'is_error')
+    return 'no_effect', 'result present, no success line for %s %s' % (verb, ident or '')
+
+
+# ================================================================ my actions, from their results
+
+def read_records(path):
+    """(lineno, record) for every parseable line, plus the count of unparseable ones."""
+    out, bad = [], 0
+    with open(path, 'rb') as f:
+        for i, line in enumerate(f, 1):
+            try:
+                out.append((i, json.loads(line)))
+            except Exception:
+                bad += 1
+    return out, bad
+
+
+ID_IN_RESULT = {'owe add': r'recorded (D\d+)', 'owe-add': r'recorded (D\d+)',
+                'queue add': r'queued (\S+)', 'queue-add': r'queued (\S+)',
+                'ask': r'open question (\S+) registered'}
+OPEN_VERB = {'owner_decisions': 'owe add', 'owner_queue': 'queue add', 'open_questions': 'ask'}
+
+
+def item_text(q, t):
+    """(text as the shell delivered it, resolved?). Double quotes expand `$x`, `$(...)` and
+    backticks, so the literal between them is NOT what the script stored whenever it carries
+    one: that text is flagged unresolved and its words must come from the result or project
+    state, never from the command. Single quotes deliver the literal."""
+    if q == "'":
+        return t, True
+    delivered = re.sub(r'\\([\\"$`])', r'\1', t)
+    return delivered, not re.search(r'(?<!\\)(\$[\w{(*@#?!-]|`)', t)
+
+
+def my_actions(numbered, fname):
+    """Every state-changing action of mine, in order, each with ITS OWN recorded outcome.
+
+    An open's id is read from its result (`recorded D5`, `queued Q12`), never inferred from a
+    counter: the id is minted by the script after the command, and the result is where it was
+    written down. Several mutations in one command share one result, so ids are consumed in
+    order and each close is matched to its own id inside the shared result."""
+    rm = result_map([r for _, r in numbered])
+    acts = []
+    for lineno, rec in numbered:
+        if rec.get('type') != 'assistant':
+            continue
+        ts = rec.get('timestamp') or ''
+        blocks = [b for b in ((rec.get('message') or {}).get('content') or [])
+                  if isinstance(b, dict) and b.get('type') == 'tool_use' and b.get('name') == 'Bash']
+        for j, b in enumerate(blocks):
+            c = normalize((b.get('input') or {}).get('command', ''))
+            res = rm.get(b.get('id'))
+            cite = '%s:%d#%d' % (fname, lineno, j)
+            minted = {}
+            for rx, store in OPEN_RX:
+                for m in rx.finditer(c):
+                    # Every invocation is an action and its result says what happened to it.
+                    # A length filter here DROPPED a landed short item: it existed for parse
+                    # artifacts, which normalize() and the escape-aware pattern now remove.
+                    t, resolved = item_text(m.group('q'), m.group('t'))
+                    verb = OPEN_VERB[store]
+                    ids = minted.setdefault(verb, re.findall(ID_IN_RESULT[verb], res[0]) if res else [])
+                    oid = ids.pop(0) if ids else None
+                    oc, why = outcome(verb, oid, res) if oid else (
+                        ('not_completed', 'no tool_result recorded') if res is None else
+                        ('failed' if (res[1] or FAILED.search(res[0])) else 'no_effect',
+                         'the result minted no id for this open'))
+                    acts.append({'ts': ts, 'cite': cite, 'verb': verb, 'kind': 'open',
+                                 'store': store, 'id': oid, 'text': t,
+                                 'text_resolved': resolved,
+                                 'sha256': hashlib.sha256(t.encode()).hexdigest(),
+                                 'outcome': oc, 'why': why})
+            literal, unresolved = [], []
+            for m in CLOSE_RX.finditer(c):
+                verb, arg = (m.group(1) or m.group(2)), m.group(3)
+                aid = (arg or '').strip('"\'') or None
+                (unresolved if aid and UNRESOLVED.search(aid) else literal).append((verb, aid, arg))
+            for verb, aid, _ in literal:
+                oc, why = outcome(verb, aid, res)
+                src = 'command' if aid else None
+                if aid is None and oc == 'landed':
+                    # `queue clear` takes no id; the message it cleared into is in the result
+                    h = re.search(SUCCESS[verb], res[0])
+                    aid, src = (h.group(1), 'result') if h else (None, None)
+                acts.append({'ts': ts, 'cite': cite, 'verb': verb, 'kind': 'close',
+                             'id': aid, 'id_from': src, 'outcome': oc, 'why': why})
+            # An id the command never states as a literal (`while read d`, `$(cat f)`) is NOT
+            # unknown: the script printed which ids it closed. Read them from the result, once
+            # per verb per command, minus any the literal closes in this command already claim.
+            for verb in dict.fromkeys(v for v, _, _ in unresolved):
+                claimed = {a for v, a, _ in literal if v == verb}
+                rx = SUCCESS.get(verb)
+                hits = [h for h in dict.fromkeys(re.findall(rx, res[0]) if (rx and res) else [])
+                        if h not in claimed]
+                forms = sorted({a for v, _, a in unresolved if v == verb})
+                if hits:
+                    for h in hits:
+                        acts.append({'ts': ts, 'cite': cite, 'verb': verb, 'kind': 'close',
+                                     'id': h, 'id_from': 'result', 'outcome': 'landed',
+                                     'why': 'id %s read from the result; the command bound it '
+                                            'through %s' % (h, ', '.join(forms))})
+                else:
+                    oc, why = outcome(verb, None, res)
+                    acts.append({'ts': ts, 'cite': cite, 'verb': verb, 'kind': 'close',
+                                 'id': None, 'id_from': None, 'unresolved': forms,
+                                 'outcome': oc if oc != 'landed' else 'no_effect',
+                                 'why': 'id bound through %s and the result names no id it '
+                                        'closed -- %s' % (', '.join(forms), why)})
+            for m in re.finditer(MUT, c):
+                verb = m.group(1) or m.group(2)
+                if verb in ID_IN_RESULT or verb in ('queue clear', 'sent1', 'owe done', 'owe ungate',
+                                                     'resolved', 'closed', 'nudged', 'queue-clear',
+                                                     'owe-clear', 'owe-ungate'):
+                    continue          # handled above as an open or a close
+                ident = _arg(c, verb)
+                if ident and UNRESOLVED.search(ident):
+                    ident = None
+                oc, why = outcome(verb, None, res)
+                acts.append({'ts': ts, 'cite': cite, 'verb': verb, 'kind': 'mark',
+                             'id': ident, 'outcome': oc, 'why': why})
+    return acts
+
+
+def turn_starts(numbered):
+    """A turn opens at every user record with str content that is not a tool result: an owner
+    message, a peer message or a task notification delivered as a turn. Mid-turn attachments do
+    NOT open a turn. This is structure, not a guess about who was talking."""
+    return sorted(r.get('timestamp') or '' for _, r in numbered
+                  if r.get('type') == 'user' and not r.get('isMeta')
+                  and isinstance((r.get('message') or {}).get('content'), str))
+
+
+def same_turn(starts, t1, t2):
+    lo, hi = min(t1, t2), max(t1, t2)
+    return not any(lo < s <= hi for s in starts)
+
+
+def _spans(text, minlen=20):
+    """Verbatim spans of a text: the whole thing if short, else its sentences of minlen+.
+    Relays are verbatim BY RULE, so a relay is tested by a verbatim span, not by overlap."""
+    t = ' '.join(text.split())
+    if len(t) < minlen * 2:
+        return [t] if t else []
+    return [s.strip() for s in re.split(r'(?<=[.!?\n])\s+', t) if len(s.strip()) >= minlen] or [t[:minlen * 2]]
+
+
+def carries(message, text):
+    m = ' '.join(message.split())
+    return any(s in m for s in _spans(text))
+
+
+# ================================================================ decision chains, structural
+
+CHAIN_VERDICTS = ('complete', 'ask_did_not_land', 'never_put_to_owner', 'put_not_answered',
+                  'answered_not_forwarded', 'answered_not_closed', 'closed_without_answer',
+                  'close_had_no_effect', 'close_failed', 'orphan_close')
+
+
+def decision_chains(acts, owner, my_text, sends):
+    """Every decision's chain from the record's STRUCTURE, never from word overlap.
+
+        ASKED      an `owe add` whose result minted Dn
+        PUT        my own text to the owner naming Dn, after the ask
+        ANSWERED   his message naming Dn after the put; failing that, his NEXT message after
+                   the put -- the reply to the turn that put it to him, however terse
+        FORWARDED  a send to the target carrying a VERBATIM span of that answer
+        CLOSED     an `owe done`/`owe-clear` of Dn whose result says it took effect
+
+    Every verdict is a fact about the record. Word overlap is gone: it attributed one ruling to
+    two decisions and could not match "drop it" at all."""
+    asks = {a['id']: a for a in acts if a['kind'] == 'open' and a['store'] == 'owner_decisions'
+            and a['id']}
+    failed_asks = [a for a in acts if a['kind'] == 'open' and a['store'] == 'owner_decisions'
+                   and not a['id']]
+    closes = {}
+    for a in acts:
+        if a['kind'] == 'close' and a['verb'] in ('owe done', 'owe-clear') and a['id']:
+            closes.setdefault(a['id'], []).append(a)
+    ids_rx = [re.compile(r'\b%s\b' % re.escape(d)) for d in asks]
+    puts = [t for t in my_text if any(r.search(t['text']) for r in ids_rx)]
+    out = {}
+    for did, ask in sorted(asks.items(), key=lambda kv: kv[1]['ts']):
+        rx = re.compile(r'\b%s\b' % re.escape(did))
+        put = next((t for t in my_text if t['ts'] >= ask['ts'] and rx.search(t['text'])), None)
+        answer = None
+        if put:
+            answer = next((o for o in owner if o['ts'] > put['ts'] and rx.search(o['text'])), None)
+            if answer is None:
+                # His NEXT message is the reply to the turn that put it to him -- however terse
+                # -- UNLESS it names a decision id: then it has scoped itself to those, and this
+                # one is still unanswered. That is a fact about the reply, not a guess.
+                nxt = next((o for o in owner if o['ts'] > put['ts']), None)
+                # ...and only if no OTHER decision was put to him between this put and that
+                # reply: then the reply belongs to the later turn. Found by probe: an unanswered
+                # D3 took D4's terse answer as its own.
+                later = [t for t in puts if t['ts'] > put['ts'] and nxt is not None
+                         and t['ts'] < nxt['ts'] and not rx.search(t['text'])]
+                if nxt is not None and not later and not re.search(r'\bD\d+\b', nxt['text']):
+                    answer = nxt
+        fwd = next((s for s in sends if answer and s['ts'] > answer['ts']
+                    and carries(s['msg'], answer['text'])), None)
+        cl = closes.get(did, [])
+        landed = [c for c in cl if c['outcome'] == 'landed']
+        v = []
+        if not put:
+            v.append('never_put_to_owner')
+        elif not answer:
+            v.append('put_not_answered')
+        if answer and not fwd:
+            v.append('answered_not_forwarded')
+        if landed and (not answer or landed[0]['ts'] < answer['ts']):
+            v.append('closed_without_answer')
+        if cl and not landed:
+            v.append('close_failed' if any(c['outcome'] == 'failed' for c in cl)
+                     else 'close_had_no_effect')
+        if answer and not landed:
+            v.append('answered_not_closed')
+        out[did] = {'asked': ask['ts'], 'ask_cite': ask['cite'],
+                    'put': put['ts'] if put else None,
+                    'answered': answer['ts'] if answer else None,
+                    'answer_text': answer['text'][:300] if answer else None,
+                    'forwarded': fwd['ts'] if fwd else None,
+                    'closed': landed[0]['ts'] if landed else None,
+                    'close_attempts': [(c['ts'], c['outcome']) for c in cl],
+                    'verdicts': v or ['complete'], 'text': ask['text'][:160]}
+    for c in (x for xs in closes.values() for x in xs):
+        if c['id'] not in asks:
+            out.setdefault(c['id'], {'verdicts': ['orphan_close'], 'close_attempts': []})
+            out[c['id']]['close_attempts'].append((c['ts'], c['outcome']))
+    for a in failed_asks:
+        out['ASK@' + a['cite']] = {'asked': a['ts'], 'ask_cite': a['cite'],
+                                   'verdicts': ['ask_did_not_land'], 'text': a['text'][:160],
+                                   'why': a['why']}
+    return out
+
+
+
+# ================================================================ stage 3, determinate
+
+REPLAY_VERDICTS = ('ok', 'MISSTEER') + OUTCOMES[1:]      # ok, MISSTEER, failed, no_effect, not_completed
+
+
+def item_texts(state, acts):
+    """Qn -> every text the record or project state holds for it. Project state is one of the
+    owner's three admissible sources, and `owner_queue_sent` keeps the text of each sent item."""
+    out = collections.defaultdict(list)
+    for x in (state.get('owner_queue') or []) + (state.get('owner_queue_sent') or []):
+        if x.get('id') and x.get('text'):
+            out[x['id']].append(x['text'])
+    for a in acts:
+        if a['kind'] == 'open' and a.get('id') and a.get('text_resolved', True):
+            out[a['id']].append(a['text'])
+    return out
+
+
+def landed_replay(acts, starts, my_text, sends, peers, state):
+    """Did each action of mine ACTUALLY happen? Owner: "go back in the transcript and confirm
+    every action landed. Do it as a replay."
+
+    First the action's own outcome (its result). Then, for a verb that CLAIMS something happened
+    beyond the state file, the artifact that must exist in the same turn if it was honest:
+      sent1 Qn   a send carrying a verbatim span of Qn's text
+      nudged K   a send in the same turn
+      answered   a send in the same turn, before it
+      relayed    my own text to the owner in the same turn
+      resolved K a reply from the target after K was asked
+    Every verdict is a fact. There is no undecidable: a check the record cannot satisfy is a
+    MISSTEER with the reason, which is itself a finding."""
+    texts = item_texts(state, acts)
+    asked = {a['id']: a['ts'] for a in acts if a['kind'] == 'open' and a['verb'] == 'ask' and a['id']}
+    out = []
+    for a in acts:
+        v, why = a['outcome'], a['why']
+        if v != 'landed':
+            out.append(dict(a, verdict=v, why=why))
+            continue
+        verb, ident, ts = a['verb'], a.get('id'), a['ts']
+        v, why = 'ok', why
+        if verb == 'sent1':
+            cand = texts.get(ident) or []
+            if not cand:
+                v, why = 'MISSTEER', 'no text for %s survives in the record or project state' % ident
+            else:
+                hit = [s for s in sends if same_turn(starts, s['ts'], ts) and s['ts'] <= ts
+                       and any(carries(s['msg'], t) for t in cand)]
+                v, why = ('ok', 'a send in the same turn carries %s verbatim' % ident) if hit else \
+                         ('MISSTEER', '%s marked sent, but no send in that turn carries its text' % ident)
+        elif verb in ('nudged', 'answered'):
+            hit = [s for s in sends if same_turn(starts, s['ts'], ts) and s['ts'] <= ts]
+            v, why = ('ok', 'a send in the same turn precedes it') if hit else \
+                     ('MISSTEER', '`%s` recorded with no send in that turn' % verb)
+        elif verb == 'relayed':
+            hit = [t for t in my_text if same_turn(starts, t['ts'], ts)]
+            v, why = ('ok', 'text to the owner in the same turn') if hit else \
+                     ('MISSTEER', '`relayed` with nothing said to the owner in that turn')
+        elif verb == 'resolved':
+            since = asked.get(ident)
+            hit = [p for p in peers if (since is None or p['ts'] > since) and p['ts'] <= ts]
+            v, why = ('ok', 'the target replied before it was resolved') if hit else \
+                     ('MISSTEER', '%s resolved with no reply from the target after it was asked' % ident)
+        out.append(dict(a, verdict=v, why=why))
+    return out
+
+
+
+def artifacts(recs):
+    """My visible text to the owner and my sends to the target, in order."""
+    my_text, sends = [], []
+    for r in recs:
+        if r.get('type') != 'assistant':
+            continue
+        for b in ((r.get('message') or {}).get('content') or []):
+            if not isinstance(b, dict):
+                continue
+            if b.get('type') == 'text' and b.get('text'):
+                my_text.append({'ts': r.get('timestamp') or '', 'text': b['text']})
+            elif b.get('type') == 'tool_use' and 'send_message' in (b.get('name') or ''):
+                sends.append({'ts': r.get('timestamp') or '',
+                              'msg': (b.get('input') or {}).get('message') or ''})
+    return my_text, sends
+
+
+def transcript_for(prefix, proj=None):
+    root = proj or PROJ
+    hits = [f for f in sorted(os.listdir(root)) if f.startswith(prefix) and f.endswith('.jsonl')]
+    if not hits:
+        raise ValueError('no transcript for %s under %s' % (prefix, root))
+    return os.path.join(root, hits[0])
+
+
+# At the END of the module: selftest() uses OPEN_RX and friends, defined above. Mid-module
+# it ran before they existed and the direct entry point died with NameError.
+if __name__ == '__main__':
+    import sys as _s
+    _s.exit(selftest())
