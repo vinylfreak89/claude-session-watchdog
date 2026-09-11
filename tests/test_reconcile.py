@@ -961,11 +961,19 @@ def test_robustness():
         ck('a second reconcile aborts on a live lock', 'ABORTED' in out, True)
         ck('and changes nothing', open(os.path.join(st, 'reconcile.json')).read(), before)
 
-        # a STALE lock is reclaimed, but REPORTED
-        open(lock, 'w').write('999999')
+        # a read does NOT take the lock -- the minute nagger must never block the work
+        open(lock, 'w').write(str(os.getpid()))
         rc, out = run()
+        ck('a read-only status run ignores the lock', 'ABORTED' in out, False)
+        ck('and still reports', 'RECONCILE 2026-09-11' in out, True)
+        os.unlink(lock)
+
+        # a STALE lock is reclaimed by a WRITING run, but REPORTED
+        open(lock, 'w').write('999999')
+        rc, out = run('--restore', 'an item long enough to be treated as real words',
+                      '--evidence', 'fixture:1#0')
         ck('a stale lock is reclaimed', 'reclaiming a stale lock' in out, True)
-        ck('and the run proceeds', 'RECONCILE' in out, True)
+        ck('and the write proceeds', 'UNVALIDATED' in out, True)
         ck('the lock is released afterwards', os.path.exists(lock), False)
 
         # crash residue: a leftover .tmp must not be mistaken for the ledger

@@ -92,7 +92,11 @@ def timeline(mine, target):
             if nm and 'send_message' in nm:
                 sends.append({'ts': ts, 'msg': inp.get('message') or ''})
             if nm == 'Bash':
-                c = inp.get('command', '')
+                # normalize FIRST. Without it a test fixture's example text, a heredoc body or
+                # a commented example is replayed as a real action -- measured 2026-09-11 on
+                # the live record, it produced four false MISSTEERs dated to the hour the
+                # fixtures were written. Same bypass restore_payload had.
+                c = normalize(inp.get('command', ''))
                 for mm in re.finditer(MUT, c):
                     verb = mm.group(1) or mm.group(2)
                     actions.append({'ts': ts, 'verb': verb, 'hour': ts[:13],

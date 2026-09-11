@@ -232,19 +232,29 @@ def run_stage(n, L, S, a):
         # branch the other agent reads" -- so each claimed sha is checked for the object AND
         # for a ref.
         import subprocess as _sp
-        repo = a.proj or os.getcwd()
+        # A sha I quoted may belong to EITHER repo -- the watchdog's own, or the project it
+        # watches. Probing only one reported 291 of 354 claims as missteers, which was the
+        # instrument looking in the wrong place, not 291 false claims.
+        repos = [r for r in ([a.proj] if a.proj else []) +
+                 [os.path.dirname(os.path.abspath(__file__))] +
+                 [(L.get('repos') or [])] if isinstance(r, str)]
+        for extra in (L.get('repos') or []):
+            if extra not in repos:
+                repos.append(extra)
 
         def _probe(sha):
-            try:
-                ok = _sp.run(['git', 'cat-file', '-e', sha + '^{commit}'], cwd=repo,
-                             capture_output=True).returncode == 0
-                if not ok:
-                    return False, []
-                r = _sp.run(['git', 'branch', '-a', '--contains', sha], cwd=repo,
-                            capture_output=True, text=True)
-                return True, [x.strip('* ').strip() for x in r.stdout.splitlines() if x.strip()]
-            except Exception:
-                return False, []
+            for repo in repos:
+                try:
+                    if _sp.run(['git', 'cat-file', '-e', sha + '^{commit}'], cwd=repo,
+                               capture_output=True).returncode != 0:
+                        continue
+                    r = _sp.run(['git', 'branch', '-a', '--contains', sha], cwd=repo,
+                                capture_output=True, text=True)
+                    refs = [x.strip('* ').strip() for x in r.stdout.splitlines() if x.strip()]
+                    return True, ['%s:%s' % (os.path.basename(repo), x) for x in refs]
+                except Exception:
+                    continue
+            return False, []
 
         commits = RL.verify_commits(RL.claimed_commits(art['my_text']), _probe)
         ctally = _c.Counter(x['verdict'] for x in commits)
@@ -315,6 +325,8 @@ def main():
     ap.add_argument('--apply', action='store_true', help='stage 5 only: write the repair')
     ap.add_argument('--proj', help='transcript corpus (testing)')
     ap.add_argument('--self-prefix', default='80f99b89')
+    ap.add_argument('--repo', action='append', default=[],
+                    help='a repo whose commits my claims may refer to (repeatable)')
     ap.add_argument('--validate', type=int)
     ap.add_argument('--superseded', action='store_true')
     ap.add_argument('--evidence'); ap.add_argument('--complete', action='store_true')
@@ -333,6 +345,12 @@ def main():
     # read-modify-write and lose whichever finished first. The rival scan deliberately skips
     # reconcile processes (so it does not see itself), so exclusion between them is a lock.
     os.makedirs(S, exist_ok=True)
+    # Only a WRITING run takes the lock. The minute nagger calls this for status every 60 s;
+    # if a read took the lock it would abort the very stage runs it exists to nag about.
+    writes = bool(a.stage or a.hour or a.snapshot or a.thinned or a.action or a.restore
+                  or a.validate is not None or a.complete or a.init or a.repo)
+    if not writes:
+        return _main(a, S)
     lock = os.path.join(S, 'reconcile.lock')
     try:
         fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -371,6 +389,12 @@ def main():
 
 
 def _main(a, S):
+    if a.repo:
+        L0 = load(S)
+        if L0 is not None:
+            L0['repos'] = sorted(set((L0.get('repos') or []) + a.repo))
+            save(S, L0)
+            print('repos for commit verification: %s' % ', '.join(L0['repos']))
     if a.init:
         if len(a.dates) != 2:
             raise SystemExit('--init needs exactly two dates: reconcile <start> <end> --init')
