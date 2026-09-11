@@ -90,9 +90,37 @@ def main():
     if ok:
         fails.append("credited another session's message as mine")
 
+    # 8. A MID-TURN delivery is evidence too. It does not land as a `user` record: it is absorbed
+    #    into the target's context as an `attachment` whose `rendered` block is the system-reminder.
+    #    Reading `user` only, the gate refused a send that had demonstrably arrived -- measured on
+    #    the live transcript at 2026-09-11T05:58:30Z -- and would have nagged forever on an answered
+    #    turn. The body must be EXTRACTED from `rendered`, never `json.dumps`ed, or the inner quotes
+    #    are re-escaped and the marker cannot match.
+    p = os.path.join(tmp, 'midturn.jsonl')
+    open(p, 'w').write(json.dumps({
+        "type": "attachment", "timestamp": "2026-09-11T04:00:00.000Z",
+        "rendered": [{"content": '<system-reminder>\nAnother Claude session sent a message while '
+                                 'you were working:\n<cross-session-message from="%s">hello'
+                                 '</cross-session-message>\n</system-reminder>' % SELF}]}) + "\n")
+    ok, why = C.answered_allowed(p, SELF, {}, None)
+    if not ok:
+        fails.append('refused a mid-turn delivery absorbed as an attachment: %s' % why)
+
+    # 9. QUEUING IS NOT DELIVERY. `queue-operation/enqueue` proves the message was queued, never
+    #    that it arrived, so crediting it would be exactly the false positive this gate exists to
+    #    prevent. It must NOT count on its own.
+    p = os.path.join(tmp, 'queued.jsonl')
+    open(p, 'w').write(json.dumps({
+        "type": "queue-operation", "operation": "enqueue",
+        "timestamp": "2026-09-11T04:30:00.000Z",
+        "content": '<cross-session-message from="%s">queued only</cross-session-message>' % SELF}) + "\n")
+    ok, why = C.answered_allowed(p, SELF, {}, None)
+    if ok:
+        fails.append('credited a QUEUED message as delivered -- queuing is not arrival')
+
     for f in fails:
         print('FAIL:', f)
-    print('SELFTEST', 'FAILED' if fails else 'PASS', '(7 controls)')
+    print('SELFTEST', 'FAILED' if fails else 'PASS', '(9 controls)')
     return 1 if fails else 0
 
 if __name__ == '__main__':

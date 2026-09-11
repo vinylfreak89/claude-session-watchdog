@@ -161,10 +161,22 @@ def answered_allowed(tx_path, self_sel, state, owner_ack):
     carried claims that then went unchecked while the alarm recorded them handled, and one reached
     the owner before it was withdrawn. A sixth credited one send to two turns.
 
-    The evidence is the TARGET's own transcript: a delivered message appears there as a user record
-    carrying `<cross-session-message from="<self>"`. Each send is credited once, so a single reply
+    The evidence is the TARGET's own transcript: a delivered message appears there carrying
+    `<cross-session-message from="<self>"`. Each send is credited once, so a single reply
     cannot discharge two turns. The owner's route is explicit and requires his words -- an empty
     string must not launder a bypass. Control: tests/test_answered_needs_evidence.py.
+
+    TWO RECORD TYPES CARRY A DELIVERY, and reading only one refused real sends. A message that
+    arrives while the target is IDLE lands as a `user` record. One that arrives MID-TURN is absorbed
+    into its context and lands as an `attachment` whose `rendered` block is the system-reminder
+    "Another Claude session sent a message while you were working" -- with a
+    `queue-operation/enqueue` before it and a `queue-operation/remove` reason `absorbed_mid_turn`
+    after. Scanning `user` only, the gate refused a send that had demonstrably reached the target,
+    and would have nagged forever on a turn that WAS answered.
+
+    `queue-operation` is deliberately NOT evidence: `enqueue` proves the message was queued, never
+    that it arrived, and crediting it would be the false-positive this gate exists to prevent. The
+    `attachment` is the record that proves the text entered the target's context.
     """
     if owner_ack is not None:
         if not str(owner_ack).strip():
@@ -184,10 +196,26 @@ def answered_allowed(tx_path, self_sel, state, owner_ack):
                     continue
                 try: d = json.loads(line)
                 except Exception: continue
-                if d.get('type') != 'user':
-                    continue
-                c = d.get('message', {}).get('content')
-                body = c if isinstance(c, str) else json.dumps(c)
+                t = d.get('type')
+                if t == 'user':
+                    c = d.get('message', {}).get('content')
+                    body = c if isinstance(c, str) else json.dumps(c)
+                elif t == 'attachment':
+                    # Mid-turn absorption. The body lives in `rendered`, not `message.content` --
+                    # and it must be EXTRACTED, not `json.dumps`ed: dumping re-escapes the inner
+                    # quotes so `from="id"` becomes `from=\\"id\\"` and the marker never matches.
+                    # That is the same escaping trap the prefilter comment above records, one
+                    # record type over.
+                    r = d.get('rendered')
+                    if isinstance(r, str):
+                        body = r
+                    elif isinstance(r, list):
+                        body = ' '.join(b.get('content', '') for b in r
+                                        if isinstance(b, dict) and isinstance(b.get('content'), str))
+                    else:
+                        continue
+                else:
+                    continue                      # queue-operation is queuing, not delivery
                 if marker not in body:
                     continue
                 ts = d.get('timestamp') or ''
