@@ -946,7 +946,7 @@ def carries(message, text):
 
 CHAIN_VERDICTS = ('complete', 'ask_did_not_land', 'never_named_to_owner', 'never_put_to_owner',
                   'put_not_answered', 'answered_not_forwarded', 'answered_not_closed',
-                  'closed_without_answer', 'closed_before_any_reply', 'close_had_no_effect',
+                  'closed_without_answer', 'close_had_no_effect',
                   'close_failed', 'orphan_close')
 
 def decision_chains(acts, owner, my_text, sends, target, adjudications=None):
@@ -965,10 +965,13 @@ def decision_chains(acts, owner, my_text, sends, target, adjudications=None):
     naming an id were answers, a challenge ("I answered D13 when?"), a refusal ("I will not answer
     D14 or D15 until the record is properly corrected"), a deferral ("I'll handle D16 and D17
     next") and a request to rephrase. Which is which is READING HIS WORDS: answerable from the
-    transcript, by the reconciler, recorded as an ADJUDICATION that cites the message. An
-    adjudication may only cite a candidate the record contains; one that cites anything else is
-    refused. Until a chain is adjudicated, its put/answer verdicts are OUTSTANDING, never guessed.
-    Verdicts that need no reading are given regardless.
+    transcript, by the reconciler, recorded as an ADJUDICATION that cites the messages. The
+    candidates are a READING AID, never a whitelist: they come from id matching, and a decision
+    put in other words has none -- so an adjudication may cite any text of mine in the chain's
+    window as the put, and any message of his in the window after it as the answer; one citing a
+    message the record does not hold there is refused. EVERY chain owes a reading until
+    adjudicated, never-named ones included. Without one, only what needs no reading is given:
+    never named by id, close outcomes, orphan closes, asks that did not land.
 
     AN ID CAN BE MINTED MORE THAN ONCE (the counter restarted). Each minting is its own chain --
     keyed Dn#1, Dn#2 -- and every fact naming Dn belongs to the most recent minting at or before it.
@@ -1021,19 +1024,24 @@ def decision_chains(acts, owner, my_text, sends, target, adjudications=None):
             adj = adjudications.get(key)
             put = answer = fwd = None
             if adj is not None:
-                named_ts = {t['ts'] for t in named}
+                mine_ts = {t['ts'] for t in my_text if inside(t['ts'])}
+                his = {o['ts']: o for o in owner if inside(o['ts'])}
                 bad = []
-                if adj.get('put') not in (None, 'none') and adj['put'] not in named_ts:
-                    bad.append('put %s is not a text of mine naming %s' % (adj['put'], did))
-                if adj.get('answer') not in (None, 'none') and adj['answer'] not in cands:
-                    bad.append('answer %s is not a candidate message of his' % adj['answer'])
+                p_ts, a_ts = adj.get('put'), adj.get('answer')
+                if p_ts not in (None, 'none') and p_ts not in mine_ts:
+                    bad.append('put %s is not a text of mine in the window of %s' % (p_ts, key))
+                if a_ts not in (None, 'none'):
+                    if a_ts not in his:
+                        bad.append('answer %s is not a message of his in the window of %s' % (a_ts, key))
+                    elif p_ts in (None, 'none') or a_ts <= p_ts:
+                        bad.append('answer %s does not follow a put' % a_ts)
                 if bad:
                     owed.append('adjudication REFUSED: ' + '; '.join(bad))
                     adj = None
             if adj is not None:
                 put = None if adj.get('put') in (None, 'none') else adj['put']
-                answer = None if adj.get('answer') in (None, 'none') else cands[adj['answer']]
-                if named and put is None:
+                answer = None if adj.get('answer') in (None, 'none') else his[adj['answer']]
+                if put is None:
                     v.append('never_put_to_owner')
                 elif put is not None and answer is None:
                     v.append('put_not_answered')
@@ -1046,14 +1054,11 @@ def decision_chains(acts, owner, my_text, sends, target, adjudications=None):
                         v.append('answered_not_closed')
                 if landed and (answer is None or landed[0]['ts'] < answer['ts']):
                     v.append('closed_without_answer')
-            elif not named and landed:
-                # never named to him, so he cannot have answered it: closing it is a fact
-                v.append('closed_without_answer')
-            elif named:
-                owed.append('adjudicate %s: was it put to him, and which message (if any) '
-                            'answered it -- %d candidate(s)' % (key, len(cands)))
-                if landed and not any(t < landed[0]['ts'] for t in cands):
-                    v.append('closed_before_any_reply')
+            else:
+                owed.append(('adjudicate %s: was it put to him, and which message (if any) '
+                             'answered it -- %d candidate(s)' % (key, len(cands))) if named else
+                            ('adjudicate %s: never named by id -- was it put to him in other words, '
+                             'and answered?' % key))
             out[key] = {'asked': ask['ts'], 'ask_cite': ask['cite'], 'text': ask['text'][:160],
                         'named': [t['ts'] for t in named],
                         'mentions': [{'ts': o['ts'], 'text': o['text'][:300]} for o in mentions],

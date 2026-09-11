@@ -1302,8 +1302,8 @@ def test_decision_chains():
         bare = R.decision_chains(acts, owner, my_text, sends, 'local_target')
         ck('without adjudication every named chain is outstanding',
            all(any('adjudicate' in o for o in bare[k]['outstanding']) for k in CHAIN_TRUTH), True)
-        ck('D3 was closed before he said anything to it -- a fact, no reading needed',
-           'closed_before_any_reply' in bare['D3']['verdicts'], True)
+        ck('without a reading, no close is judged against his words',
+           any('closed_without_answer' in bare[k]['verdicts'] for k in CHAIN_TRUTH), False)
         ch = R.decision_chains(acts, owner, my_text, sends, 'local_target', CHAIN_ADJ)
         for did, want in CHAIN_TRUTH.items():
             ck('adjudicated %s -> %s' % (did, '+'.join(want)), sorted(ch[did]['verdicts']), sorted(want))
@@ -1375,11 +1375,23 @@ def test_chain_edges():
 
     # --- an adjudication may only cite what the record contains --------------------------
     ch = dc([ask('D1', T(1))], his, mine, [], {'D1': {'put': T(1, 5), 'answer': T(9)}})
-    ck('an adjudicated answer that is not a candidate is REFUSED',
+    ck('an adjudicated answer that is no message of his in the window is REFUSED',
        any('REFUSED' in o for o in ch['D1']['outstanding']), True)
     ch = dc([ask('D1', T(1))], his, mine, [], {'D1': {'put': T(9), 'answer': 'none'}})
-    ck('an adjudicated put must be a text of mine naming it',
+    ck('an adjudicated put must be a text of mine in the window',
        any('REFUSED' in o for o in ch['D1']['outstanding']), True)
+
+    # --- a put in OTHER WORDS: no id, so no candidates -- the reading still stands ---------
+    ch = dc([ask('D1', T(1))], [say(T(2), 'keep it, obviously')],
+            [say(T(1, 5), 'the fitted tolerance -- keep it or drop it?')], [],
+            {'D1': {'put': T(1, 5), 'answer': T(2)}})
+    ck('a put made without the id can be cited, and its answer read',
+       (any('REFUSED' in o for o in ch['D1']['outstanding']), ch['D1']['answered']), (False, T(2)))
+    ck('and its verdicts follow the reading, never-named kept as a fact',
+       sorted(ch['D1']['verdicts']), ['answered_not_closed', 'answered_not_forwarded', 'never_named_to_owner'])
+    ch = dc([ask('D1', T(1))], [say(T(1, 2), 'too early to be an answer'), say(T(2), 'keep it')],
+            [say(T(1, 5), 'D1 for you')], [], {'D1': {'put': T(1, 5), 'answer': T(1, 2)}})
+    ck('an answer BEFORE the put is REFUSED', any('REFUSED' in o for o in ch['D1']['outstanding']), True)
 
     # --- his refusal, read by the reconciler as NOT an answer ----------------------------
     ch = dc([ask('D14', T(1))], [say(T(2), 'I will not answer D14 or D15 until the record is properly corrected')],
@@ -1409,13 +1421,14 @@ def test_chain_edges():
 
     # --- facts that need no reading ------------------------------------------------------
     ch = dc([ask('D1', T(1)), close('D1', T(1, 30))], base_his, base_mine, [])
-    ck('closed before he said anything to it -> closed_before_any_reply',
-       'closed_before_any_reply' in ch['D1']['verdicts'], True)
+    ck('without a reading, a close is not judged against his words',
+       'closed_without_answer' in ch['D1']['verdicts'], False)
     ch = dc([ask('D1', T(2))], [], [say(T(1), 'D1 from last week is closed')], [])
     ck('text before the ask is not naming it', ch['D1']['verdicts'], ['never_named_to_owner'])
     ch = dc([ask('D1', T(1)), close('D1', T(2))], [], [], [])
-    ck('never named but closed -> closed_without_answer + never_named_to_owner',
-       sorted(ch['D1']['verdicts']), ['closed_without_answer', 'never_named_to_owner'])
+    ck('never named but closed: the fact, and a reading owed',
+       (ch['D1']['verdicts'], any('never named by id' in o for o in ch['D1']['outstanding'])),
+       (['never_named_to_owner'], True))
 
     # --- decision ids are UPPERCASE: lowercase d1/d2 are this project's field offsets ----
     ch = dc([ask('D1', T(1)), ask('D2', T(1, 1))], [],
@@ -1629,8 +1642,8 @@ def test_actions_and_chains_real_shapes():
         # PUT and ANSWERED are read from his words by the reconciler and recorded as
         # adjudications; without one a chain is OUTSTANDING, never guessed
         bare = R.decision_chains(acts, owner, my_text, sends, 'local_target')
-        ck('unadjudicated named chains carry an adjudication as outstanding work',
-           all(any('adjudicate' in o for o in bare[k]['outstanding']) for k in ('D1', 'D2', 'D4', 'D5')), True)
+        ck('EVERY unadjudicated chain owes a reading, never-named ones included',
+           all(any('adjudicate' in o for o in bare[k]['outstanding']) for k in ('D1', 'D2', 'D3', 'D4', 'D5')), True)
         ck('and no put/answer verdict is guessed for them',
            any(v in ('complete', 'put_not_answered', 'answered_not_forwarded', 'answered_not_closed')
                for k in ('D1', 'D2', 'D4', 'D5') for v in bare[k]['verdicts']), False)
@@ -1640,15 +1653,16 @@ def test_actions_and_chains_real_shapes():
            [r['ts'] for r in bare['D4']['mentions']], [T(4, 10)])
         ck("a sibling's reply is only a candidate for D5, never auto-attributed",
            (T(4, 10) in bare['D5']['candidates'], bare['D5']['answered']), (True, None))
-        ck('a decision never named to him, then closed, is two facts',
-           sorted(bare['D3']['verdicts']), ['closed_without_answer', 'never_named_to_owner'])
+        ck('never named by id is a fact; whether its close was without an answer is READ',
+           bare['D3']['verdicts'], ['never_named_to_owner'])
         adj = {'D1': {'put': T(1, 5), 'answer': T(1, 10)}, 'D2': {'put': T(2, 5), 'answer': T(2, 10)},
+               'D3': {'put': 'none', 'answer': 'none'},
                'D4': {'put': T(4, 5), 'answer': T(4, 10)}, 'D5': {'put': T(4, 5), 'answer': 'none'}}
         ch = R.decision_chains(acts, owner, my_text, sends, 'local_target', adj)
         want = {
             'D1': ['complete'],
             'D2': ['answered_not_forwarded'],
-            'D3': ['closed_without_answer', 'never_named_to_owner'],
+            'D3': ['closed_without_answer', 'never_named_to_owner', 'never_put_to_owner'],
             'D4': ['answered_not_closed', 'close_had_no_effect'],
             'D5': ['put_not_answered'],
             'D99': ['orphan_close'],
