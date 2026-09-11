@@ -200,6 +200,28 @@ def answered_allowed(tx_path, self_sel, state, owner_ack):
     return True, 'delivered message at %s' % newest
 
 
+def close_turn(state, ts, reason):
+    """Record the owner's D15 exception for ONE turn: an honest reply of a line or less.
+
+    His ruling makes a reply the default and this the narrow exception, explicitly on probation:
+    "if you two get into loops of just writing ACK at each other to bypass doing work, I'm going to
+    ban you again". So a closure must SAY why the turn needed nothing, and it closes exactly the turn
+    named -- never a range, never a default. `answered` keeps demanding evidence of a send; this is a
+    different disposition, not a loosening of that one.
+    Control: tests/test_closed_turn.py, whose second case requires an ordinary turn to stay owed.
+    """
+    reason = (reason or '').strip()
+    if not reason:
+        return False, ('a closure must say why the turn needed no reply -- "closed" with nothing '
+                       'said IS the acknowledgement loop the exception exists to prevent')
+    state.setdefault('closed_turns', {})[ts] = dict(reason=reason, at=W.now_iso())
+    return True, reason
+
+
+def turn_is_closed(state, ts):
+    return ts in (state.get('closed_turns') or {})
+
+
 def owed(sess, state):
     """What the watchdog still owes on each completed target turn.
 
@@ -234,7 +256,8 @@ def owed(sess, state):
     for t in done:
         why = []
         if not (relayed and t.end_ts <= relayed): why.append('not relayed')
-        if not ((sent and t.end_ts <= sent) or t.end_ts in held or target_busy):
+        if not ((sent and t.end_ts <= sent) or t.end_ts in held or target_busy
+                or turn_is_closed(state, t.end_ts)):
             why.append('not answered or held')
         if not why: continue
         text = ' '.join(x for _, x in t.assistant_texts)
@@ -326,7 +349,7 @@ def main():
     ap.add_argument('--target', required=True); ap.add_argument('--self', dest='self_sel'); ap.add_argument('--repo'); ap.add_argument('--ledger')
     ap.add_argument('--state-dir', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'state')); ap.add_argument('--quiet-min', type=float, default=10.0)
     ap.add_argument('--row-pattern', default=W.DEFAULT_ROW_PATTERN)
-    ap.add_argument('mode', choices=['check', 'finding', 'owed', 'relayed', 'hold', 'answered', 'ask', 'resolved', 'open', 'next', 'sent1', 'nudged', 'conditional', 'fired']); ap.add_argument('rest', nargs=argparse.REMAINDER)
+    ap.add_argument('mode', choices=['check', 'finding', 'owed', 'relayed', 'hold', 'answered', 'ask', 'resolved', 'open', 'next', 'sent1', 'nudged', 'conditional', 'fired', 'closed']); ap.add_argument('rest', nargs=argparse.REMAINDER)
     a = ap.parse_args(); W.set_row_pattern(a.row_pattern)
     sess = W.find_session(a.target); state = WK.load_state(a.state_dir)
     if a.mode == 'answered':
@@ -396,6 +419,14 @@ def main():
         q['last_send'] = W.now_iso(); q['asked_ct'] = str(st.get('ct'))
         WK.save_state(a.state_dir, state)
         print('nudged %s (%d resend(s)); due again at the next gate crossing' % (key, q['resends'])); return 0
+    if a.mode == 'closed':
+        ts = a.rest[0] if a.rest else ''
+        if not ts: ap.error('closed <turn end_ts> "why it needed no reply"')
+        ok, why = close_turn(state, ts, ' '.join(a.rest[1:]))
+        if not ok:
+            print('REFUSED: %s' % why); return 1
+        WK.save_state(a.state_dir, state)
+        print('closed %s under the one-line exception: %s' % (ts, why)); return 0
     if a.mode in ('conditional', 'fired'):
         key = a.rest[0] if a.rest else ''
         if not key: ap.error('%s <key> [condition]' % a.mode)

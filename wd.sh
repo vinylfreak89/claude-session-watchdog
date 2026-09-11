@@ -64,6 +64,7 @@ case "$cmd" in
   nudged) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" nudged "$@" ;;
   conditional) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" conditional "$@" ;;
   fired)  exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" fired "$@" ;;
+  closed) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" closed "$@" ;;
   hold)   exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" hold "$@" ;;
   check)  exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" check "$@" ;;
   finding) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" finding "$@" ;;
