@@ -209,41 +209,9 @@ def live_stores(state_dir):
 
 # ---------------------------------------------------------------- stage 3
 
-SHA = re.compile(r'\b([0-9a-f]{7,40})\b')
 
 
-def claimed_commits(my_text):
-    """Every sha I asserted in my own words to the owner, with where I said it."""
-    seen = []
-    for t in my_text:
-        for m in SHA.finditer(t['text']):
-            s = m.group(1)
-            if re.fullmatch(r'\d+', s):
-                continue
-            seen.append({'ts': t['ts'], 'sha': s})
-    return seen
 
-
-def verify_commits(claims, git_probe):
-    """A commit claim is landed only if the object exists AND sits on a ref that matters.
-    'It is in my working tree' and 'it is on the branch the other agent reads' are different
-    claims, and the second is the one that counts."""
-    out = []
-    for c in claims:
-        exists, refs = git_probe(c['sha'])
-        out.append(dict(c, exists=exists, refs=refs,
-                        # three FACTS: on a ref; exists but reachable from no ref (rewritten
-                        # away or dangling); does not exist. None of them is unknown.
-                        verdict='ok' if exists and refs else
-                                'MISSTEER' if not exists else 'on_no_ref'))
-    return out
-
-
-# ---------------------------------------------------------------- stage 4
-
-SUPERSEDE_HINT = re.compile(
-    r'\b(supersede[sd]?|withdraw[ns]?|withdrawn|retract(?:ed|ion)?|reversed?|'
-    r'no longer|instead of|replaced? by|answered|closed|resolved|overrul)\w*', re.I)
 
 
 def stage4_evidence(candidate, records, key_terms=None):
@@ -312,7 +280,7 @@ def stage2_snapshots(tm_run, diskutil_run):
                              'anything' % (len(listed), count)) if truncated else ''}
 
 
-def stage2_series(snapshots, read_state, at_of=None):
+def stage2_series(snapshots, read_state, at_of=None, read_files=None):
     """The state dir as it stood at EVERY snapshot. Owner: "reading that state directory since
     it has existed. Do not binary search it. Do not sample it. Everything."
 
@@ -327,6 +295,7 @@ def stage2_series(snapshots, read_state, at_of=None):
             series.append({'snapshot': s, 'readable': False, 'at': at})
             continue
         series.append({'snapshot': s, 'readable': True, 'at': at, 'state': d,
+                       'files': read_files(s) if read_files else None,
                        'owner_queue': [x.get('id') for x in (d.get('owner_queue') or [])],
                        'owner_decisions': sorted((d.get('owner_decisions') or {}).keys()),
                        'open_questions': sorted((d.get('open_questions') or {}).keys()),
@@ -947,7 +916,7 @@ def carries(message, text):
 
 CHAIN_VERDICTS = ('complete', 'ask_did_not_land', 'never_named_to_owner', 'never_put_to_owner',
                   'put_not_answered', 'answered_not_forwarded', 'answered_not_closed',
-                  'closed_without_answer', 'close_had_no_effect',
+                  'closed_without_answer', 'close_had_no_effect', 'forward_not_delivered',
                   'close_failed', 'orphan_close')
 
 def decision_chains(acts, owner, my_text, sends, target, adjudications=None):
@@ -1047,10 +1016,18 @@ def decision_chains(acts, owner, my_text, sends, target, adjudications=None):
                 elif put is not None and answer is None:
                     v.append('put_not_answered')
                 if answer is not None:
-                    fwd = next((s for s in sends if s.get('to') == target and s['ts'] > answer['ts']
-                                and carries(s['msg'], answer['text'])), None)
+                    # a forward is a send the TARGET RECEIVED, read from its transcript
+                    fwds = [s for s in sends if s.get('to') == target and s['ts'] > answer['ts']
+                            and carries(s['msg'], answer['text'])]
+                    fwd = next((s for s in fwds if s.get('delivered')), None)
                     if fwd is None:
-                        v.append('answered_not_forwarded')
+                        if any(not s.get('delivery_checked') for s in fwds):
+                            owed.append('a forward of the answer to %s was never checked against '
+                                        'the target transcript' % key)
+                        elif fwds:
+                            v.append('forward_not_delivered')
+                        else:
+                            v.append('answered_not_forwarded')
                     if not landed and not pend:
                         v.append('answered_not_closed')
                 if landed and (answer is None or landed[0]['ts'] < answer['ts']):
@@ -1105,75 +1082,204 @@ def item_texts(state, acts):
     return out
 
 
-def landed_replay(acts, starts, my_text, sends, peers, state, target):
-    """Did each action of mine ACTUALLY happen? Owner: "go back in the transcript and confirm
-    every action landed. Do it as a replay."
+# what the replay itself writes into an action's `needs`; a later replay re-decides these
+REPLAY_NEEDS = ('a reading', "the target's words", 'a send in', 'the reply', 'its send')
 
-    First the action's own outcome (its result). Then, for a verb that CLAIMS something happened
-    beyond the state file, the artifact that must exist in the same turn if it was honest:
-      sent1 Qn   a send carrying a verbatim span of Qn's text
-      nudged K   a send in the same turn
-      answered   a send in the same turn, before it
-      relayed    my own text to the owner in the same turn
-      resolved K a reply from the target after K was asked
-    Every verdict is a fact. There is no undecidable: a check the record cannot satisfy is a
-    MISSTEER with the reason, which is itself a finding."""
+
+def action_key(a):
+    """The name a reading of one action is recorded under: its record, verb and id. One command
+    can carry several actions (`nudged K1 && nudged K2`), so the record alone is not a name."""
+    return '%s/%s/%s' % (a.get('cite'), a.get('verb'), a.get('id') or '-')
+
+
+def landed_replay(acts, starts, my_text, sends, peers, state, target, ttexts=None, owner=None,
+                  readings=None):
+    """Did each action of mine ACTUALLY happen? Owner: "go back in the transcript and confirm
+    every action landed. Do it as a replay." And (2026-09-11): check its effects in the TARGET's
+    transcript as well.
+
+    First the action's own outcome. Then, for a verb that CLAIMS something happened beyond the
+    state file, the artifact that must exist if it was honest:
+      sent1 Qn   a send the TARGET'S TRANSCRIPT RECEIVED, after Qn was queued and at or before the
+                 mark, that carried Qn. Not "in the same turn": found by probe, an item sent one
+                 turn and marked the next DID reach him.
+      nudged K   a received send, after the previous nudge of K (or its ask) and at or before this
+                 one, that carried K's question. Found by probe: an unrelated send satisfied it,
+                 and one old send would satisfy every later nudge.
+      answered   a received send to the target since the previous `answered`, at or before it
+      relayed    my own text to the owner in the same turn, after the target's turn it names --
+                 and whether that text relayed it is read
+      resolved K something after K was asked and at or before the close that answered it: a reply
+                 the target's transcript shows IT sending (from a session K was sent to), the
+                 target's own words, or his.
+    WHAT IS A FACT AND WHAT IS READ. That a send reached the target, that a reply is one the
+    target sent, that nothing at all happened in a window: facts, from the transcripts. Whether a
+    send CARRIED an item or a question, and whether anything ANSWERED one: meaning. A verbatim
+    copy is a fact and settles "carried"; its absence settles nothing -- measured on the real
+    record, 50 nudges carried their question in other words and a verbatim test called every one
+    a MISSTEER. So where the facts leave it open the action gets `needs` naming the reading owed
+    (`readings[action_key(a)]` = {'as': 'yes'|'no', 'evidence'}), never a verdict. Facts beat
+    readings: a reading cannot make a send arrive. Evidence never checked in the target's
+    transcript is OUTSTANDING, never ok."""
     if not target:
         # sent1, nudged and answered claim a send TO THE TARGET. Measured on the real record:
         # of 393 sends, 4 went to another session, and any of them satisfied these checks.
         raise ValueError('landed_replay needs the target session id: sent1, nudged and answered '
                          'claim a send TO THE TARGET, and a send elsewhere must not satisfy them')
+    readings = readings or {}
     tsends = [s for s in sends if s.get('to') == target]
     texts = item_texts(state, acts)
-    asked = {a['id']: a['ts'] for a in acts if a['kind'] == 'open' and a['verb'] == 'ask' and a['id']}
+    qtexts = collections.defaultdict(list)
+    for a in acts:
+        if (a['kind'] == 'open' and a['verb'] == 'ask' and a.get('id') and a.get('text')
+                and a.get('text_resolved', True)):
+            qtexts[a['id']].append(a['text'])
+    for k, q in list((state.get('open_questions') or {}).items()) + \
+            list((state.get('resolved_questions') or {}).items()):
+        if isinstance(q, dict) and q.get('text'):
+            qtexts[k].append(q['text'])
+    # an id can be opened again (a question re-asked, an item re-minted): each action is judged
+    # against the LATEST open at or before it. Measured on the real record: a question re-asked at
+    # 00:17 made its nudges and its close at 23:39-00:04 read as sendless and unanswered, because
+    # the later ask opened their window; and the FIRST open let a send made before a re-mint
+    # satisfy the later item.
+    opened, asked = collections.defaultdict(list), collections.defaultdict(list)
+    for a in acts:
+        if a['kind'] == 'open' and a.get('id'):
+            opened[a['id']].append(a['ts'])
+            if a['verb'] == 'ask':
+                asked[a['id']].append(a['ts'])
+
+    def last_before(times, ts):
+        earlier = [t for t in times if t <= ts]
+        return max(earlier) if earlier else None
+
+    def by_reading(rd, unchecked):
+        # a reading decides only what the facts left open, and "no" cannot close over a send
+        # that was never checked
+        if rd and rd.get('as') in ('yes', 'no') and (rd['as'] == 'yes' or not unchecked):
+            return ('ok' if rd['as'] == 'yes' else 'MISSTEER'), 'read: %s' % rd.get('evidence')
+        return None
+
     out = []
     for a in acts:
         # a PENDING action (no evidence yet) is outstanding work, never a verdict; a scratch-state
         # action did not touch the state under reconciliation
         if a['outcome'] is None or a.get('state', 'live') != 'live':
             continue
+        if (a.get('needs') or '').startswith(REPLAY_NEEDS):
+            del a['needs']     # a note left by an earlier replay of this action, now re-decided
         v, why = a['outcome'], a['why']
         if v != 'landed':
             out.append(dict(a, verdict=v, why=why))
             continue
         verb, ident, ts = a['verb'], a.get('id'), a['ts']
-        v, why = 'ok', why
-        if verb == 'sent1':
-            cand = texts.get(ident) or []
-            if not cand:
-                v, why = 'MISSTEER', 'no text for %s survives in the record or project state' % ident
+        key, rd = action_key(a), readings.get(action_key(a))
+        v, needs = 'ok', None
+        if verb in ('sent1', 'nudged'):
+            cands = (texts if verb == 'sent1' else qtexts).get(ident) or []
+            if verb == 'sent1':
+                lo, what = last_before(opened.get(ident, []), ts), ident
             else:
-                hit = [s for s in tsends if same_turn(starts, s['ts'], ts) and s['ts'] <= ts
-                       and any(carries(s['msg'], t) for t in cand)]
-                elsewhere = sorted({s.get('to') or '(no destination recorded)' for s in sends
-                                    if s.get('to') != target and same_turn(starts, s['ts'], ts)
-                                    and s['ts'] <= ts and any(carries(s['msg'], t) for t in cand)})
-                v, why = (('ok', 'a send to the target in the same turn carries %s verbatim' % ident)
-                          if hit else
-                          ('MISSTEER', '%s marked sent, but its text went to %s, not the target'
-                           % (ident, ', '.join(elsewhere))) if elsewhere else
-                          ('MISSTEER', '%s marked sent, but no send in that turn carries its text' % ident))
-        elif verb in ('nudged', 'answered'):
-            hit = [s for s in tsends if same_turn(starts, s['ts'], ts) and s['ts'] <= ts]
-            v, why = ('ok', 'a send to the target in the same turn precedes it') if hit else \
-                     ('MISSTEER', '`%s` recorded with no send to the target in that turn' % verb)
+                prior = [b['ts'] for b in acts if b['verb'] == 'nudged' and b.get('id') == ident
+                         and b['ts'] < ts] + [t for t in [last_before(asked.get(ident, []), ts)] if t]
+                lo, what = (max(prior) if prior else None), "%s's question" % ident
+            win = [s for s in tsends if (lo is None or s['ts'] > lo) and s['ts'] <= ts]
+            recv = [s for s in win if s.get('delivered')]
+            unchecked = [s for s in win if not s.get('delivery_checked')]
+            verbatim = [s for s in recv if any(carries(s['msg'], t) for t in cands)]
+            elsewhere = sorted({s.get('to') or '(no destination recorded)' for s in sends
+                                if s.get('to') != target and (lo is None or s['ts'] > lo)
+                                and s['ts'] <= ts and any(carries(s['msg'], t) for t in cands)})
+            decided = by_reading(rd, unchecked) if recv else None
+            if verbatim:
+                why = 'the target received a send carrying %s verbatim at %s' % (what, verbatim[0]['delivered'])
+            elif decided:
+                v, why = decided
+            elif recv:
+                needs = ('a reading: did a send the target received between %s and %s carry %s? '
+                         '%d candidate(s), first sent %s -- --read-action "%s" --as yes|no'
+                         % (lo or 'the start', ts, what, len(recv), recv[0]['ts'], key))
+            elif unchecked:
+                needs = 'a send in the window was never checked against the target transcript'
+            elif win:
+                v, why = 'MISSTEER', ('%s: a send was made in the window, but the target never '
+                                      'received it' % verb)
+            elif elsewhere:
+                v, why = 'MISSTEER', '%s: the text of %s went to %s, not the target' % (
+                    verb, what, ', '.join(elsewhere))
+            else:
+                v, why = 'MISSTEER', '%s recorded, but no send to the target in its window' % verb
+        elif verb == 'answered':
+            # `answered` says a message reached the target since the previous `answered` -- the rule
+            # its own guard enforces ("one reply cannot discharge two turns"). Not "in the same
+            # turn": measured on the real record, every guarded `answered` was marked in the turn
+            # AFTER its send, because the reply to that send is what began the turn.
+            prev = [b['ts'] for b in acts if b['verb'] == 'answered' and b.get('outcome') == 'landed'
+                    and b.get('state', 'live') == 'live' and b['ts'] < ts]
+            lo = max(prev) if prev else None
+            hit = [s for s in tsends if (lo is None or s['ts'] > lo) and s['ts'] <= ts]
+            if any(s.get('delivered') for s in hit):
+                why = 'the target received a send made since the previous `answered`'
+            elif any(not s.get('delivery_checked') for s in hit):
+                needs = 'its send was never checked against the target transcript'
+            elif hit:
+                v, why = 'MISSTEER', '`answered`: the send since the previous one never reached the target'
+            else:
+                v, why = 'MISSTEER', '`answered` recorded with no send to the target since the previous `answered`'
         elif verb == 'relayed':
-            hit = [t for t in my_text if same_turn(starts, t['ts'], ts)]
-            v, why = ('ok', 'text to the owner in the same turn') if hit else \
-                     ('MISSTEER', '`relayed` with nothing said to the owner in that turn')
+            # `relayed <ts>` says the target's turn up to <ts> was TOLD to the owner. That I said
+            # something in that turn is a fact; that what I said relayed it is read. Text from before
+            # the turn it names cannot have relayed it.
+            after = ident if (ident and _dt(ident)) else None
+            hit = [t for t in my_text if same_turn(starts, t['ts'], ts)
+                   and (after is None or t['ts'] >= after)]
+            decided = by_reading(rd, []) if hit else None
+            if decided:
+                v, why = decided
+            elif hit:
+                needs = ('a reading: did what I told the owner in that turn relay the target up to %s? '
+                         '%d candidate(s), first %s -- --read-action "%s" --as yes|no'
+                         % (ident or 'its turn', len(hit), hit[0]['ts'], key))
+            else:
+                v, why = 'MISSTEER', ('`relayed` with nothing said to the owner in that turn after the '
+                                      'turn it names')
         elif verb == 'resolved':
-            # A reply counts only from a session I SENT TO after the ask and before the reply.
-            # Found by probe: chatter from an unrelated session satisfied `resolved`.
-            since = asked.get(ident)
-            hit = [p for p in peers if (since is None or p['ts'] > since) and p['ts'] <= ts
-                   and any(s.get('to') and s['to'] == p['from'] and s['ts'] <= p['ts']
-                           and (since is None or s['ts'] >= since) for s in sends)]
-            v, why = ('ok', 'the session it was sent to replied before it was resolved') if hit else \
-                     ('MISSTEER', '%s resolved with no reply, after it was asked, from a session '
-                                  'it was sent to' % ident)
+            since = last_before(asked.get(ident, []), ts)
+            inwin = lambda t: (since is None or t > since) and t <= ts
+            replies = [p for p in peers if inwin(p['ts'])
+                       and any(s.get('to') and s['to'] == p['from'] and s['ts'] <= p['ts']
+                               and (since is None or s['ts'] >= since) for s in sends)]
+            unchecked = [p for p in replies if 'verified' not in p]
+            cands = ([('its reply', p['ts']) for p in replies if p.get('verified')]
+                     + [('its words', x['ts']) for x in (ttexts or []) if inwin(x['ts'])]
+                     + [('his words', m['ts']) for m in (owner or []) if inwin(m['ts'])])
+            decided = by_reading(rd, unchecked) if cands else None
+            if decided:
+                v, why = decided
+            elif cands:
+                needs = ('a reading: did anything between %s and %s answer %s? %d candidate(s): %s '
+                         '-- --read-action "%s" --as yes|no'
+                         % (since or 'the start', ts, ident, len(cands),
+                            ', '.join('%s %s' % c for c in cands[:3]), key))
+            elif unchecked:
+                needs = 'the reply was never checked against the target transcript'
+            elif ttexts is None or owner is None:
+                needs = ("the target's words and his were not read, so what could have answered %s "
+                         "was never looked at" % ident)
+            elif replies:
+                v, why = 'MISSTEER', ("%s: the only reply in my transcript is not one the target's "
+                                      "transcript shows it sending, and nothing else in the window "
+                                      "could have answered it" % ident)
+            else:
+                v, why = 'MISSTEER', ('%s resolved with nothing after it was asked -- no reply, no '
+                                      'word of the target, none of his -- that could have answered '
+                                      'it' % ident)
+        if needs:
+            a['needs'] = needs
+            continue
         out.append(dict(a, verdict=v, why=why))
     return out
-
 
 
 def artifacts(recs):
@@ -1524,6 +1630,14 @@ def _path_join(cwd, p):
     return os.path.normpath(os.path.join(cwd, p)) if cwd else None
 
 
+def _canon(p):
+    """One spelling per directory: a relative path is resolved against THIS process's working
+    directory and symlinks are followed, so `state` and /abs/state -- or /tmp/x and
+    /private/tmp/x -- are one state. Measured on the real record: given the relative `state`,
+    every one of 877 actions was recorded as scratch, silently."""
+    return os.path.realpath(os.path.abspath(p))
+
+
 def invocations(cmd, live_state, cwd=None, _depth=0):
     """Every watchdog invocation the shell would EXECUTE in `cmd`, from its own structure:
         {'verb', 'args': [values], 'arg_expands': [bools], 'text', 'urgent', 'gated_on',
@@ -1533,7 +1647,7 @@ def invocations(cmd, live_state, cwd=None, _depth=0):
     (WD_STATE exported or given as a prefix, --state-dir, another watchdog instance) is scratch.
     `diverted` is True when the invocation's stdout never reached the result (redirected, piped,
     or captured by a substitution): its silence then proves nothing."""
-    live = os.path.normpath(live_state) if live_state else None
+    live = _canon(live_state) if live_state else None
     out, env, shvars = [], {}, {}
     cmds_ = sh_commands(cmd)
     for ci, c in enumerate(cmds_):
@@ -1661,7 +1775,8 @@ def _wd_invocation(av, argv, env, cwd, live):
             return None
     else:
         return None
-    state = 'live' if (live and state_dir == live) else 'scratch'
+    state = 'live' if (live and state_dir and os.path.isabs(state_dir)
+                       and _canon(state_dir) == live) else 'scratch'
     text = ' '.join(args) if verb in ('queue add', 'owe add') else None
     return {'verb': verb, 'args': args, 'arg_expands': aexp, 'text': text,
             'text_resolved': (not any(aexp)) if text is not None else None,
@@ -1800,6 +1915,29 @@ def resolve_from_snapshots(acts, series):
             c = (A.get('closed_turns') or {}).get(ident)
             if c and _in_window(c.get('at'), a['ts']):
                 res = ('landed', 'the snapshot records %s closed at this time' % ident)
+        elif v in ('sent', 'veto') and ident:
+            ids = [x.strip() for x in ident.split(',') if x.strip()]
+            pb, pa = (B.get('proposed') or {}), (A.get('proposed') or {})
+            busy = [b for b in live if b is not a and b['verb'] in ('sent', 'veto') and between(b['ts'], lo, hi)
+                    and set(x.strip() for x in (b.get('id') or '').split(',')) & set(ids)]
+            raised = [x for x in (A.get('raised') or {}).values() if isinstance(x, dict)]
+            if v == 'sent' and any(x.get('finding_id') in ids and _in_window(x.get('ts'), a['ts']) for x in raised):
+                res = ('landed', 'the snapshot raises %s from this time' % ident)
+            elif not busy and ids and all(i in pa for i in ids):
+                res = ('no_effect', '%s still proposed after it' % ident)
+            elif v == 'veto' and not busy and ids and all(i in pb and i not in pa for i in ids):
+                res = ('landed', '%s proposed before it, gone after' % ident)
+        elif v == 'outcome' and ident:
+            # `outcome` writes nothing to state.json: only a findings.md row and a wake.log line
+            f = (after.get('files') or {}).get('findings.md')
+            if f is not None:
+                rows_ = [[c.strip() for c in ln.strip().strip('|').split('|')] for ln in f.split('\n')
+                         if ln.startswith('| %s (outcome) |' % ident)]
+                if any(len(c) > 5 and _in_window(c[2], a['ts']) for c in rows_):
+                    res = ('landed', 'findings.md records its grade at this time')
+                elif not [b for b in live if b is not a and b['verb'] == 'outcome' and b.get('id') == ident
+                          and between(b['ts'], a['ts'], hi)]:
+                    res = ('no_effect', 'findings.md holds no grade of %s from this time' % ident)
         elif v in ('queue add', 'owe add') and a.get('text'):
             head = _norm(a['text'])[:50]
             pool = ((A.get('owner_queue') or []) + (A.get('owner_queue_sent') or [])) if v == 'queue add' \
@@ -1815,6 +1953,190 @@ def resolve_from_snapshots(acts, series):
         else:
             a['needs'] = 'the snapshots bracketing it do not settle it' + span
     return acts
+
+
+# ================================================================ the target side, READ never queried
+#
+# My transcript can say a send was accepted; only the TARGET'S transcript can say it arrived, and
+# only its repository can say a commit exists. Measured on the real record: every message of mine
+# arrived either as a `user` record (target idle) or as a `queued_command` attachment whose
+# `rendered` carries it (target mid-turn); 17 delivery records carried several at once; the
+# delivered body equals my message once the wrapper's whitespace is stripped; an `enqueue` is
+# queuing, never delivery; and every reply of the target in my transcript equals a send_message
+# the target made to me. Its commits are mostly quiet (`git commit -q`), so the evidence of what
+# it committed is its push lines, the hashes it wrote, and its repository.
+
+PUSH_LINE = re.compile(r'^\s*\+?\s*([0-9a-f]{7,40})\.\.\.?([0-9a-f]{7,40})\s+(\S+) -> (\S+)', re.M)
+HEX_TOKEN = re.compile(r'\b([0-9a-f]{7,40})\b')
+FILE_HASH = re.compile(r'\b([0-9a-f]{64})\b')
+
+
+def _wrapped_from(self_id):
+    return re.compile(r'<cross-session-message from="%s"[^>]*>(.*?)(?:</cross-session-message>|$)'
+                      % re.escape(self_id), re.S)
+
+
+def target_view(trecs, self_id):
+    """What the TARGET'S OWN transcript records: my messages as queued and as DELIVERED, its sends
+    to me, and the push lines its commands printed."""
+    rx = _wrapped_from(self_id)
+    view = {'deliveries': [], 'enqueued': [], 'sends_to_me': [], 'pushes': [], 'texts': [],
+            'records': 0}
+    for r in trecs:
+        view['records'] += 1
+        t, ts = r.get('type'), r.get('timestamp') or ''
+        c = (r.get('message') or {}).get('content')
+        if t == 'queue-operation' and r.get('operation') == 'enqueue':
+            view['enqueued'] += [{'ts': ts, 'body': m.group(1).strip()}
+                                 for m in rx.finditer(r.get('content') or '')]
+        elif t == 'user' and isinstance(c, str):
+            view['deliveries'] += [{'ts': ts, 'body': m.group(1).strip(), 'shape': 'user'}
+                                   for m in rx.finditer(c)]
+        elif t == 'attachment':
+            rd = r.get('rendered')
+            body = rd if isinstance(rd, str) else ' '.join(
+                x.get('content', '') for x in (rd or []) if isinstance(x, dict) and isinstance(x.get('content'), str))
+            view['deliveries'] += [{'ts': ts, 'body': m.group(1).strip(), 'shape': 'attachment'}
+                                   for m in rx.finditer(body)]
+        elif t == 'assistant' and isinstance(c, list):
+            for b in c:
+                # what the target SAID in its own turns: an answer to my question is usually here,
+                # not in a message it sends me (measured: 44 questions resolved with no reply)
+                if isinstance(b, dict) and b.get('type') == 'text' and (b.get('text') or '').strip():
+                    view['texts'].append({'ts': ts, 'text': b['text'], 'uuid': r.get('uuid')})
+                if (isinstance(b, dict) and b.get('type') == 'tool_use' and 'send_message' in (b.get('name') or '')
+                        and (b.get('input') or {}).get('session_id') == self_id):
+                    view['sends_to_me'].append({'ts': ts, 'msg': ((b.get('input') or {}).get('message') or '').strip()})
+        elif t == 'user' and isinstance(c, list):
+            for b in c:
+                if isinstance(b, dict) and b.get('type') == 'tool_result':
+                    for m in PUSH_LINE.finditer(_block_text(b.get('content'))):
+                        view['pushes'].append({'ts': ts, 'old': m.group(1), 'new': m.group(2),
+                                               'branch': m.group(3), 'remote_branch': m.group(4)})
+    return view
+
+
+def annotate_delivery(sends, target, view):
+    """Mark each send of mine TO THE TARGET with the delivery its transcript records for it: the
+    first delivery of the same body, at or after the send, not already credited to another send.
+    A send the target never received gets delivered=None. Sends elsewhere are left alone."""
+    pool = sorted(view['deliveries'], key=lambda d: _dt(d['ts']) or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc))
+    used = set()
+    for s in sorted((s for s in sends if s.get('to') == target), key=lambda s: _dt(s['ts'])):
+        body = (s.get('msg') or '').strip()
+        hit = next((i for i, d in enumerate(pool) if i not in used and d['body'] == body
+                    and _dt(d['ts']) and _dt(d['ts']) >= _dt(s['ts'])), None)
+        s['delivery_checked'] = True
+        s['delivered'] = pool[hit]['ts'] if hit is not None else None
+        if hit is not None:
+            used.add(hit)
+    return sends
+
+
+def annotate_peers(peers, target, view):
+    """Mark each reply in MY transcript that claims to come from the target with whether the
+    TARGET'S transcript shows it sending exactly that, before it arrived."""
+    used = set()
+    for p in sorted((p for p in peers if p.get('from') == target), key=lambda p: _dt(p['ts'])):
+        hit = next((i for i, s in enumerate(view['sends_to_me']) if i not in used
+                    and s['msg'] == (p.get('text') or '').strip()
+                    and _dt(s['ts']) and _dt(s['ts']) <= _dt(p['ts'])), None)
+        p['verified'] = hit is not None
+        if hit is not None:
+            used.add(hit)
+    return peers
+
+
+def git_probe(repos, run=None):
+    """sha -> [{'repo', 'sha', 'refs'}] for every repository that holds it as a commit. A path
+    that is not a git repository is REFUSED by name: "not found in a repo that is not there" is
+    not "not found". `run` is the command runner, replaceable so tests can force failures."""
+    import subprocess
+    run = run or (lambda args: subprocess.run(args, capture_output=True, text=True))
+    for repo in repos:
+        r = run(['git', '-C', repo, 'rev-parse', '--git-dir'])
+        if r.returncode != 0:
+            raise ValueError('%s is not a git repository (%s) -- refused rather than reported '
+                             'as "not found"' % (repo, (r.stderr or '').strip()[:80]))
+
+    def probe(sha):
+        out = []
+        for repo in repos:
+            r = run(['git', '-C', repo, 'rev-parse', '--verify', '--quiet', sha + '^{commit}'])
+            if r.returncode != 0:
+                continue
+            full = (r.stdout or '').strip()
+            b = run(['git', '-C', repo, 'branch', '-a', '--contains', full])
+            refs = [x.strip().lstrip('*+').strip() for x in (b.stdout or '').splitlines()]
+            out.append({'repo': repo, 'sha': full, 'refs': [x for x in refs if x]})
+        return out
+    return probe
+
+
+def classify_hashes(items, probe, file_hashes, known_ids):
+    """Every hex token in texts that could name a commit, as a FACT about it:
+        on_a_ref           a commit in a checked repository, on a branch
+        on_no_ref          a commit, but on no branch (history rewritten away, or never pushed)
+        file_hash          the prefix of a 64-hex file hash some tool printed
+        id_fragment        part of a known session or message id
+        not_a_commit_here  none of the above -- whether it was MEANT as a commit is READ
+    Measured on the real record: of 119 tokens in the target's text that were no commit in its
+    repo or mine, only 7 were file hashes; the rest included fragments of session ids -- so a
+    token that is no commit is never, by itself, a false claim."""
+    out = []
+    for it in items:
+        hits = probe(it['sha'])
+        if hits:
+            cls = 'on_a_ref' if any(h['refs'] for h in hits) else 'on_no_ref'
+        elif any(h.startswith(it['sha']) for h in file_hashes):
+            cls = 'file_hash'
+        elif any(it['sha'] in i for i in known_ids):
+            cls = 'id_fragment'
+        else:
+            cls = 'not_a_commit_here'
+        out.append(dict(it, cls=cls, hits=hits))
+    return out
+
+
+def hex_items(texts, where):
+    """(ts, sha) for every hex token in the given texts, digits-only runs excluded."""
+    return [{'ts': t['ts'], 'sha': m.group(1), 'where': where}
+            for t in texts for m in HEX_TOKEN.finditer(t.get('text') or t.get('msg') or '')
+            if not m.group(1).isdigit()]
+
+
+def file_hashes_in(recs):
+    return {m.group(1) for r in recs for b in ((r.get('message') or {}).get('content') or [])
+            if isinstance((r.get('message') or {}).get('content'), list) and isinstance(b, dict)
+            and b.get('type') == 'tool_result' for m in FILE_HASH.finditer(_block_text(b.get('content')))}
+
+
+def check_pushes(pushes, probe):
+    """Every push the target's commands printed: its new tip must be a commit in the repository,
+    on the branch it was pushed to."""
+    out = []
+    for p in pushes:
+        hits = probe(p['new'])
+        want = {p['branch'], p['remote_branch'], 'remotes/origin/' + p['remote_branch']}
+        if not hits:
+            cls = 'not_in_repo'
+        elif any(set(h['refs']) & want for h in hits):
+            cls = 'on_its_branch'
+        else:
+            cls = 'not_on_branch'
+        out.append(dict(p, cls=cls))
+    return out
+
+
+def apply_hash_readings(hashes, readings):
+    """A token that is no commit here is READ: was it meant as a commit? Read as not a commit, it
+    is settled; read as a commit, it is a claimed commit that does not exist -- a finding."""
+    for h in hashes:
+        r = (readings or {}).get(h['sha'])
+        if h['cls'] == 'not_a_commit_here' and r:
+            h['cls'] = 'claimed_commit_missing' if r.get('as') == 'commit' else 'read_not_a_commit'
+            h['reading'] = r
+    return hashes
 
 
 # At the END of the module: selftest() uses the shell reader, defined above. Mid-module it ran

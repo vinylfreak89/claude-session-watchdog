@@ -103,3 +103,34 @@ def write(path, recs):
     with open(path, 'w') as f:
         for r in recs:
             f.write(json.dumps(r) + '\n')
+
+
+# ---------------------------------------------------------------- the TARGET's side, in its real shapes
+# Measured on the real target transcript: my messages arrive wrapped in a cross-session-message
+# from my session, as a `user` record after a dequeue (target idle) or as a queued_command
+# attachment whose `rendered` carries the wrapper (target mid-turn); an enqueue precedes both.
+
+def _wrap(frm, body):
+    return '<cross-session-message from="%s" name="Watchdog">\n%s\n</cross-session-message>' % (frm, body)
+
+
+def target_receives(ts, frm, body, midturn=False):
+    w = _wrap(frm, body)
+    if midturn:
+        return [enqueue(ts, w), remove(ts),
+                {'type': 'attachment', 'timestamp': ts, 'uuid': 'a-' + ts,
+                 'attachment': {'type': 'queued_command', 'prompt': w, 'commandMode': 'prompt'},
+                 'rendered': [{'content': 'Another Claude session sent a message while you were working: ' + w}]}]
+    return [enqueue(ts, w), dequeue(ts), user_str(ts, 'Another Claude session sent a message: ' + w)]
+
+
+def target_receives_batch(ts, frm, bodies):
+    """Several queued messages delivered in ONE user record (measured: 17 such records)."""
+    ws = [_wrap(frm, b) for b in bodies]
+    return [enqueue(ts, w) for w in ws] + [dequeue(ts) for _ in ws] + \
+           [user_str(ts, '\n'.join('Another Claude session sent a message: ' + w for w in ws))]
+
+
+def target_queued_only(ts, frm, body):
+    """Queued in the target and never delivered: an enqueue is NOT delivery."""
+    return [enqueue(ts, _wrap(frm, body))]

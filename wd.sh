@@ -91,7 +91,7 @@ case "$cmd" in
             done)   exec $PY "$D/wd_wake.py" --state-dir "$S" --owe-clear "$1" ;;
             *) echo 'wd.sh owe add [--gated-on "<what must finish first>"] "<decision>" | list | ungate <id> | done <id>' >&2; exit 2 ;;
           esac ;;
-  reconcile) exec $PY "$D/wd_reconcile.py" --state-dir "$S" --target "$TARGET" "$@" ;;
+  reconcile) exec $PY "$D/wd_reconcile.py" --state-dir "$S" --target "$TARGET" --self-id "$SELF" --target-repo "$(cfg repo)" "$@" ;;
   status) $PY - "$S" <<'PYS'
 import json,sys,os
 p=os.path.join(sys.argv[1],'state.json'); d=json.load(open(p)) if os.path.exists(p) else {}

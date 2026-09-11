@@ -63,16 +63,27 @@ def hour_key(d):
 RIVAL = re.compile(r'wd_wait\.py|wd_wake\.py|wd_check\.py|wd\.sh\s+(wait|wake|owed|due|status)\b')
 
 
-def rival_hooks():
-    """Every live watchdog process that is not this one. Read-only; no signals are sent."""
+def rival_hooks(state_dir=None, ps_out=None):
+    """Every live watchdog process that is not this one and could touch THIS state. Read-only; no
+    signals are sent. A hook whose command line names ANOTHER state directory cannot interleave
+    with this ledger or this state, so it is not a rival -- measured: the test suite failed four
+    CLI tests whenever the live watchdog's own hooks happened to run, over a different state. A
+    hook whose command line names no state directory is still a rival: it cannot be told apart.
+    `ps_out` replaces the process table, so the scoping is testable without live processes."""
     me, parent = os.getpid(), os.getppid()
-    try:
-        out = subprocess.run(['ps', '-axo', 'pid=,ppid=,command='],
-                             capture_output=True, text=True, timeout=20).stdout
-    except Exception as e:
-        # A check that cannot run must NOT read as "no rivals" -- that is the missing-is-not-a-
-        # value defect, and here it would licence exactly the concurrency this guard forbids.
-        return [('?', 'cannot enumerate processes: %s' % e)]
+    if ps_out is None:
+        try:
+            # -ww: never truncate the command line, or its --state-dir is cut off and every hook
+            # reads as a rival of every state
+            out = subprocess.run(['ps', '-axww', '-o', 'pid=,ppid=,command='],
+                                 capture_output=True, text=True, timeout=20).stdout
+        except Exception as e:
+            # A check that cannot run must NOT read as "no rivals" -- that is the missing-is-not-a-
+            # value defect, and here it would licence exactly the concurrency this guard forbids.
+            return [('?', 'cannot enumerate processes: %s' % e)]
+    else:
+        out = ps_out
+    mine = os.path.realpath(os.path.abspath(state_dir)) if state_dir else None
     hits = []
     for line in out.splitlines():
         line = line.strip()
@@ -91,6 +102,10 @@ def rival_hooks():
         if 'wd_reconcile.py' in cmd or 'reconcile' in cmd.split('wd.sh ')[-1][:12]:
             continue
         if RIVAL.search(cmd):
+            m = re.search(r'--state-dir[= ](\S+)', cmd)
+            if (mine and m and os.path.isabs(m.group(1))
+                    and os.path.realpath(m.group(1)) != mine):
+                continue
             hits.append((pid, cmd[:110]))
     return hits
 
@@ -161,6 +176,13 @@ def outstanding(L):
     if stale:
         o.append('%d restore(s) unvalidated at pass %d (next #%d) -- supersession check owed'
                  % (len(stale), L.get('pass', 0), stale[0]))
+    hs = ((L.get('stage3') or {}).get('hashes') or {}).get('needs_reading') or []
+    if hs:
+        o.append('%d hex token(s) to read -- meant as a commit or not? (next %s)' % (len(hs), hs[0]['sha']))
+    ar = (L.get('stage3') or {}).get('action_readings_owed') or []
+    if ar:
+        o.append('%d action(s) to read -- carried? answered? (next %s: %s)'
+                 % (len(ar), ar[0]['key'], ar[0]['needs'][:140]))
     chs = (L.get('stage3') or {}).get('chains') or {}
     owed = [k for k, v in sorted(chs.items()) if v.get('outstanding')]
     if owed:
@@ -186,10 +208,12 @@ def confidence(L):
         okn = sum(1 for r in rs if r.get('validated_pass') == L.get('pass', 0))
         cov.append(('restores', 100 * okn // len(rs)))
     for name, key in (('actions', 'actions'), ('state-keys', 'state_keys'),
-                      ('snapshots', 'snapshots'), ('records', 'records'), ('chains', 'chains')):
+                      ('snapshots', 'snapshots'), ('records', 'records'), ('chains', 'chains'),
+                      ('deliveries', 'deliveries'), ('hashes', 'hashes')):
         seen, total = a.get(key, [0, 0])[0], a.get(key, [0, 0])[1]
-        # a MEASURED zero chains is nothing owed; an unmeasured count is still owed
-        cov.append((name, 100 * seen // total if total else (100 if key == 'chains' and key in a else 0)))
+        # a MEASURED zero is nothing owed; an unmeasured count is still owed
+        cov.append((name, 100 * seen // total if total else
+                    (100 if key in ('chains', 'deliveries', 'hashes') and key in a else 0)))
     return (min(v for _, v in cov) if cov else 0), cov
 
 
@@ -200,6 +224,17 @@ def status_line(L):
                len(L['snapshots']), len(L['actions']), len(L['restored']),
                confidence(L)[0], '  COMPLETE' if L.get('complete') else ''))
 
+
+
+def _target_transcript(a):
+    """The target's transcript path: given directly, or resolved from the selector the way every
+    other verb resolves it (local session metadata; the target is never contacted)."""
+    if getattr(a, 'target_transcript', None):
+        return a.target_transcript
+    if getattr(a, 'target', None):
+        import wd_lib as W
+        return W.transcript_path(W.find_session(a.target))
+    return None
 
 
 def _target_id(a):
@@ -248,7 +283,7 @@ def run_stage(n, L, S, a):
                        'actions': len(acts), 'opens': len(opens),
                        'live_actions': sum(1 for x in acts if x.get('state') == 'live'),
                        'outstanding': len(RL.outstanding(acts)),
-                       'by_outcome': dict(_c.Counter(x['outcome'] for x in acts)),
+                       'by_outcome': dict(_c.Counter(x['outcome'] or 'pending' for x in acts)),
                        'owner_messages': len(owner), 'owner_accounting': acct,
                        'owner_accounting_holds': inv, 'excluded': exc, 'peer_replies': len(peers),
                        'items': [{'cite': o['cite'], 'ts': o['ts'], 'store': o['store'],
@@ -261,7 +296,7 @@ def run_stage(n, L, S, a):
         print('stage 1: %d records (%d unparseable), %d actions of mine, %d opens, '
               '%d owner messages, %d state keys'
               % (len(numbered), bad, len(acts), len(opens), len(owner), len(live['all_keys'])))
-        print('   outcomes: %s' % dict(_c.Counter(x['outcome'] for x in acts)))
+        print('   outcomes: %s' % dict(_c.Counter(x['outcome'] or 'pending' for x in acts)))
         print('   owner corpus accounting %s: %s' % ('HOLDS' if inv else 'BROKEN', acct))
         print('   excluded from the owner corpus, counted: %s' % exc)
         return True
@@ -269,54 +304,82 @@ def run_stage(n, L, S, a):
         if 'stage1' not in L:
             raise SystemExit('run --stage 1 first: stage 3 replays the actions it found')
         tid = _target_id(a)
+        tpath = _target_transcript(a)
+        if not tpath or not os.path.exists(tpath):
+            raise SystemExit("stage 3 needs the TARGET'S transcript: a send has landed only if the "
+                             "target received it. Give --target-transcript, or run through wd.sh.")
+        if not getattr(a, 'self_id', None):
+            raise SystemExit('stage 3 needs --self-id: my session id, which marks my messages in '
+                             'the target transcript')
+        if not getattr(a, 'target_repo', None):
+            raise SystemExit("stage 3 needs --target-repo: the target's commits are checked in its "
+                             "own repository")
         path, numbered, bad, recs, acts, owner, exc, peers, acct, my_text, sends = _world()
+        tnum, tbad = RL.read_records(tpath)
+        trecs = [r for _, r in tnum]
+        view = RL.target_view(trecs, a.self_id)
+        RL.annotate_delivery(sends, tid, view)
+        RL.annotate_peers(peers, tid, view)
         starts = RL.turn_starts(numbered)
-        rep = RL.landed_replay(acts, starts, my_text, sends, peers, RL.live_stores(S)['raw'], tid)
+        rep = RL.landed_replay(acts, starts, my_text, sends, peers, RL.live_stores(S)['raw'], tid,
+                               ttexts=view['texts'], owner=owner, readings=L.get('action_readings'))
         tally = _c.Counter(x['verdict'] for x in rep)
         ch = RL.decision_chains(acts, owner, my_text, sends, tid, L.get('adjudications') or {})
         cov['chains'] = [sum(1 for x in ch.values() if not x.get('outstanding')), len(ch)]
         broken = {k: v for k, v in ch.items() if v['verdicts'] != ['complete']}
-        import subprocess as _sp
         repos = []
-        for r in ([a.proj] if a.proj else []) + [os.path.dirname(os.path.abspath(__file__))] \
-                + list(L.get('repos') or []):
+        for r in [os.path.dirname(os.path.abspath(__file__)), a.target_repo] + list(L.get('repos') or []):
             if isinstance(r, str) and r not in repos:
                 repos.append(r)
-
-        def _probe(sha):
-            for repo in repos:
-                try:
-                    if _sp.run(['git', 'cat-file', '-e', sha + '^{commit}'], cwd=repo,
-                               capture_output=True).returncode != 0:
-                        continue
-                    r = _sp.run(['git', 'branch', '-a', '--contains', sha], cwd=repo,
-                                capture_output=True, text=True)
-                    refs = [x.strip('* ').strip() for x in r.stdout.splitlines() if x.strip()]
-                    return True, ['%s:%s' % (os.path.basename(repo), x) for x in refs]
-                except Exception:
-                    continue
-            return False, []
-
-        commits = RL.verify_commits(RL.claimed_commits(my_text), _probe)
-        ctally = _c.Counter(x['verdict'] for x in commits)
+        probe = RL.git_probe(repos)
+        tsends = [s for s in sends if s.get('to') == tid]
+        known = {tid, a.self_id} | {p.get('from') for p in peers if p.get('from')} | \
+                {s.get('to') for s in sends if s.get('to')}
+        items = (RL.hex_items(my_text, 'my text to the owner') + RL.hex_items(tsends, 'my send to the target')
+                 + RL.hex_items(view['sends_to_me'], "the target's send to me"))
+        hashes = RL.apply_hash_readings(
+            RL.classify_hashes(items, probe, RL.file_hashes_in(recs) | RL.file_hashes_in(trecs), known),
+            L.get('hash_readings'))
+        pushes = RL.check_pushes(view['pushes'], RL.git_probe([a.target_repo]))
+        undelivered = [s for s in tsends if not s.get('delivered')]
+        htally = _c.Counter(h['cls'] for h in hashes)
+        ptally = _c.Counter(p['cls'] for p in pushes)
+        owed_readings = [{'key': RL.action_key(x), 'ts': x['ts'], 'verb': x['verb'], 'id': x.get('id'),
+                          'needs': x['needs']} for x in acts
+                         if x.get('state') == 'live' and (x.get('needs') or '').startswith('a reading')]
         L['stage3'] = {'ts': now_iso(), 'target': tid, 'tally': dict(tally),
                        'findings': [{'ts': x['ts'], 'cite': x['cite'], 'verb': x['verb'],
                                      'id': x.get('id'), 'verdict': x['verdict'], 'why': x['why']}
                                     for x in rep if x['verdict'] != 'ok'],
+                       'action_readings_owed': owed_readings,
                        'chains': ch,
-                       'commits': {'tally': dict(ctally),
-                                   'not_ok': [{'ts': x['ts'], 'sha': x['sha'], 'verdict': x['verdict']}
-                                              for x in commits if x['verdict'] != 'ok']}}
+                       'delivery': {'to_target': len(tsends), 'delivered': len(tsends) - len(undelivered),
+                                    'never_delivered': [{'ts': s['ts'], 'msg': s['msg'][:160]} for s in undelivered],
+                                    'target_records': len(tnum), 'target_unparseable': tbad},
+                       'hashes': {'tally': dict(htally),
+                                  'needs_reading': [{'ts': h['ts'], 'sha': h['sha'], 'where': h['where']}
+                                                    for h in hashes if h['cls'] == 'not_a_commit_here'],
+                                  'findings': [{'ts': h['ts'], 'sha': h['sha'], 'where': h['where'], 'cls': h['cls']}
+                                               for h in hashes if h['cls'] in ('on_no_ref', 'claimed_commit_missing')]},
+                       'pushes': {'tally': dict(ptally),
+                                  'not_ok': [p for p in pushes if p['cls'] != 'on_its_branch']}}
         # an action counts as reconciled only once evidence ESTABLISHED its outcome; pending ones
         # hold confidence below 100 until Time Machine or a later record settles them
         cov['actions'] = [len(rep), sum(1 for x in acts if x.get('state') == 'live')]
-        print('         %d live action(s) still OUTSTANDING (no evidence yet)' % len(RL.outstanding(acts)))
+        cov['deliveries'] = [len(tsends), len(tsends)]
+        cov['hashes'] = [sum(1 for h in hashes if h['cls'] != 'not_a_commit_here'), len(hashes)]
         print('stage 3: %d actions replayed -- %s' % (len(rep), dict(tally)))
+        print('         %d live action(s) still OUTSTANDING (no evidence yet)'
+              % sum(1 for x in acts if x.get('state') == 'live' and (x['outcome'] is None or x.get('needs'))))
+        print('         %d action(s) owe a READING (--read-action <key> --as yes|no)' % len(owed_readings))
+        print('         %d send(s) to the target: %d received in its transcript, %d never received'
+              % (len(tsends), len(tsends) - len(undelivered), len(undelivered)))
         print('         %d decision chain(s): %d complete, %d broken'
               % (len(ch), len(ch) - len(broken), len(broken)))
         for did, v in sorted(broken.items()):
             print('   CHAIN %-8s %s' % (did, '+'.join(v['verdicts'])))
-        print('         %d commit claim(s) -- %s' % (len(commits), dict(ctally)))
+        print('         %d hex token(s) -- %s' % (len(hashes), dict(htally)))
+        print('         %d push(es) by the target -- %s' % (len(pushes), dict(ptally)))
         for f in L['stage3']['findings'][:30]:
             print('   %-13s %s %-10s %s' % (f['verdict'], f['ts'][:19], f['verb'], f['why']))
         return True
@@ -379,6 +442,13 @@ def main():
     ap.add_argument('--target', help='the target session selector, as wd.sh passes it from config')
     ap.add_argument('--target-id', help='the target session id directly (testing)')
     ap.add_argument('--cwd', help='starting directory for records that do not carry one (real records do)')
+    ap.add_argument('--target-transcript', help="the target's transcript (wd.sh resolves it from --target)")
+    ap.add_argument('--target-repo', help="the target's repository, for its commits")
+    ap.add_argument('--self-id', help='my session id, which marks my messages in the target transcript')
+    ap.add_argument('--read-hash', help='a hex token stage 3 could not classify')
+    ap.add_argument('--read-action', help='an action stage 3 owes a reading of (the key it lists)')
+    ap.add_argument('--as', dest='read_as', choices=('commit', 'not-a-commit', 'yes', 'no'),
+                    help='what the token was meant as, read from the text around it')
     ap.add_argument('--repo', action='append', default=[],
                     help='a repo whose commits my claims may refer to (repeatable)')
     ap.add_argument('--validate', type=int)
@@ -390,7 +460,7 @@ def main():
     a = ap.parse_args()
 
     # 1. MUTUAL EXCLUSION -- before reading or writing anything at all.
-    rivals = rival_hooks()
+    rivals = rival_hooks(a.state_dir)
     if rivals:
         print('RECONCILE ABORTED -- another hook is running; no action taken:')
         for pid, cmd in rivals[:6]:
@@ -404,7 +474,7 @@ def main():
     os.makedirs(S, exist_ok=True)
     # Only a WRITING run takes the lock. The minute nagger calls this for status every 60 s;
     # if a read took the lock it would abort the very stage runs it exists to nag about.
-    writes = bool(a.adjudicate or a.stage or a.hour or a.snapshot or a.thinned or a.action or a.restore
+    writes = bool(a.read_hash or a.read_action or a.adjudicate or a.stage or a.hour or a.snapshot or a.thinned or a.action or a.restore
                   or a.validate is not None or a.complete or a.init or a.repo)
     if not writes:
         return _main(a, S)
@@ -518,6 +588,29 @@ def _main(a, S):
         changed = True
         print('adjudication recorded for %s (put %s, answer %s); stage 3 applies it'
               % (a.adjudicate, a.put, a.answer))
+
+    if a.read_hash:
+        # whether a hex token was MEANT as a commit is read from the words around it, never matched
+        if a.read_as not in ('commit', 'not-a-commit') or not a.evidence:
+            raise SystemExit('--read-hash needs --as commit|not-a-commit and --evidence "<the words around it>"')
+        L.setdefault('hash_readings', {})[a.read_hash] = {'as': a.read_as, 'evidence': a.evidence,
+                                                          'ts': now_iso()}
+        changed = True
+        print('reading recorded for %s (%s); stage 3 applies it' % (a.read_hash, a.read_as))
+
+    if a.read_action:
+        # whether a send CARRIED an item or question, and whether anything ANSWERED a question, is
+        # read from the words -- never matched. Only an action stage 3 listed can be read.
+        if a.read_as not in ('yes', 'no') or not a.evidence:
+            raise SystemExit('--read-action needs --as yes|no and --evidence "<what was read, and where>"')
+        owed = {x['key'] for x in ((L.get('stage3') or {}).get('action_readings_owed') or [])}
+        if a.read_action not in owed and a.read_action not in (L.get('action_readings') or {}):
+            raise SystemExit('--read-action %s: stage 3 owes no reading of that action -- run '
+                             '--stage 3 and use a key it lists' % a.read_action)
+        L.setdefault('action_readings', {})[a.read_action] = {'as': a.read_as, 'evidence': a.evidence,
+                                                              'ts': now_iso()}
+        changed = True
+        print('reading recorded for %s (%s); stage 3 applies it' % (a.read_action, a.read_as))
 
     if a.restore:
         if not a.evidence:

@@ -199,7 +199,7 @@ def test_stage3():
         act('close', 'resolved', 'K1', T(7, 5)),    # the target replied after K1 was asked
         act('close', 'resolved', 'K2', T(8, 5)),    # no reply from the target
         act('mark', 'answered', None, T(5, 3)),     # a send in the same turn precedes it
-        act('mark', 'nudged', None, T(21, 1)),      # a nudge with no send at all
+        act('close', 'nudged', 'K2', T(8, 3)),      # a nudge with no send in its window
         act('close', 'sent1', 'Q12', T(22), outcome='failed'),   # its own result failed
     ]
     starts = [T(5), T(6), T(7), T(8), T(9), T(10), T(20), T(21), T(22)]
@@ -211,35 +211,47 @@ def test_stage3():
              {'ts': T(10, 2), 'msg': 'OWNER: the tenth item text sent after it was marked',
               'to': 'local_target'}]
     peers = [{'ts': T(7, 2), 'from': 'local_target', 'text': 'here is my answer'}]
+    deliver_all(sends, peers)
     state = {'owner_queue_sent': [{'id': 'Q10', 'text': 'the tenth item text sent after it was marked'}]}
-    rep = R.landed_replay(acts, starts, my_text, sends, peers, state, 'local_target')
-    v = {(x['verb'], x.get('id'), x['ts']): x['verdict'] for x in rep}
+    import copy
+    def replay(readings=None):
+        a_ = copy.deepcopy(acts)
+        r_ = R.landed_replay(a_, starts, my_text, sends, peers, state, 'local_target',
+                             ttexts=[], owner=[], readings=readings)
+        return ({(x['verb'], x.get('id'), x['ts']): x['verdict'] for x in r_},
+                {(x['verb'], x.get('id'), x['ts']): x.get('needs') or '' for x in a_})
+    v, nd = replay()
+    rep = R.landed_replay(copy.deepcopy(acts), starts, my_text, sends, peers, state, 'local_target',
+                          ttexts=[], owner=[])
+    reading_owed = lambda k: k not in v and nd.get(k, '').startswith('a reading')
+    key = lambda verb, ident, ts: R.action_key({'cite': 'f:%s' % ts, 'verb': verb, 'id': ident})
     ck('sent1 with a same-turn send carrying its text -> ok', v[('sent1', 'Q7', T(5, 1))], 'ok')
-    ck('sent1 whose turn sent a DIFFERENT item -> MISSTEER', v[('sent1', 'Q9', T(5, 2))], 'MISSTEER')
-    ck('sent1 with no text anywhere -> MISSTEER', v[('sent1', 'Q8', T(9))], 'MISSTEER')
-    ck('an unexpanded "$*" is never taken as the item text',
-       v[('sent1', 'Q11', T(9, 30))], 'MISSTEER')
+    ck('sent1 whose turn sent a DIFFERENT item -> a READING is owed, not a verdict',
+       reading_owed(('sent1', 'Q9', T(5, 2))), True)
+    ck('sent1 with no text anywhere -> a reading, never a verdict from missing text',
+       reading_owed(('sent1', 'Q8', T(9))), True)
+    ck('an unexpanded "$*" is never taken as the item text (not ok)',
+       v.get(('sent1', 'Q11', T(9, 30))) != 'ok' and reading_owed(('sent1', 'Q11', T(9, 30))), True)
     ck('a send AFTER the mark does not make the mark honest',
-       v[('sent1', 'Q10', T(10, 1))], 'MISSTEER')
+       v.get(('sent1', 'Q10', T(10, 1))) != 'ok', True)
+    v2, _ = replay({key('sent1', 'Q9', T(5, 2)): {'as': 'no', 'evidence': 'the 05:00 send is Q7, not Q9'},
+                    key('resolved', 'K1', T(7, 5)): {'as': 'yes', 'evidence': 'its 07:02 reply answers it'}})
+    ck('read "no": the send did not carry Q9 -> MISSTEER', v2.get(('sent1', 'Q9', T(5, 2))), 'MISSTEER')
+    ck('read "yes": its reply answered K1 -> ok', v2.get(('resolved', 'K1', T(7, 5))), 'ok')
     ck('project state supplies text the record lacks (owner_queue_sent)',
        'Q10' in R.item_texts(state, acts), True)
-    ck('relayed with text to the owner in the same turn -> ok', v[('relayed', None, T(6, 1))], 'ok')
+    ck('relayed with text to the owner in the same turn -> a reading of it is owed',
+       reading_owed(('relayed', None, T(6, 1))), True)
     ck('relayed with nothing said -> MISSTEER', v[('relayed', None, T(20))], 'MISSTEER')
-    ck('resolved after the session it was sent to replied -> ok', v[('resolved', 'K1', T(7, 5))], 'ok')
-    ck('resolved with no reply (and never sent) -> MISSTEER', v[('resolved', 'K2', T(8, 5))], 'MISSTEER')
+    ck('resolved after the session it was sent to replied -> a reading of the reply is owed',
+       reading_owed(('resolved', 'K1', T(7, 5))), True)
+    ck('resolved with nothing that could answer it -> MISSTEER', v[('resolved', 'K2', T(8, 5))], 'MISSTEER')
     ck('answered with a send before it in the turn -> ok', v[('answered', None, T(5, 3))], 'ok')
-    ck('nudged with no send -> MISSTEER', v[('nudged', None, T(21, 1))], 'MISSTEER')
+    ck('nudged with no send in its window -> MISSTEER', v[('nudged', 'K2', T(8, 3))], 'MISSTEER')
     ck('an action whose own result failed stays failed', v[('sent1', 'Q12', T(22))], 'failed')
     ck('every verdict is in the declared vocabulary',
        all(x['verdict'] in R.REPLAY_VERDICTS for x in rep), True)
 
-    # a commit claim: three FACTS, none of them unknown
-    probe = {'aaaaaaa': (True, ['origin/main']), 'bbbbbbb': (True, []), 'ccccccc': (False, [])}
-    res = R.verify_commits([{'ts': 't', 'sha': k} for k in ('aaaaaaa', 'bbbbbbb', 'ccccccc')],
-                           lambda sha: probe[sha])
-    ck('commit on a ref -> ok', res[0]['verdict'], 'ok')
-    ck('commit that exists on NO ref -> on_no_ref, a fact', res[1]['verdict'], 'on_no_ref')
-    ck('commit that does not exist -> MISSTEER', res[2]['verdict'], 'MISSTEER')
     return fails
 
 
@@ -709,6 +721,12 @@ def test_cli_all_stages():
 
         run('2026-09-09T10:00:00Z', '2026-09-11T10:00:00Z', '--init')
         run('--stage', '1', '--proj', d, '--self-prefix', '80f99b89')
+        import realshape as RS
+        tt = os.path.join(d, 'target.jsonl')
+        RS.write(tt, RS.target_receives('2026-09-11T00:00:00Z', 'local_self', 'hello from the watchdog'))
+        tr = os.path.join(d, 'target_repo')
+        make_target_repo(tr)
+        TGT = ['--target-transcript', tt, '--target-repo', tr, '--self-id', 'local_self']
 
         # stage 2 must REFUSE rather than report an empty result
         rc, out = run('--stage', '2')
@@ -777,9 +795,18 @@ def test_cli_all_stages():
         ck('stage 3 without a target refuses by name',
            (rc != 0, 'needs the target' in out, 'Traceback' in out), (True, True, False))
         # stage 3 runs end to end against the corpus, and reports decision chains
+        rc, out = run('--stage', '3', '--proj', d, '--self-prefix', '80f99b89', '--target-id', 'local_target')
+        ck("stage 3 without the target's transcript refuses by name",
+           (rc != 0, "TARGET'S transcript" in out, 'Traceback' in out), (True, True, False))
+        rc, out = run('--stage', '3', '--proj', d, '--self-prefix', '80f99b89', '--target-id', 'local_target',
+                      '--target-transcript', tt, '--self-id', 'local_self')
+        ck("stage 3 without the target's repository refuses by name",
+           (rc != 0, '--target-repo' in out, 'Traceback' in out), (True, True, False))
         rc, out = run('--stage', '3', '--proj', d, '--self-prefix', '80f99b89',
-                      '--target-id', 'local_target')
+                      '--target-id', 'local_target', *TGT)
         ck('stage 3 runs from the CLI', 'actions replayed' in out, True)
+        ck('stage 3 reports delivery to the target', 'received in its transcript' in out, True)
+        ck('stage 3 reports the target pushes', 'push(es) by the target' in out, True)
         ck('stage 3 reports decision chains', 'decision chain' in out, True)
         led = json.load(open(os.path.join(st, 'reconcile.json')))
         ck('stage 3 records which target it replayed against',
@@ -796,13 +823,15 @@ def test_cli_all_stages():
         ck('an adjudication is recorded with its evidence',
            ((led.get('adjudications') or {}).get('D2') or {}).get('evidence'),
            'never named to him; nothing of his to read')
-        rc, out = run('--stage', '3', '--proj', d, '--self-prefix', '80f99b89', '--target-id', 'local_target')
+        rc, out = run('--stage', '3', '--proj', d, '--self-prefix', '80f99b89', '--target-id', 'local_target', *TGT)
         led = json.load(open(os.path.join(st, 'reconcile.json')))
         ck('stage 3 applies the recorded adjudication',
            ((led['stage3']['chains'].get('D2') or {}).get('adjudication') or {}).get('put'), 'none')
         wdsh = open(os.path.join(here, 'wd.sh')).read()
         ck('wd.sh passes the configured target to reconcile',
            bool(re.search(r'reconcile\) exec .*--target "\$TARGET"', wdsh)), True)
+        ck('wd.sh passes my session id and the target repository too',
+           bool(re.search(r'reconcile\) exec .*--self-id "\$SELF" --target-repo "\$\(cfg repo\)"', wdsh)), True)
         return fails
     finally:
         shutil.rmtree(d, ignore_errors=True)
@@ -870,29 +899,25 @@ def test_remaining_units():
         ck('cite returns the record at that line', isinstance(rec_, dict), True)
         ck('cite gives back its timestamp', bool(rec_.get('timestamp')), True)
 
-        # claimed_commits(): shas I asserted in my own words
+        # hex_items(): every hex token I wrote that could name a commit
         txt = [{'ts': 't1', 'text': 'landed as `2dce8fc` and pushed'},
                {'ts': 't2', 'text': 'see 46beebdf0c0cc1016184c8cf5863f5a3c4e1ac1d for detail'},
                {'ts': 't3', 'text': 'the year 2026 and 1234567 are not shas I claimed'},
                {'ts': 't4', 'text': 'no hex here at all'}]
-        cc = R.claimed_commits(txt)
-        shas = {c['sha'] for c in cc}
+        hx = R.hex_items(txt, 'my text')
+        shas = {c['sha'] for c in hx}
         ck('a short sha is found', '2dce8fc' in shas, True)
         ck('a full sha is found', '46beebdf0c0cc1016184c8cf5863f5a3c4e1ac1d' in shas, True)
         ck('a bare decimal number is not taken as a sha', '1234567' in shas, False)
-        ck('prose with no hex yields nothing from that line',
-           any(c['ts'] == 't4' for c in cc), False)
-
-        # verify_commits(): object AND ref
-        res = R.verify_commits(list(cc)[:1], lambda sha: (True, ['origin/main']))
-        ck('a probed commit carries its refs', res[0]['refs'], ['origin/main'])
+        ck('prose with no hex yields nothing from that line', any(c['ts'] == 't4' for c in hx), False)
 
         # every retired duplicate must be GONE, not merely unused: two sources of truth is how
         # the Unknown-type verdicts survived the rewrite
         for gone in ('adjudicate', 'load', 'timeline', '_near', 'stage1', 'stage1_join',
                      'stage3', 'chains', 'ARGFORMS', 'normalize', 'strip_heredocs',
                      'strip_comments', 'strip_echoes', 'expand_loops', 'FORLOOP', 'OPEN_RX',
-                     'CLOSE_RX', 'unresolved_ids', 'item_text', 'outcome'):
+                     'CLOSE_RX', 'unresolved_ids', 'item_text', 'outcome', 'verify_commits',
+                     'claimed_commits'):
             ck('%s is deleted, not left as a second source of truth' % gone,
                hasattr(R, gone), False)
         return fails
@@ -1291,6 +1316,7 @@ def test_decision_chains():
         acts = R.my_actions(numbered, os.path.basename(p), st, d)
         owner, _exc, _peers, _acct = R.owner_messages(recs)
         my_text, sends = R.artifacts(recs)
+        deliver_all(sends)
 
         ck('all four decisions are seen as asked, ids from results',
            sorted(a['id'] for a in acts if a['kind'] == 'open'), ['D1', 'D2', 'D3', 'D4'])
@@ -1358,7 +1384,8 @@ def test_chain_edges():
                 'outcome': oc, 'why': 'result'}
 
     say = lambda ts, text: {'ts': ts, 'text': text}
-    send = lambda ts, msg, to='local_target': {'ts': ts, 'msg': msg, 'to': to}
+    send = lambda ts, msg, to='local_target': {'ts': ts, 'msg': msg, 'to': to,
+                                               'delivery_checked': True, 'delivered': ts}
     dc = lambda acts, owner, mine, sends, adj=None: R.decision_chains(acts, owner, mine, sends,
                                                                       'local_target', adj)
 
@@ -1533,6 +1560,10 @@ def test_real_shapes():
        [('failed', None), ('not_completed', None)])
     ck('sent: a list of ids is matched as a list',
        one('./wd.sh sent F1,F2 b7f7de7d', "recorded sent: ['F1', 'F2']"), [('landed', 'F1,F2')])
+    ck('a keyless `ask` (the script needs ask KEY "question") is a failure',
+       [o for o, _ in one('./wd.sh ask "a question with no key"',
+                          'usage: wd_check.py [-h]\nwd_check.py: error: ask <key> "<the question as sent>"', True)],
+       ['failed'])
     ck('outcome ids are names, not only F-numbers',
        one('./wd.sh outcome LIST-turnover accepted "why"', 'LIST-turnover graded accepted'),
        [('landed', 'LIST-turnover')])
@@ -1607,7 +1638,9 @@ def test_actions_and_chains_real_shapes():
     recs += RS.bash(T(9), './wd.sh queue add "an item that was marked sent and never actually sent"',
                     'queued Q2')
     recs += RS.bash(T(9, 6), './wd.sh sent1 Q2', 'item Q2 marked sent at T')
-    # `answered` with no send in its turn, and one with a send
+    # `answered` discharges ONE send: an earlier `answered` consumed the earlier sends, so the
+    # next has no new send (the real defect: `relayed && answered` with nothing sent); then one with
+    recs += RS.bash(T(9), './wd.sh answered', 'answered at T (delivered message at T)')
     recs += RS.owner_turn(T(10), 'status please')
     recs += RS.bash(T(10, 1), './wd.sh answered', 'answered at T')
     recs += RS.send(T(10, 2), 'here is the status')
@@ -1624,6 +1657,7 @@ def test_actions_and_chains_real_shapes():
         recs_ = [r for _, r in numbered]
         owner, exc, peers, acct = R.owner_messages(recs_)
         my_text, sends = R.artifacts(recs_)
+        deliver_all(sends)
 
         # --- batch delivery + accounting ---
         ck('a batched delivery does not double-count its messages',
@@ -1683,7 +1717,8 @@ def test_actions_and_chains_real_shapes():
         ck('sent1 Q2 marked sent, never sent -> MISSTEER', by('sent1', 'Q2'), ['MISSTEER'])
         ck('sent1 whose result never arrived -> not_completed', by('sent1', 'Q7'), ['not_completed'])
         ans = [x['verdict'] for x in rep if x['verb'] == 'answered']
-        ck('answered with no send in its turn -> MISSTEER, then ok', ans, ['MISSTEER', 'ok'])
+        ck('answered: one send each -- a second with no new send is MISSTEER', ans,
+           ['ok', 'MISSTEER', 'ok'])
         ck('a close that took no effect is no_effect, not ok',
            by('owe done', 'D4'), ['no_effect'])
         ck('every replay verdict is in the declared vocabulary',
@@ -1741,12 +1776,12 @@ def test_repeats_and_peers():
 
     # --- a reply resolves a question only from a session it was SENT to ------------------
     recs = []
-    recs += RS.bash(T(1), './wd.sh ask "what does the target think of the box rule?"',
+    recs += RS.bash(T(1), './wd.sh ask K1 "what does the target think of the box rule?"',
                     'open question K1 registered')
     recs += RS.send(T(1, 5), 'question: what do you think of the box rule?')      # to local_target
     recs += RS.peer_reply(T(2), 'unrelated chatter from another session', frm='local_OTHER')
     recs += RS.bash(T(2, 5), './wd.sh resolved K1', 'resolved K1 (open since T)')
-    recs += RS.bash(T(3), './wd.sh ask "and the head switch rule?"', 'open question K2 registered')
+    recs += RS.bash(T(3), './wd.sh ask K2 "and the head switch rule?"', 'open question K2 registered')
     recs += RS.send(T(3, 5), 'question: and the head switch rule?')
     recs += RS.peer_reply(T(4), 'the head switch rule stands')                     # from local_target
     recs += RS.bash(T(4, 5), './wd.sh resolved K2', 'resolved K2 (open since T)')
@@ -1754,12 +1789,21 @@ def test_repeats_and_peers():
     acts = R.my_actions(numbered, 'f', '/x/state', '/x')
     _o, _e, peers, _a = R.owner_messages(recs)
     my_text, sends = R.artifacts(recs)
-    rep = R.landed_replay(acts, R.turn_starts(numbered), my_text, sends, peers, {}, 'local_target')
+    deliver_all(sends, peers)
+    rep = R.landed_replay(acts, R.turn_starts(numbered), my_text, sends, peers, {}, 'local_target',
+                          ttexts=[], owner=_o)
     got = {x['id']: x['verdict'] for x in rep if x['verb'] == 'resolved'}
+    k2 = [a for a in acts if a['verb'] == 'resolved' and a.get('id') == 'K2'][0]
     ck('a send records where it went', [x.get('to') for x in sends], ['local_target', 'local_target'])
     ck('each peer reply is recorded once, not once per channel', len(peers), 2)
     ck('a reply from a session never sent to does not resolve', got.get('K1'), 'MISSTEER')
-    ck('a reply from the session it was sent to resolves', got.get('K2'), 'ok')
+    ck('a reply from the session it was sent to is a CANDIDATE answer: read, not matched',
+       ('K2' in got, (k2.get('needs') or '').startswith('a reading')), (False, True))
+    rep2 = R.landed_replay(acts, R.turn_starts(numbered), my_text, sends, peers, {}, 'local_target',
+                           ttexts=[], owner=_o,
+                           readings={R.action_key(k2): {'as': 'yes', 'evidence': 'it says the rule stands'}})
+    ck('and once read as answering it, it resolves', [x['verdict'] for x in rep2 if x.get('id') == 'K2'
+                                                       and x['verb'] == 'resolved'], ['ok'])
     return fails
 
 
@@ -1788,7 +1832,7 @@ def test_sends_to_target():
     recs += RS.owner_turn(T(4), 'and the second')
     recs += RS.send(T(4, 1), 'OWNER: ' + ITEM2)
     recs += RS.bash(T(4, 2), './wd.sh sent1 Q2', 'item Q2 marked sent at T')
-    recs += RS.bash(T(5), './wd.sh ask "is the box held once acquired?"', 'open question K1 registered')
+    recs += RS.bash(T(5), './wd.sh ask K1 "is the box held once acquired?"', 'open question K1 registered')
     recs += RS.owner_turn(T(6), 'nudge them')
     recs += RS.send(T(6, 1), 'nudge: is the box held once acquired?', to='local_OTHER')
     recs += RS.bash(T(6, 2), './wd.sh nudged K1', 'nudged K1 (1 resend(s)); due again')
@@ -1810,7 +1854,9 @@ def test_sends_to_target():
     acts = R.my_actions(numbered, 'f', '/x/state', '/x')
     owner, _e, peers, _a = R.owner_messages(recs)
     my_text, sends = R.artifacts(recs)
-    rep = R.landed_replay(acts, R.turn_starts(numbered), my_text, sends, peers, {}, 'local_target')
+    deliver_all(sends, peers)
+    rep = R.landed_replay(acts, R.turn_starts(numbered), my_text, sends, peers, {}, 'local_target',
+                          ttexts=[], owner=owner)
     by = lambda verb, ident: [x['verdict'] for x in rep if x['verb'] == verb and x.get('id') == ident]
     ck('sent1 whose text went to ANOTHER session -> MISSTEER', by('sent1', 'Q1'), ['MISSTEER'])
     ck('and its reason names where the text went',
@@ -1832,6 +1878,264 @@ def test_sends_to_target():
     ck('with no target both refuse by name, never accept any send', raised, [True, True])
     return fails
 
+
+
+def test_readings_and_scope():
+    """What a transcript can establish is a FACT; whether a send carried a question, or anything
+    answered one, is READ. And one state has one spelling, and a hook of another state is no
+    rival. Every case here is a form the real record got wrong."""
+    import copy, importlib.util
+    fails = []
+    def ck(name, got, want):
+        ok = got == want
+        print('%-56s %s%s' % (name, 'PASS' if ok else 'FAIL',
+                              '' if ok else '  got=%r want=%r' % (got, want)))
+        if not ok:
+            fails.append(name)
+
+    T = lambda h, m=0, s=0: '2026-09-10T%02d:%02d:%02dZ' % (h, m, s)
+    TGT = 'local_target'
+    def act(verb, ident, ts, kind='close', **kw):
+        return dict({'verb': verb, 'id': ident, 'ts': ts, 'kind': kind, 'state': 'live',
+                     'outcome': 'landed', 'why': 'result', 'cite': 'f:%s' % ts}, **kw)
+    S = lambda ts, msg, when=None, checked=True: {'ts': ts, 'msg': msg, 'to': TGT,
+                                                  'delivery_checked': checked, 'delivered': when}
+    Q = 'Contract line 652 defines the switch line as T; the harness calls S the switch line.'
+
+    # --- nudged: the real shape -- the question carried in OTHER WORDS ---------------------------
+    acts = [act('ask', 'R10', T(1), kind='open', store='open_questions', text=Q, text_resolved=True),
+            act('nudged', 'R10', T(2, 5))]
+    para = [S(T(2, 1), '=== R10 -- the harness calls S the switch line, the contract says T ===', T(2, 1, 1))]
+    def run(a_, s_, **kw):
+        a_ = copy.deepcopy(a_)
+        r_ = R.landed_replay(a_, [T(1), T(2)], [], s_, [], {}, TGT, **kw)
+        return [x['verdict'] for x in r_ if x['verb'] == 'nudged'], [x.get('needs') for x in a_ if x['verb'] == 'nudged']
+    ck('nudge carried in other words -> a reading owed, NOT MISSTEER', run(acts, para)[0], [])
+    ck('the reading owed says what to read and how', 'a reading' in (run(acts, para)[1][0] or ''), True)
+    k = R.action_key(acts[1])
+    ck('read yes -> ok', run(acts, para, readings={k: {'as': 'yes', 'evidence': 'R10 restated'}})[0], ['ok'])
+    ck('read no -> MISSTEER', run(acts, para, readings={k: {'as': 'no', 'evidence': 'another subject'}})[0], ['MISSTEER'])
+    ck('a verbatim copy settles it with no reading', run(acts, [S(T(2, 1), 'nudge: ' + Q, T(2, 1, 1))])[0], ['ok'])
+    ck('a reading of the wrong verb value is not a reading',
+       run(acts, para, readings={k: {'as': 'commit', 'evidence': 'x'}})[0], [])
+    undelivered = [S(T(2, 1), '=== R10 restated ===', None)]
+    ck('FACTS BEAT READINGS: "yes" cannot make an undelivered send arrive',
+       run(acts, undelivered, readings={k: {'as': 'yes', 'evidence': 'it says R10'}})[0], ['MISSTEER'])
+    both = para + [S(T(2, 2), 'another send, never checked', None, checked=False)]
+    ck('"no" cannot close over a send never checked -> still owed',
+       run(acts, both, readings={k: {'as': 'no', 'evidence': 'x'}})[0], [])
+    ck('nothing sent in the window -> MISSTEER (a fact)', run(acts, [])[0], ['MISSTEER'])
+    ck('a send before the ask is outside the window', run(acts, [S(T(0, 30), 'nudge: ' + Q, T(0, 30, 1))])[0], ['MISSTEER'])
+    two = [act('ask', 'K1', T(1), kind='open', text='q one', text_resolved=True, cite='f:1'),
+           act('ask', 'K2', T(1), kind='open', text='q two', text_resolved=True, cite='f:1'),
+           act('nudged', 'K1', T(2, 5), cite='f:9'), act('nudged', 'K2', T(2, 5), cite='f:9')]
+    ck('two actions of ONE command have different reading keys',
+       R.action_key(two[2]) != R.action_key(two[3]), True)
+    same = copy.deepcopy(acts)
+    R.landed_replay(same, [T(1), T(2)], [], para, [], {}, TGT)
+    first = same[1].get('needs') or ''
+    R.landed_replay(same, [T(1), T(2)], [], para, [], {}, TGT, readings={k: {'as': 'yes', 'evidence': 'R10'}})
+    ck('a later replay with the reading clears the owed note on the action',
+       (first.startswith('a reading'), 'needs' in same[1]), (True, False))
+
+    # --- an id opened again: each action against the LATEST open at or before it ------------------
+    ra = [act('ask', 'SK', T(1), kind='open', text='does the detector see both directions?', text_resolved=True),
+          act('nudged', 'SK', T(2, 5)),
+          act('resolved', 'SK', T(3)),
+          act('ask', 'SK', T(4), kind='open', text='reopened: is it symmetric now?', text_resolved=True),
+          act('nudged', 'SK', T(5, 5))]
+    rsn = [S(T(2, 1), 'nudge: does the detector see both directions?', T(2, 1, 1)),
+           S(T(5, 1), 'nudge: reopened: is it symmetric now?', T(5, 1, 1))]
+    a_ = copy.deepcopy(ra)
+    r_ = R.landed_replay(a_, [T(1), T(2), T(3), T(4), T(5)], [], rsn, [], {}, TGT,
+                         ttexts=[{'ts': T(2, 30), 'text': 'it sees both directions now', 'uuid': 'u'}], owner=[])
+    got = [(x['verb'], x['ts'], x['verdict']) for x in r_ if x['verb'] in ('nudged', 'resolved')]
+    ck('a RE-ASKED question: its earlier nudge is judged against the earlier ask',
+       [g for g in got if g[1] == T(2, 5)], [('nudged', T(2, 5), 'ok')])
+    ck('and its earlier close owes a reading, not "nothing after it was asked"',
+       (T(3) in [g[1] for g in got], (a_[2].get('needs') or '').startswith('a reading')), (False, True))
+    ck('the later nudge is judged against the later ask',
+       [g for g in got if g[1] == T(5, 5)], [('nudged', T(5, 5), 'ok')])
+    rm = [act('queue add', 'Q1', T(1), kind='open', store='owner_queue', text='the first item text', text_resolved=True),
+          act('queue add', 'Q1', T(3), kind='open', store='owner_queue', text='the re-minted item text', text_resolved=True),
+          act('sent1', 'Q1', T(4))]
+    r_ = R.landed_replay(copy.deepcopy(rm), [T(1), T(3), T(4)], [],
+                         [S(T(1, 30), 'OWNER: the first item text', T(1, 30, 1))], [], {}, TGT)
+    ck('a RE-MINTED id: a send before the re-mint does not satisfy the later sent1',
+       [x['verdict'] for x in r_ if x['verb'] == 'sent1'], ['MISSTEER'])
+
+    # --- answered: a send SINCE THE PREVIOUS answered, not "in the same turn" ------------------------
+    aa = [act('answered', None, T(3, 5), kind='mark'), act('answered', None, T(4, 5), kind='mark'),
+          act('answered', None, T(6, 5), kind='mark')]
+    asn = [S(T(3, 1), 'a reply to the target', T(3, 1, 1)), S(T(5, 1), 'another reply', T(5, 1, 1))]
+    starts_a = [T(3), T(3, 3), T(4), T(4, 3), T(5), T(6), T(6, 3)]   # each marked in the turn after its send
+    r_ = R.landed_replay(copy.deepcopy(aa), starts_a, [], asn, [], {}, TGT)
+    got = {x['ts']: x['verdict'] for x in r_ if x['verb'] == 'answered'}
+    ck('answered marked in the turn AFTER its send -> ok (the real shape)', got.get(T(3, 5)), 'ok')
+    ck('a second answered with no new send -> MISSTEER (one send, one answered)', got.get(T(4, 5)), 'MISSTEER')
+    ck('a later answered after a new send -> ok', got.get(T(6, 5)), 'ok')
+
+    # --- relayed: what I told the owner is a candidate relay of the turn it names -------------------
+    rl = [act('relayed', T(7, 0, 30), T(7, 5), kind='mark')]
+    rv = lambda texts, **kw: [x['verdict'] for x in R.landed_replay(copy.deepcopy(rl), [T(7)], texts, [], [], {}, TGT, **kw)
+                              if x['verb'] == 'relayed']
+    ck('relayed: what I told the owner is a CANDIDATE relay -- read, not assumed',
+       rv([{'ts': T(7, 2), 'text': 'the target finished the census'}]), [])
+    ck('relayed: only text BEFORE the turn it names -> MISSTEER', rv([{'ts': T(7, 0, 10), 'text': 'status'}]), ['MISSTEER'])
+    ck('relayed: read yes -> ok',
+       rv([{'ts': T(7, 2), 'text': 'x'}], readings={R.action_key(rl[0]): {'as': 'yes', 'evidence': 'it relays the census'}}),
+       ['ok'])
+
+    # --- resolved: the answer is usually in the TARGET'S OWN words ---------------------------------
+    racts = [act('ask', 'PC', T(1), kind='open', text='what is the coverage figure?', text_resolved=True),
+             act('resolved', 'PC', T(3))]
+    def rrun(**kw):
+        a_ = copy.deepcopy(racts)
+        r_ = R.landed_replay(a_, [T(1)], [], [], [], {}, TGT, **kw)
+        return [x['verdict'] for x in r_ if x['verb'] == 'resolved'], a_[1].get('needs') or ''
+    tt = [{'ts': T(2), 'text': 'the coverage figure is 23.7%, not 92.5%', 'uuid': 'u1'}]
+    ck('an answer in the target\'s own words, no reply -> a reading, NOT MISSTEER',
+       rrun(ttexts=tt, owner=[])[0], [])
+    ck('and it names the target\'s words as the candidate', 'its words' in rrun(ttexts=tt, owner=[])[1], True)
+    ck('his words are candidates too', 'his words' in rrun(ttexts=[], owner=[{'ts': T(2), 'text': 'drop it'}])[1], True)
+    ck('read yes -> ok', rrun(ttexts=tt, owner=[], readings={R.action_key(racts[1]): {'as': 'yes', 'evidence': '23.7'}})[0], ['ok'])
+    ck('nothing at all in the window, all sources read -> MISSTEER', rrun(ttexts=[], owner=[])[0], ['MISSTEER'])
+    ck('the target\'s words AFTER the close are not candidates',
+       rrun(ttexts=[{'ts': T(4), 'text': 'late', 'uuid': 'u'}], owner=[])[0], ['MISSTEER'])
+    ck('sources never read -> owed, never a verdict from not looking',
+       (rrun()[0], 'never looked at' in rrun()[1]), ([], True))
+
+    # --- the target's words are collected from its transcript --------------------------------------
+    trec = [{'type': 'assistant', 'timestamp': T(2), 'uuid': 'u9', 'message': {'content': [
+                {'type': 'text', 'text': 'the answer, in its own turn'},
+                {'type': 'text', 'text': '   '},
+                {'type': 'tool_use', 'name': 'Bash', 'input': {'command': 'ls'}}]}},
+            {'type': 'user', 'timestamp': T(2, 1), 'message': {'content': 'not its words'}}]
+    ck('target_view keeps the target\'s own text, not blanks or tool calls',
+       [x['text'] for x in R.target_view(trec, 'local_self')['texts']], ['the answer, in its own turn'])
+
+    # --- one state, one spelling ------------------------------------------------------------------------
+    here = os.getcwd()
+    st = lambda live, cwd: [x['state'] for x in R.invocations('./wd.sh ask K1 "q"', live, cwd)]
+    ck('a RELATIVE live state is the same state as its absolute spelling', st('state', here), ['live'])
+    ck('the absolute spelling', st(os.path.join(here, 'state'), here), ['live'])
+    ck('another directory is scratch', st(os.path.join(here, 'elsewhere', 'state'), here), ['scratch'])
+    real_tmp = os.path.realpath('/tmp')
+    if real_tmp != '/tmp':
+        ck('a symlinked spelling (/tmp vs %s) is one state, from either side' % real_tmp,
+           (st('/tmp/wdx/state', os.path.join(real_tmp, 'wdx')),
+            st(os.path.join(real_tmp, 'wdx', 'state'), '/tmp/wdx')), (['live'], ['live']))
+    ck('a command with no known directory stays scratch, never guessed live',
+       [x['state'] for x in R.invocations('./wd.sh ask K1 "q"', os.path.join(here, 'state'), None)], ['scratch'])
+
+    # --- a hook of ANOTHER state is no rival -----------------------------------------------------------
+    spec = importlib.util.spec_from_file_location(
+        'wd_reconcile_t', os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'wd_reconcile.py'))
+    C = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(C)
+    mine = os.path.join(real_tmp, 'recon-a', 'state')
+    ps = '\n'.join(['901 1 /usr/bin/python3 /w/wd_wait.py --target t --state-dir %s --stale-after 1800' % '/somewhere/else/state',
+                    '902 1 /usr/bin/python3 /w/wd_wake.py --state-dir %s --due' % mine,
+                    '903 1 /usr/bin/python3 /w/wd_check.py owed',
+                    '904 1 /usr/bin/python3 /w/wd_reconcile.py --state-dir %s --stage 3' % mine,
+                    '905 1 /bin/zsh -c ls'])
+    got = sorted(pid for pid, _ in C.rival_hooks(mine, ps_out=ps))
+    ck('rivals: the same state and the unnamed one; not another state, not a reconcile', got, ['902', '903'])
+    ck('the /tmp spelling of the same state is still a rival',
+       sorted(pid for pid, _ in C.rival_hooks('/tmp/recon-a/state' if real_tmp != '/tmp' else mine, ps_out=ps)), ['902', '903'])
+    ck('with no state given, every hook is a rival (never narrowed by a guess)',
+       sorted(pid for pid, _ in C.rival_hooks(None, ps_out=ps)), ['901', '902', '903'])
+    return fails
+
+
+def test_cli_readings():
+    """A reading goes in through the CLI and decides the action at stage 3 -- end to end, on a
+    synthetic record, target transcript and target repository. The case is the real shape: a
+    nudge that carried its question in other words (50 of them on the real record)."""
+    import subprocess
+    import realshape as RS
+    fails = []
+    def ck(name, got, want):
+        ok = got == want
+        print('%-56s %s%s' % (name, 'PASS' if ok else 'FAIL',
+                              '' if ok else '  got=%r want=%r' % (got, want)))
+        if not ok:
+            fails.append(name)
+
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    d = tempfile.mkdtemp(prefix='recon-read-')
+    try:
+        T = lambda h, m=0: '2026-09-11T%02d:%02d:00Z' % (h, m)
+        Q = 'is the box held once it is acquired, or re-measured every unit?'
+        PARA = '=== K1, asked an hour ago: does the box stay held after acquisition? ==='
+        recs = []
+        recs += RS.bash(T(6), './wd.sh ask K1 "%s"' % Q, 'open question K1 registered')
+        recs += RS.send(T(6, 30), PARA)
+        recs += RS.bash(T(6, 31), './wd.sh nudged K1', 'nudged K1 (1 resend(s)); due again')
+        recs += RS.bash(T(6, 40), './wd.sh sent Q5 m1 >/dev/null', '')
+        mine = os.path.join(d, '80f99b89-readings.jsonl')
+        RS.write(mine, recs)
+        st = os.path.join(d, 'state')
+        os.makedirs(st)
+        json.dump({'owner_queue': [], 'owner_decisions': {}, 'open_questions': {'K1': {'text': Q}}},
+                  open(os.path.join(st, 'state.json'), 'w'))
+        tt = os.path.join(d, 'target.jsonl')
+        RS.write(tt, RS.target_receives(T(6, 30), 'local_self', PARA))
+        tr = os.path.join(d, 'target_repo')
+        make_target_repo(tr)
+
+        numbered, _ = R.read_records(mine)
+        pre = R.resolve_from_evidence(R.my_actions(numbered, 'x', st, d), [r for _, r in numbered],
+                                      json.load(open(os.path.join(st, 'state.json'))))
+        ck('the fixture holds a PENDING action with other needs',
+           any(a['outcome'] is None and a.get('needs') for a in pre), True)
+
+        def run(*args):
+            r = subprocess.run([sys.executable, os.path.join(here, 'wd_reconcile.py'),
+                                '--state-dir', st, '--cwd', d] + list(args),
+                               capture_output=True, text=True)
+            return r.returncode, r.stdout + r.stderr
+        led = lambda: json.load(open(os.path.join(st, 'reconcile.json')))
+        S3 = ['--stage', '3', '--proj', d, '--self-prefix', '80f99b89', '--target-id', 'local_target',
+              '--target-transcript', tt, '--target-repo', tr, '--self-id', 'local_self']
+        run(T(5), T(8), '--init')
+        rc1, out1 = run('--stage', '1', '--proj', d, '--self-prefix', '80f99b89')
+        ck('stage 1 runs with a PENDING action in the record (never a None key)',
+           ('Traceback' in out1, (led().get('stage1') or {}).get('by_outcome', {}).get('pending', 0) > 0),
+           (False, True))
+        rc, out = run(*S3)
+        owed = led()['stage3'].get('action_readings_owed') or []
+        ck('stage 3 owes a reading of the nudge carried in other words',
+           'nudged' in [x['verb'] for x in owed], True)
+        ck('only actions owing a READING are listed (a pending one is not)',
+           [x['verb'] for x in owed], ['nudged'])
+        ck('and the outstanding list says an action is to be read', 'action(s) to read' in out, True)
+        key = owed[0]['key'] if owed else 'none'
+
+        rc, out = run('--read-action', key, '--as', 'no')
+        ck('a reading without --evidence is refused', (rc != 0, 'evidence' in out), (True, True))
+        rc, out = run('--read-action', key, '--as', 'commit', '--evidence', 'x')
+        ck('a reading as "commit" is refused', (rc != 0, 'yes|no' in out), (True, True))
+        rc, out = run('--read-action', 'x:1#0/nudged/K9', '--as', 'no', '--evidence', 'x')
+        ck('a reading of an action stage 3 never listed is refused',
+           (rc != 0, 'owes no reading' in out), (True, True))
+        ck('no refused reading was recorded', led().get('action_readings') or {}, {})
+
+        run('--read-action', key, '--as', 'no', '--evidence', 'the 06:30 send is about another subject')
+        ck('a reading is recorded with its evidence', (led().get('action_readings') or {}).get(key, {}).get('as'), 'no')
+        rc, out = run(*S3)
+        s3 = led()['stage3']
+        nf = [f for f in s3['findings'] if f['verb'] == 'nudged']
+        ck('a reading recorded through the CLI decides the action at stage 3',
+           (s3.get('action_readings_owed'), [f['verdict'] for f in nf], all(f['why'].startswith('read:') for f in nf)),
+           ([], ['MISSTEER'], True))
+        run('--read-action', key, '--as', 'yes', '--evidence', 'it restates K1 in other words')
+        run(*S3)
+        ck('and a "yes" reading, recorded later, clears the finding',
+           [f['verdict'] for f in led()['stage3']['findings'] if f['verb'] == 'nudged'], [])
+        return fails
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def test_shell_reading():
@@ -2111,6 +2415,248 @@ def test_snapshot_resolver():
     return fails
 
 
+def make_target_repo(root):
+    """A throwaway git repository built by the test: reproducible anywhere, no global git config,
+    fixed author and dates. Returns (sha on main, sha on NO branch)."""
+    import subprocess
+    env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
+               GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@t', GIT_COMMITTER_NAME='t',
+               GIT_COMMITTER_EMAIL='t@t', GIT_AUTHOR_DATE='2026-09-10T00:00:00Z',
+               GIT_COMMITTER_DATE='2026-09-10T00:00:00Z')
+    g = lambda *a: subprocess.run(['git', '-C', root] + list(a), env=env, capture_output=True,
+                                  text=True, check=True).stdout.strip()
+    os.makedirs(root, exist_ok=True)
+    g('init', '-q'); g('checkout', '-q', '-b', 'main')
+    open(os.path.join(root, 'a'), 'w').write('1'); g('add', 'a'); g('commit', '-q', '-m', 'one')
+    on_main = g('rev-parse', 'HEAD')
+    g('checkout', '-q', '-b', 'side')
+    open(os.path.join(root, 'b'), 'w').write('2'); g('add', 'b'); g('commit', '-q', '-m', 'two')
+    orphan = g('rev-parse', 'HEAD')
+    g('checkout', '-q', 'main'); g('branch', '-q', '-D', 'side')
+    return on_main, orphan
+
+
+def test_target_side():
+    """The TARGET's transcript and repository decide whether my actions reached it and whether
+    commits exist -- my own transcript can only say a send was accepted. Positive and negative
+    cases for every check; everything is synthesized here."""
+    import realshape as RS
+    fails = []
+    def ck(name, got, want):
+        ok = got == want
+        print('%-56s %s%s' % (name, 'PASS' if ok else 'FAIL',
+                              '' if ok else '  got=%r want=%r' % (got, want)))
+        if not ok:
+            fails.append(name)
+
+    ME, TGT = 'local_self', 'local_target'
+    T = lambda h, m=0, s=0: '2026-09-10T%02d:%02d:%02dZ' % (h, m, s)
+    S = lambda ts, msg, to=TGT: {'ts': ts, 'msg': msg, 'to': to}
+
+    # --- the target's transcript: how my messages arrive ---------------------------------
+    trecs = []
+    trecs += RS.target_receives(T(1, 0, 5), ME, 'message A, sent while the target was idle')
+    trecs += RS.target_receives(T(2, 0, 5), ME, 'message B, sent while the target was working', midturn=True)
+    trecs += RS.target_receives_batch(T(3, 0, 5), ME, ['message C, first of a batch', 'message D, second of a batch'])
+    trecs += RS.target_queued_only(T(4, 0, 5), ME, 'message E, queued and never delivered')
+    trecs += RS.target_receives(T(5, 0, 5), ME, 'yes')
+    trecs += RS.target_receives(T(0, 30), ME, 'message F, delivered before I ever sent it')
+    trecs += RS.send(T(6), 'the reply the target really sent', to=ME)
+    trecs += RS.send(T(6, 30), 'a reply it sent only AFTER mine shows it', to=ME)
+    trecs += RS.target_receives(T(9, 0, 5), ME, 'please re-send: is the box held once acquired?')
+    trecs += RS.target_receives(T(10, 0, 5), ME, 'an unrelated status note, nothing about the box')
+    trecs += RS.bash(T(7), 'git push origin main',
+                     'To github.com:x/y.git\n   1111111..%s  main -> main' % 'PLACEHOLDER')
+    view = R.target_view(trecs, ME)
+    ck('deliveries: idle, mid-turn and both messages of a batch are read',
+       sorted(d['body'] for d in view['deliveries'] if d['body'].startswith('message ')),
+       ['message A, sent while the target was idle', 'message B, sent while the target was working',
+        'message C, first of a batch', 'message D, second of a batch',
+        'message F, delivered before I ever sent it'])
+    ck('an enqueue alone is NOT a delivery', any('message E' in d['body'] for d in view['deliveries']), False)
+    ck('but it is recorded as queued', any('message E' in e['body'] for e in view['enqueued']), True)
+    ck("the target's own sends to me are read", [s['msg'] for s in view['sends_to_me']],
+       ['the reply the target really sent', 'a reply it sent only AFTER mine shows it'])
+
+    sends = [S(T(1), 'message A, sent while the target was idle'),
+             S(T(2), 'message B, sent while the target was working'),
+             S(T(3), 'message C, first of a batch'), S(T(3), 'message D, second of a batch'),
+             S(T(4), 'message E, queued and never delivered'),
+             S(T(4, 30), 'message A, reworded before sending'),
+             S(T(5), 'yes'), S(T(5, 0, 1), 'yes'),
+             S(T(1, 0), 'message F, delivered before I ever sent it'),
+             S(T(1, 10), 'message A, sent while the target was idle', to='local_OTHER')]
+    R.annotate_delivery(sends, TGT, view)
+    got = [bool(s.get('delivered')) for s in sends[:9]]
+    ck('delivered: idle, mid-turn, both of a batch', got[:4], [True, True, True, True])
+    ck('NOT delivered: queued only', got[4], False)
+    ck('NOT delivered: a paraphrase is not the message', got[5], False)
+    ck('two identical sends and one delivery: only the first is delivered', got[6:8], [True, False])
+    ck('a delivery BEFORE the send is not its delivery', got[8], False)
+    ck('a send to another session is left alone', 'delivery_checked' in sends[9], False)
+
+    peers = [{'ts': T(6, 0, 3), 'from': TGT, 'text': 'the reply the target really sent'},
+             {'ts': T(6, 10), 'from': TGT, 'text': 'a reply it sent only AFTER mine shows it'},
+             {'ts': T(6, 20), 'from': TGT, 'text': 'a reply the target never sent at all'}]
+    R.annotate_peers(peers, TGT, view)
+    ck('a reply the target really sent is verified', peers[0]['verified'], True)
+    ck('a reply it sent only after mine shows it is NOT', peers[1]['verified'], False)
+    ck('a reply the target never sent is NOT', peers[2]['verified'], False)
+
+    # --- the replay, with delivery required ----------------------------------------------
+    ITEM = 'the owner item that must reach the target verbatim'
+    def act(verb, ident, ts, kind='close', **kw):
+        return dict({'verb': verb, 'id': ident, 'ts': ts, 'kind': kind, 'state': 'live',
+                     'outcome': 'landed', 'why': 'result', 'cite': 'f:%s' % ts}, **kw)
+    dv = lambda s, when: dict(s, delivery_checked=True, delivered=when)
+    starts = [T(1), T(2), T(3), T(4), T(5), T(8), T(9), T(10), T(11), T(12)]
+    acts = [act('queue add', 'Q1', T(1), kind='open', store='owner_queue', text=ITEM, text_resolved=True),
+            act('sent1', 'Q1', T(2, 5)),
+            act('queue add', 'Q2', T(3), kind='open', store='owner_queue', text=ITEM + ' two', text_resolved=True),
+            act('sent1', 'Q2', T(3, 5)),
+            act('queue add', 'Q3', T(4), kind='open', store='owner_queue', text=ITEM + ' three', text_resolved=True),
+            act('sent1', 'Q3', T(4, 5)),
+            act('ask', 'K1', T(8), kind='open', store='open_questions', text='is the box held once acquired?', text_resolved=True),
+            act('nudged', 'K1', T(9, 5)), act('nudged', 'K1', T(10, 5)),
+            act('answered', None, T(11, 5), kind='mark'), act('answered', None, T(12, 5), kind='mark')]
+    rs = [dv(S(T(1, 30), 'OWNER: ' + ITEM), T(1, 30, 2)),              # sent one turn, marked the next
+          dv(S(T(3, 1), 'OWNER: ' + ITEM + ' two'), None),             # never reached the target
+          S(T(4, 1), 'OWNER: ' + ITEM + ' three'),                      # never checked
+          dv(S(T(9, 1), 'please re-send: is the box held once acquired?'), T(9, 1, 2)),
+          dv(S(T(10, 1), 'an unrelated status note, nothing about the box'), T(10, 1, 2)),
+          dv(S(T(11, 1), 'here is the status'), T(11, 1, 2)),
+          dv(S(T(12, 1), 'here is another status'), None)]
+    rep = R.landed_replay(acts, starts, [], rs, [], {}, TGT)
+    by = {(x['verb'], x.get('id'), x['ts']): (x['verdict'], x['why']) for x in rep}
+    ck('sent1: sent one turn, marked the next, received -> ok', by[('sent1', 'Q1', T(2, 5))][0], 'ok')
+    ck('sent1: its send never reached the target -> MISSTEER', by[('sent1', 'Q2', T(3, 5))][0], 'MISSTEER')
+    ck('and the reason says the target never received it', 'never received' in by[('sent1', 'Q2', T(3, 5))][1], True)
+    ck('sent1: a send never checked in the target is OUTSTANDING, not ok',
+       (('sent1', 'Q3', T(4, 5)) in by, bool([a for a in acts if a.get('id') == 'Q3' and a['verb'] == 'sent1'][0].get('needs'))),
+       (False, True))
+    ck("nudged: a received send carrying the question -> ok", by[('nudged', 'K1', T(9, 5))][0], 'ok')
+    n2 = [a for a in acts if a['verb'] == 'nudged' and a['ts'] == T(10, 5)][0]
+    ck('nudged: only an unrelated received send -> a READING is owed, not a verdict',
+       (('nudged', 'K1', T(10, 5)) in by, (n2.get('needs') or '').startswith('a reading')), (False, True))
+    ck('and the reading owed names the action by its key', R.action_key(n2) in n2.get('needs', ''), True)
+    for said, want in (('no', 'MISSTEER'), ('yes', 'ok')):
+        rr_ = R.landed_replay([dict(x) for x in acts], starts, [], rs, [], {}, TGT,
+                              readings={R.action_key(n2): {'as': said, 'evidence': 'the 10:01 note'}})
+        ck('nudged: read "%s" -> %s' % (said, want),
+           [x['verdict'] for x in rr_ if x['verb'] == 'nudged' and x['ts'] == T(10, 5)], [want])
+    ck('answered: a received send in its turn -> ok', by[('answered', None, T(11, 5))][0], 'ok')
+    ck('answered: its send never reached the target -> MISSTEER', by[('answered', None, T(12, 5))][0], 'MISSTEER')
+
+    racts = [act('ask', 'K2', T(1), kind='open', store='open_questions', text='q', text_resolved=True),
+             act('resolved', 'K2', T(1, 30)),
+             act('ask', 'K3', T(2), kind='open', store='open_questions', text='q', text_resolved=True),
+             act('resolved', 'K3', T(2, 30))]
+    rsends = [dv(S(T(1, 5), 'q'), T(1, 5, 1)), dv(S(T(2, 5), 'q'), T(2, 5, 1))]
+    rpeers = [{'ts': T(1, 10), 'from': TGT, 'text': 'answer to K2', 'verified': True},
+              {'ts': T(2, 10), 'from': TGT, 'text': 'answer to K3 the target never sent', 'verified': False}]
+    rr = {x['id']: x['verdict'] for x in R.landed_replay(racts, [T(1), T(2)], [], rsends, rpeers, {}, TGT,
+                                                          ttexts=[], owner=[])
+          if x['verb'] == 'resolved'}
+    ck("resolved: a reply the target's transcript shows -> a reading of it is owed",
+       ('K2' in rr, (racts[1].get('needs') or '').startswith('a reading')), (False, True))
+    ck('resolved: a reply the target never sent -> MISSTEER', rr.get('K3'), 'MISSTEER')
+    rr = {x['id']: x['verdict'] for x in R.landed_replay(
+        [dict(x) for x in racts], [T(1), T(2)], [], rsends, rpeers, {}, TGT, ttexts=[], owner=[],
+        readings={R.action_key(racts[1]): {'as': 'yes', 'evidence': '"answer to K2"'},
+                  R.action_key(racts[3]): {'as': 'yes', 'evidence': 'a reading cannot invent a reply'}})
+        if x['verb'] == 'resolved'}
+    ck("resolved: its reply read as answering it -> ok", rr.get('K2'), 'ok')
+    ck('resolved: a "yes" reading cannot rescue a reply the target never sent', rr.get('K3'), 'MISSTEER')
+
+    # --- forwards of his answer must reach the target ------------------------------------
+    ask = {'kind': 'open', 'store': 'owner_decisions', 'verb': 'owe add', 'id': 'D1', 'ts': T(1),
+           'cite': 'c', 'text': 'q', 'text_resolved': True, 'outcome': 'landed', 'why': ''}
+    close = {'kind': 'close', 'verb': 'owe done', 'id': 'D1', 'ts': T(4), 'cite': 'c', 'outcome': 'landed', 'why': ''}
+    his, mine = [{'ts': T(2), 'text': 'D1 - drop the fitted tolerance.'}], [{'ts': T(1, 5), 'text': 'D1 for you'}]
+    adj = {'D1': {'put': T(1, 5), 'answer': T(2)}}
+    fwd = S(T(3), 'OWNER, VERBATIM: D1 - drop the fitted tolerance.')
+    ch = R.decision_chains([ask, close], his, mine, [dv(fwd, T(3, 0, 1))], TGT, adj)
+    ck('a forward the target received completes the chain', ch['D1']['verdicts'], ['complete'])
+    ch = R.decision_chains([ask, close], his, mine, [dv(fwd, None)], TGT, adj)
+    ck('a forward the target never received -> forward_not_delivered', ch['D1']['verdicts'], ['forward_not_delivered'])
+    ch = R.decision_chains([ask, close], his, mine, [fwd], TGT, adj)
+    ck('a forward never checked in the target is OUTSTANDING',
+       (ch['D1']['verdicts'], any('target transcript' in o for o in ch['D1']['outstanding'])), ([], True))
+
+    # --- commits, against a real throwaway repository --------------------------------------
+    d = tempfile.mkdtemp(prefix='recon-target-')
+    try:
+        on_main, orphan = make_target_repo(os.path.join(d, 'repo'))
+        probe = R.git_probe([os.path.join(d, 'repo')])
+        big = 'ab' * 32
+        items = [{'ts': T(1), 'sha': on_main[:7], 'where': 'x'}, {'ts': T(1), 'sha': orphan[:9], 'where': 'x'},
+                 {'ts': T(1), 'sha': 'deadbee', 'where': 'x'}, {'ts': T(1), 'sha': big[:10], 'where': 'x'},
+                 {'ts': T(1), 'sha': '0698b71b5be2', 'where': 'x'}]
+        cls = [c['cls'] for c in R.classify_hashes(items, probe, {big}, {'local_f9ee0f2c-34ef-4494-a1aa-0698b71b5be2'})]
+        ck('a commit on a branch -> on_a_ref', cls[0], 'on_a_ref')
+        ck('a commit on NO branch -> on_no_ref', cls[1], 'on_no_ref')
+        ck('a hex token that is no commit here -> needs reading', cls[2], 'not_a_commit_here')
+        ck('the prefix of a printed file hash -> file_hash', cls[3], 'file_hash')
+        ck('a fragment of a session id -> id_fragment', cls[4], 'id_fragment')
+        refused = False
+        try:
+            R.git_probe([os.path.join(d, 'no-such-repo')])
+        except ValueError as e:
+            refused = 'not a git repository' in str(e)
+        ck('a path that is not a repository is REFUSED, never "not found"', refused, True)
+
+        pushes = [{'ts': T(7), 'old': '1111111', 'new': on_main[:7], 'branch': 'main', 'remote_branch': 'main'},
+                  {'ts': T(7), 'old': '1111111', 'new': on_main[:7], 'branch': 'release', 'remote_branch': 'release'},
+                  {'ts': T(7), 'old': '1111111', 'new': 'feedfac', 'branch': 'main', 'remote_branch': 'main'}]
+        pc = [p['cls'] for p in R.check_pushes(pushes, probe)]
+        ck('a push whose tip is on its branch -> on_its_branch', pc[0], 'on_its_branch')
+        ck('a push naming a branch that does not hold it -> not_on_branch', pc[1], 'not_on_branch')
+        ck('a push of a commit the repo does not have -> not_in_repo', pc[2], 'not_in_repo')
+        forced = R.target_view(RS.bash(T(8), 'git push -f', ' + %s...%s main -> main (forced update)'
+                                       % ('2222222', on_main[:7])), ME)['pushes']
+        ck('a forced push line is read too', [(p['old'], p['branch']) for p in forced], [('2222222', 'main')])
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+    # --- sent / veto / outcome settled from snapshots -------------------------------------
+    def row(h, state, files=None):
+        return {'snapshot': 's%d' % h, 'readable': True, 'at': T(h), 'state': state, 'files': files}
+    def one(a, series):
+        R.resolve_from_snapshots([a], series)
+        return a['outcome']
+    pend = lambda verb, ident, ts: {'verb': verb, 'id': ident, 'ts': ts, 'kind': 'mark', 'state': 'live',
+                                    'outcome': None, 'why': None, 'cite': 'c'}
+    ck('sent: the next snapshot raises the finding at that time -> landed',
+       one(pend('sent', 'F1', T(1, 30)), [row(1, {'proposed': {'F1': {}}}),
+                                          row(2, {'proposed': {}, 'raised': {'k': {'finding_id': 'F1', 'ts': T(1, 30, 1)}}})]), 'landed')
+    ck('sent: still proposed after it -> no_effect',
+       one(pend('sent', 'F1', T(1, 30)), [row(1, {'proposed': {'F1': {}}}), row(2, {'proposed': {'F1': {}}})]), 'no_effect')
+    ck('veto: proposed before, gone after -> landed',
+       one(pend('veto', 'F6', T(1, 30)), [row(1, {'proposed': {'F6': {}}}), row(2, {'proposed': {}})]), 'landed')
+    ck('veto: still proposed after it -> no_effect',
+       one(pend('veto', 'F6', T(1, 30)), [row(1, {'proposed': {'F6': {}}}), row(2, {'proposed': {'F6': {}}})]), 'no_effect')
+    fm = lambda rows: '| id | wake | wake_ts | target_ct | class | status | owner | message |\n' + '\n'.join(rows)
+    ck('outcome: findings.md records its grade at that time -> landed',
+       one(pend('outcome', 'GUARD-claims', T(1, 30)),
+           [row(1, {}, {'findings.md': fm([])}),
+            row(2, {}, {'findings.md': fm(['| GUARD-claims (outcome) | 3 | %s |  | outcome | accepted |  | why |' % T(1, 30, 1)])})]),
+       'landed')
+    ck('outcome: findings.md has no such grade -> no_effect',
+       one(pend('outcome', 'GUARD-claims', T(1, 30)), [row(1, {}, {'findings.md': fm([])}), row(2, {}, {'findings.md': fm([])})]),
+       'no_effect')
+    ck('outcome: the snapshot holds no findings.md -> still pending',
+       one(pend('outcome', 'GUARD-claims', T(1, 30)), [row(1, {}), row(2, {})]), None)
+    # --- a hex token read as meant: settled, or a claimed commit that does not exist ------
+    hs = [{'ts': T(1), 'sha': 'deadbee', 'where': 'x', 'cls': 'not_a_commit_here'},
+          {'ts': T(1), 'sha': 'cafef00', 'where': 'x', 'cls': 'not_a_commit_here'},
+          {'ts': T(1), 'sha': 'abcdef1', 'where': 'x', 'cls': 'not_a_commit_here'}]
+    R.apply_hash_readings(hs, {'deadbee': {'as': 'not-a-commit'}, 'cafef00': {'as': 'commit'}})
+    ck('read as not a commit -> settled', hs[0]['cls'], 'read_not_a_commit')
+    ck('read as a commit that does not exist -> a finding', hs[1]['cls'], 'claimed_commit_missing')
+    ck('unread -> still needs reading', hs[2]['cls'], 'not_a_commit_here')
+    return fails
+
+
 def test_vocabulary():
     """Unknown is not an answer class: everything is answerable from my actions, project state or
     what the owner owes me, so an item the instrument could not settle is WORK OUTSTANDING, and a
@@ -2142,6 +2688,17 @@ def test_vocabulary():
     ck('CONTROL: the scan fires on a planted unknown-type verdict',
        verdict_like(planted), ['undecidable'])
     return fails
+
+
+def deliver_all(sends, peers=()):
+    """For tests whose subject is NOT delivery: every send was received and every reply verified
+    in the target's transcript. Delivery itself is tested, positively and negatively, in
+    test_target_side."""
+    for s in sends:
+        s.update(delivery_checked=True, delivered=s['ts'])
+    for p in peers:
+        p['verified'] = True
+    return sends
 
 
 def _guarded(fn):
@@ -2285,8 +2842,8 @@ def main():
                "            if False:",
                lambda o, c: not all(any(x['text'] == t for x in o) for t in REAL_ITEMS))
         mutate('every state treated as live -> a scratch item is reconciled',
-               "    state = 'live' if (live and state_dir == live) else 'scratch'",
-               "    state = 'live'",
+               "    state = 'live' if (live and state_dir and os.path.isabs(state_dir)\n",
+               "    state = 'live' if True or (live and state_dir and os.path.isabs(state_dir)\n",
                lambda o, c: len(o) > TRUTH['opens'])
         mutate('no success line for `queue clear` -> M7 is lost',
                "    'queue clear': r'queue cleared into message (\\S+)',\n",
@@ -2310,6 +2867,10 @@ def main():
 
         print('\n--- stage 3: landed-replay ---')
         fails.extend(_guarded(test_stage3))
+        print('\n--- readings, the target\'s words, one spelling, scoped rivals ---')
+        fails.extend(_guarded(test_readings_and_scope))
+        print('\n--- a reading through the CLI, end to end ---')
+        fails.extend(_guarded(test_cli_readings))
         print('\n--- stage 4: supersession evidence ---')
         fails.extend(_guarded(test_stage4))
         print('\n--- stage 2: Time Machine (synthesized) ---')
@@ -2346,6 +2907,8 @@ def main():
         fails.extend(_guarded(test_shell_reading))
         print('\n--- stage 2: settling pending actions from snapshots ---')
         fails.extend(_guarded(test_snapshot_resolver))
+        print('\n--- the target side: its transcript and its repository ---')
+        fails.extend(_guarded(test_target_side))
         print('\n--- vocabulary: no unknown-type verdict ---')
         fails.extend(_guarded(test_vocabulary))
 
