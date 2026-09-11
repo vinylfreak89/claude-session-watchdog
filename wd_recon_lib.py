@@ -145,3 +145,252 @@ def adjudicate(actions, art):
                            ('MISSTEER', 'no target output before resolving')
         out.append(dict(a, verdict=verdict, why=why))
     return out
+
+
+# ---------------------------------------------------------------- citation
+
+import hashlib
+
+
+def cite(fname, lineno):
+    """The exact record at (transcript, line). Certainty means the restored bytes ARE the
+    recorded bytes -- not my rendering of them. Owner, 2026-09-11: "you need to be certain of
+    what you are reconstructing." So a restore names a location in the record and the
+    instrument reads it; there is no path that accepts text I typed."""
+    p = os.path.join(PROJ, fname)
+    if not os.path.exists(p):
+        raise ValueError('no such transcript: %s' % fname)
+    with open(p, 'rb') as f:
+        for i, line in enumerate(f, 1):
+            if i == lineno:
+                return json.loads(line)
+    raise ValueError('%s has no line %d' % (fname, lineno))
+
+
+def commands_in(rec):
+    """Every Bash command in a record, in order."""
+    out = []
+    for b in ((rec.get('message') or {}).get('content') or []):
+        if isinstance(b, dict) and b.get('type') == 'tool_use' and b.get('name') == 'Bash':
+            out.append((b.get('input') or {}).get('command', ''))
+    return out
+
+
+# The argument forms that carry the owner's words into a store. A restore extracts the text
+# with these and NEVER by hand; if none matches, it refuses rather than storing a guess.
+ARGFORMS = [
+    re.compile(r"--queue-add\s+(?P<q>['\"])(?P<t>.*?)(?P=q)", re.S),
+    re.compile(r"--owe-add\s+(?P<q>['\"])(?P<t>.*?)(?P=q)", re.S),
+    re.compile(r"\./wd\.sh\s+queue\s+add\s+(?:--urgent\s+)?(?P<q>['\"])(?P<t>.*?)(?P=q)", re.S),
+    re.compile(r"\./wd\.sh\s+owe\s+add\s+(?:--gated-on\s+['\"].*?['\"]\s+)?(?P<q>['\"])(?P<t>.*?)(?P=q)", re.S),
+]
+
+
+def extract_item(cmd):
+    """The verbatim item text a command carried, or None. None means REFUSE, never improvise."""
+    for rx in ARGFORMS:
+        m = rx.search(cmd)
+        if m and m.group('t').strip():
+            return m.group('t')
+    return None
+
+
+def restore_payload(fname, lineno, which=0):
+    """A citation resolved to verbatim bytes plus a hash, so the restore can be re-verified
+    later against the transcript rather than trusted."""
+    rec = cite(fname, lineno)
+    cmds = commands_in(rec)
+    if not cmds:
+        raise ValueError('%s:%d carries no Bash command' % (fname, lineno))
+    if which >= len(cmds):
+        raise ValueError('%s:%d has %d command(s), asked for #%d' % (fname, lineno, len(cmds), which))
+    text = extract_item(cmds[which])
+    if text is None:
+        raise ValueError('%s:%d command #%d carries no recognisable item argument -- REFUSED '
+                         '(no guessing: fix the citation or widen ARGFORMS with a control)'
+                         % (fname, lineno, which))
+    return {'source': '%s:%d#%d' % (fname, lineno, which),
+            'ts': rec.get('timestamp'),
+            'text': text,
+            'sha256': hashlib.sha256(text.encode()).hexdigest(),
+            'cmd_sha256': hashlib.sha256(cmds[which].encode()).hexdigest()}
+
+
+def verify_payload(p):
+    """Re-read the citation and confirm the stored bytes still match. A restore whose source
+    no longer reproduces is not evidence."""
+    try:
+        fresh = restore_payload(*p['source'].split('#')[0].rsplit(':', 1) and
+                                (p['source'].split(':')[0],
+                                 int(p['source'].split(':')[1].split('#')[0]),
+                                 int(p['source'].split('#')[1])))
+    except Exception as e:
+        return False, str(e)
+    return fresh['sha256'] == p['sha256'], fresh['sha256']
+
+
+HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1(.*?)^\2\s*$",
+                     re.S | re.M)
+
+
+def strip_heredocs(cmd):
+    """Remove every heredoc BODY before matching. A command that WRITES a file containing
+    `--owe-add "$*"` is not an invocation of it, and three separate false results came from
+    reading wd.sh's own source as state changes (2026-09-11: 66 matches vs 63 real; four
+    bogus MISSTEERs; a citation that resolved to the literal shell variable `$*`)."""
+    return HEREDOC.sub(lambda m: '<<' + m.group(2) + '\n', cmd)
+
+
+SHELLISH = re.compile(r'^\s*(\$[\*@0-9{]|["\']?\$)')
+
+
+def is_real_item(text):
+    """An item is the owner's words. A shell variable, an empty string, or a fragment shorter
+    than a sentence is a parse artifact -- REFUSE rather than reinstate it."""
+    if not text or SHELLISH.match(text):
+        return False
+    return len(text.strip()) >= 25
+
+
+def selftest():
+    """Controls for the contamination that has produced a wrong answer three times.
+    Each must FAIL if the guard is removed."""
+    ok = True
+    writes = ('cat > wd.sh <<\'EOF\'\n'
+              'owe)    add) exec $PY --owe-add "$*" ;;\n'
+              'EOF\n')
+    if extract_item(strip_heredocs(writes)) is not None:
+        print('FAIL: a file-writing heredoc still reads as an invocation'); ok = False
+    else:
+        print('pass: heredoc body ignored')
+    real = './wd.sh owe add "DOES POSITION ALONE ESTABLISH IDENTITY? Flagged in the contract itself."'
+    got = extract_item(strip_heredocs(real))
+    if got and is_real_item(got):
+        print('pass: a real invocation still extracts (%r...)' % got[:34])
+    else:
+        print('FAIL: a real invocation no longer extracts: %r' % got); ok = False
+    if is_real_item('$*') or is_real_item('') or is_real_item('short'):
+        print('FAIL: a shell variable or fragment passes is_real_item'); ok = False
+    else:
+        print('pass: shell variables and fragments refused')
+    print('SELFTEST %s' % ('PASS' if ok else 'FAIL'))
+    return 0 if ok else 1
+
+
+if __name__ == '__main__':
+    import sys as _s
+    _s.exit(selftest())
+
+
+FORLOOP = re.compile(r'for\s+(\w+)\s+in\s+([^;\n]+?)\s*;\s*do\b(.*?)\bdone\b', re.S)
+
+
+def expand_loops(cmd):
+    """Unroll `for d in D1 D3; do ... $d ...; done` so ids bound to a loop variable are visible.
+
+    Found 2026-09-11 by hunting an id rather than trusting the join: D3 read as
+    'issued but never closed' -- a DROP that would have been reported to the owner -- because
+    its close ran inside a loop and the extractor captured the literal `$d`. An identifier that
+    never appears as a literal is invisible to any pattern over the command text."""
+    def sub(m):
+        var, items, body = m.group(1), m.group(2).split(), m.group(3)
+        out = []
+        for it in items:
+            it = it.strip('"\'')
+            b = body.replace('${%s}' % var, it).replace('$%s' % var, it)
+            out.append(b)
+        return ';'.join(out)
+    prev = None
+    while prev != cmd:
+        prev, cmd = cmd, FORLOOP.sub(sub, cmd)
+    return cmd
+
+
+def normalize(cmd):
+    """The one preprocessing path every matcher must use: heredoc bodies gone, loops unrolled."""
+    return expand_loops(strip_heredocs(cmd))
+
+
+def live_stores(state_dir):
+    """The live stores, read-only. Never the reference for what SHOULD be there -- the store is
+    the thing under repair, and an instrument cannot corroborate itself."""
+    p = os.path.join(state_dir, 'state.json')
+    d = json.load(open(p)) if os.path.exists(p) else {}
+    return {'owner_queue': d.get('owner_queue') or [],
+            'owner_decisions': d.get('owner_decisions') or {},
+            'open_questions': d.get('open_questions') or {},
+            'resolved_questions': d.get('resolved_questions') or {},
+            'owner_queue_sent': d.get('owner_queue_sent') or [],
+            'owner_decision_seq': d.get('owner_decision_seq'),
+            'all_keys': sorted(d.keys()),
+            'raw': d}
+
+
+# ---------------------------------------------------------------- stage 1
+
+OPEN_RX = [
+    (re.compile(r"--queue-add\s+(?P<q>['\"])(?P<t>.*?)(?P=q)", re.S), 'owner_queue'),
+    (re.compile(r"--owe-add\s+(?:--gated-on\s+['\"].*?['\"]\s+)?(?P<q>['\"])(?P<t>.*?)(?P=q)", re.S), 'owner_decisions'),
+    (re.compile(r"\./wd\.sh\s+queue\s+add\s+(?:--urgent\s+)?(?P<q>['\"])(?P<t>.*?)(?P=q)", re.S), 'owner_queue'),
+    (re.compile(r"\./wd\.sh\s+owe\s+add\s+(?:--gated-on\s+['\"].*?['\"]\s+)?(?P<q>['\"])(?P<t>.*?)(?P=q)", re.S), 'owner_decisions'),
+    (re.compile(r"\./wd\.sh\s+ask\s+(?P<q>['\"])(?P<t>.*?)(?P=q)", re.S), 'open_questions'),
+]
+CLOSE_RX = re.compile(
+    r'(?:^|[;&|]\s*|\s)(?:\./wd\.sh\s+(queue clear|sent1|owe done|owe ungate|resolved|closed|nudged)'
+    r'|--(queue-clear|owe-clear|owe-ungate))\b(?:\s+([^\s;&|]+))?')
+
+
+def stage1(self_prefix='80f99b89', proj=None):
+    """CHRONOLOGICAL REPLAY OF MY OWN ACTIONS.
+
+    Owner: "a replay of your entire set of actions to catch things that you steered
+    incorrectly, be they owed info, nudges, queues, owner requests, anything you own."
+
+    Every command passes through normalize() -- heredoc bodies removed, shell loops unrolled --
+    because each of those produced a WRONG ANSWER when it was missing: heredocs read a file
+    being written as state changes (three times), and a loop hid D3's close so it read as a
+    dropped decision. Returns opens, closes and the per-id join. Decides nothing."""
+    root = proj or PROJ
+    p = None
+    for f in sorted(os.listdir(root)):
+        if f.startswith(self_prefix) and f.endswith('.jsonl'):
+            p = os.path.join(root, f)
+    if not p:
+        raise ValueError('no transcript for %s' % self_prefix)
+    opens, closes = [], []
+    for i, line in enumerate(open(p, 'rb'), 1):
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        ts = rec.get('timestamp') or ''
+        for j, raw in enumerate(commands_in(rec)):
+            c = normalize(raw)
+            for rx, store in OPEN_RX:
+                for m in rx.finditer(c):
+                    t = m.group('t')
+                    if is_real_item(t):
+                        opens.append({'ts': ts, 'cite': '%s:%d#%d' % (os.path.basename(p), i, j),
+                                      'store': store, 'text': t,
+                                      'sha256': hashlib.sha256(t.encode()).hexdigest()})
+            for m in CLOSE_RX.finditer(c):
+                verb, arg = (m.group(1) or m.group(2)), m.group(3)
+                closes.append({'ts': ts, 'cite': '%s:%d#%d' % (os.path.basename(p), i, j),
+                               'verb': verb, 'id': (arg or '').strip('"\'') or None})
+    return opens, closes
+
+
+def stage1_join(opens, closes, state_dir):
+    """Which created items are accounted for, and which are candidates for restore."""
+    live = live_stores(state_dir)
+    closed_ids = collections.Counter(c['id'] for c in closes if c['id'])
+    seq = live.get('owner_decision_seq') or 0
+    ids = ['D%d' % n for n in range(1, seq + 1)]
+    never = [i for i in ids if i not in closed_ids]
+    dupes = {i: n for i, n in closed_ids.items() if n > 1 and re.fullmatch(r'D\d+|Q\d+', i or '')}
+    return {'opens': len(opens), 'closes': len(closes),
+            'decision_ids_issued': seq, 'decision_ids_closed': len([i for i in ids if i in closed_ids]),
+            'decision_ids_never_closed': never,
+            'closed_more_than_once': dupes,
+            'live_owner_queue': len(live['owner_queue']),
+            'live_owner_decisions': len(live['owner_decisions'])}
