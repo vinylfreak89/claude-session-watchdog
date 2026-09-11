@@ -784,6 +784,22 @@ def test_cli_all_stages():
         led = json.load(open(os.path.join(st, 'reconcile.json')))
         ck('stage 3 records which target it replayed against',
            (led.get('stage3') or {}).get('target'), 'local_target')
+        # adjudications: the two chain links only his words settle, recorded with evidence
+        rc, out = run('--adjudicate', 'D2', '--put', 'none', '--answer', 'none')
+        ck('an adjudication without --evidence refuses', (rc != 0, 'evidence' in out), (True, True))
+        rc, out = run('--adjudicate', 'D77', '--put', 'none', '--answer', 'none', '--evidence', 'x')
+        ck('an adjudication of a chain stage 3 did not find refuses by name',
+           (rc != 0, 'no chain D77' in out), (True, True))
+        rc, out = run('--adjudicate', 'D2', '--put', 'none', '--answer', 'none',
+                      '--evidence', 'never named to him; nothing of his to read')
+        led = json.load(open(os.path.join(st, 'reconcile.json')))
+        ck('an adjudication is recorded with its evidence',
+           ((led.get('adjudications') or {}).get('D2') or {}).get('evidence'),
+           'never named to him; nothing of his to read')
+        rc, out = run('--stage', '3', '--proj', d, '--self-prefix', '80f99b89', '--target-id', 'local_target')
+        led = json.load(open(os.path.join(st, 'reconcile.json')))
+        ck('stage 3 applies the recorded adjudication',
+           ((led['stage3']['chains'].get('D2') or {}).get('adjudication') or {}).get('put'), 'none')
         wdsh = open(os.path.join(here, 'wd.sh')).read()
         ck('wd.sh passes the configured target to reconcile',
            bool(re.search(r'reconcile\) exec .*--target "\$TARGET"', wdsh)), True)
@@ -1190,6 +1206,13 @@ CHAIN_DECISIONS = [
     ('D4', 'ANSWERED AND STILL OPEN: does position alone establish the head switch identity',
      True, True, True, False),
 ]
+# what the reconciler would record, reading his words in the chain world
+CHAIN_ADJ = {
+    'D1': {'put': '2026-09-10T01:10:00Z', 'answer': '2026-09-10T02:00:00Z'},
+    'D2': {'put': '2026-09-10T05:10:00Z', 'answer': '2026-09-10T06:00:00Z'},
+    'D3': {'put': '2026-09-10T09:10:00Z', 'answer': 'none'},
+    'D4': {'put': '2026-09-10T13:10:00Z', 'answer': '2026-09-10T14:00:00Z'},
+}
 CHAIN_TRUTH = {
     'D1': ['complete'],
     'D2': ['answered_not_forwarded'],
@@ -1276,14 +1299,22 @@ def test_decision_chains():
         ck('his answers are read from queued_command attachments',
            len(owner), sum(1 for x in CHAIN_DECISIONS if x[3]))
 
-        ch = R.decision_chains(acts, owner, my_text, sends, 'local_target')
+        bare = R.decision_chains(acts, owner, my_text, sends, 'local_target')
+        ck('without adjudication every named chain is outstanding',
+           all(any('adjudicate' in o for o in bare[k]['outstanding']) for k in CHAIN_TRUTH), True)
+        ck('D3 was closed before he said anything to it -- a fact, no reading needed',
+           'closed_before_any_reply' in bare['D3']['verdicts'], True)
+        ch = R.decision_chains(acts, owner, my_text, sends, 'local_target', CHAIN_ADJ)
         for did, want in CHAIN_TRUTH.items():
-            ck('%s -> %s' % (did, '+'.join(want)), sorted(ch[did]['verdicts']), sorted(want))
+            ck('adjudicated %s -> %s' % (did, '+'.join(want)), sorted(ch[did]['verdicts']), sorted(want))
         ck('a complete chain records every timestamp',
            all(ch['D1'][k] for k in ('asked', 'put', 'answered', 'forwarded', 'closed')), True)
         ck('an answered-not-forwarded chain has no forward', ch['D2']['forwarded'], None)
-        ck('an unanswered put does not take a LATER put\'s reply', ch['D3']['answered'], None)
         ck('an answered-not-closed chain has no close', ch['D4']['closed'], None)
+        bad = R.decision_chains(acts, owner, my_text, sends, 'local_target',
+                                {'D1': {'put': '2026-09-10T01:10:00Z', 'answer': '2026-09-10T23:59:00Z'}})
+        ck('an adjudication citing a message that is not a candidate is REFUSED',
+           any('REFUSED' in o for o in bad['D1']['outstanding']), True)
 
         # --- the SNAPSHOT half, agreeing with the transcript --------------------------
         series = R.stage2_series(sorted(snaps), lambda s: snaps[s])
@@ -1304,9 +1335,9 @@ def test_decision_chains():
 
 
 def test_chain_edges():
-    """The chain's own corner cases. Each gave a WRONG answer when probed, and a wrong
-    attribution is worse than an admitted gap: it reports an unanswered decision as answered,
-    or a closed one as still open against him."""
+    """The chain's corner cases, on FACTS and ADJUDICATIONS. Each was a wrong answer when the chain
+    guessed: on the real record a challenge ("I answered D13 when?"), a refusal ("I will not answer
+    D14 or D15") and a deferral ("I'll handle D16 and D17 next") were all taken as his answers."""
     fails = []
     def ck(name, got, want):
         ok = got == want
@@ -1328,116 +1359,88 @@ def test_chain_edges():
 
     say = lambda ts, text: {'ts': ts, 'text': text}
     send = lambda ts, msg, to='local_target': {'ts': ts, 'msg': msg, 'to': to}
-    dc = lambda *a: R.decision_chains(*a, target='local_target')
+    dc = lambda acts, owner, mine, sends, adj=None: R.decision_chains(acts, owner, mine, sends,
+                                                                      'local_target', adj)
 
-    # a window that starts mid-history: the id is whatever the RESULT minted
-    ch = dc([ask('D5', T(5)), close('D5', T(6, 30))], [say(T(5, 30), 'yes')],
-            [say(T(5, 10), 'D5 for you')], [send(T(6), 'OWNER, VERBATIM: yes')])
-    ck('the id comes from the result, not a counter', list(ch), ['D5'])
-    ck('and its close is matched', bool(ch['D5']['closed']), True)
+    # --- facts are collected, never interpreted ----------------------------------------
+    his = [say(T(2), 'D1 - drop it.'), say(T(3), 'I answered D1 when?'), say(T(4), 'fine')]
+    mine = [say(T(1, 5), 'D1 for you: keep it?'), say(T(3, 30), 'you did not; D1 is still open')]
+    ch = dc([ask('D1', T(1))], his, mine, [])
+    ck('my texts naming D1 are NAMED', ch['D1']['named'], [T(1, 5), T(3, 30)])
+    ck('every message of his naming D1 is a mention -- which answers is READ, not matched',
+       [r['ts'] for r in ch['D1']['mentions']], [T(2), T(3)])
+    ck('his next message after each naming is a candidate', ch['D1']['candidates'], [T(2), T(3), T(4)])
+    ck('without adjudication: outstanding, and no answer is guessed',
+       (any('adjudicate D1' in o for o in ch['D1']['outstanding']), ch['D1']['answered']), (True, None))
 
-    # two put together, reply names neither -> it answers both (the turn that put them)
-    ch = dc([ask('D1', T(1)), ask('D2', T(1, 1))], [say(T(2), 'no to both of those')],
-            [say(T(1, 5), 'D1 and D2 for you')], [])
-    ck('a reply to a turn that put two answers both',
-       [bool(ch[k]['answered']) for k in ('D1', 'D2')], [True, True])
+    # --- an adjudication may only cite what the record contains --------------------------
+    ch = dc([ask('D1', T(1))], his, mine, [], {'D1': {'put': T(1, 5), 'answer': T(9)}})
+    ck('an adjudicated answer that is not a candidate is REFUSED',
+       any('REFUSED' in o for o in ch['D1']['outstanding']), True)
+    ch = dc([ask('D1', T(1))], his, mine, [], {'D1': {'put': T(9), 'answer': 'none'}})
+    ck('an adjudicated put must be a text of mine naming it',
+       any('REFUSED' in o for o in ch['D1']['outstanding']), True)
 
-    # two put together, reply names D1 only -> D2 is still unanswered
-    ch = dc([ask('D1', T(1)), ask('D2', T(1, 1))], [say(T(2), 'D1: no.')],
-            [say(T(1, 5), 'D1 and D2 for you')], [])
-    ck('a reply naming a sibling does not answer this one', ch['D2']['answered'], None)
-    ck('and the named one is answered', bool(ch['D1']['answered']), True)
+    # --- his refusal, read by the reconciler as NOT an answer ----------------------------
+    ch = dc([ask('D14', T(1))], [say(T(2), 'I will not answer D14 or D15 until the record is properly corrected')],
+            [say(T(1, 5), 'D14 -- which threshold?')], [], {'D14': {'put': T(1, 5), 'answer': 'none'}})
+    ck('a refusal adjudicated as no answer -> put_not_answered', ch['D14']['verdicts'], ['put_not_answered'])
 
-    # an unanswered earlier put must not take the reply to a LATER put
-    ch = dc([ask('D1', T(1)), ask('D2', T(3))], [say(T(4), 'drop it')],
-            [say(T(1, 5), 'D1 for you'), say(T(3, 5), 'D2 for you')], [])
-    ck('an earlier put does not steal a later put\'s reply', ch['D1']['answered'], None)
-    ck('the later put gets its reply', bool(ch['D2']['answered']), True)
-
-    # ...but a message that NAMES the earlier one still answers it, whenever it comes
-    ch = dc([ask('D1', T(1)), ask('D2', T(3))], [say(T(4), 'D1: keep it.')],
-            [say(T(1, 5), 'D1 for you'), say(T(3, 5), 'D2 for you')], [])
-    ck('a later message naming D1 answers D1', bool(ch['D1']['answered']), True)
-    ck('and does not answer D2', ch['D2']['answered'], None)
-
-    # his message naming Dn BEFORE it was put to him is not its answer
-    ch = dc([ask('D1', T(1))], [say(T(1, 2), 'D1: whatever it is, no')],
-            [say(T(1, 5), 'D1 for you')], [])
-    ck('a message before the put is not the answer', ch['D1']['answered'], None)
-
-    # my text naming D1 BEFORE the ask is not a put
-    ch = dc([ask('D1', T(2))], [], [say(T(1), 'D1 from last week is closed')], [])
-    ck('text before the ask is not a put', ch['D1']['verdicts'], ['never_put_to_owner'])
-
-    # a terse reply IS the answer
-    ch = dc([ask('D1', T(1)), close('D1', T(3))], [say(T(2), 'drop it')],
-            [say(T(1, 5), 'D1 for you')], [send(T(2, 5), 'OWNER, VERBATIM: drop it')])
-    ck('a terse reply ("drop it") is the answer', ch['D1']['answer_text'], 'drop it')
-    ck('and the chain is complete', ch['D1']['verdicts'], ['complete'])
-
-    # a forward that precedes the answer is not a forward
-    ch = dc([ask('D1', T(1))], [say(T(5), 'the nominal threshold applies to the cut')],
-            [say(T(1, 5), 'D1 for you')], [send(T(2), 'the nominal threshold applies to the cut')])
-    ck('a send BEFORE the answer is not forwarding it', ch['D1']['forwarded'], None)
-
-    # a forward that PARAPHRASES is not the owner's words
-    ch = dc([ask('D1', T(1))], [say(T(2), 'the nominal threshold applies to the level cut only')],
-            [say(T(1, 5), 'D1 for you')], [send(T(3), 'he says to use the nominal cut')])
+    # --- verdicts once adjudicated -------------------------------------------------------
+    ans = 'D1 - the nominal threshold applies to the level cut only'
+    base_his, base_mine = [say(T(2), ans)], [say(T(1, 5), 'D1 for you')]
+    adj = {'D1': {'put': T(1, 5), 'answer': T(2)}}
+    fwd = send(T(2, 5), 'OWNER, VERBATIM: ' + ans)
+    ch = dc([ask('D1', T(1)), close('D1', T(3))], base_his, base_mine, [fwd], adj)
+    ck('adjudicated, forwarded verbatim, closed -> complete', ch['D1']['verdicts'], ['complete'])
+    ch = dc([ask('D1', T(1))], base_his, base_mine, [send(T(1, 50), ans)], adj)
+    ck('a send BEFORE the answer is not a forward', ch['D1']['forwarded'], None)
+    ch = dc([ask('D1', T(1))], base_his, base_mine, [send(T(3), 'he says to use the nominal cut')], adj)
     ck('a paraphrase is not a forward (relays are verbatim)',
        'answered_not_forwarded' in ch['D1']['verdicts'], True)
-
-    # a close that took no effect, then one that did
-    ch = dc([ask('D1', T(1)), close('D1', T(3), 'no_effect'), close('D1', T(4))],
-            [say(T(2), 'drop it')], [say(T(1, 5), 'D1 for you')],
-            [send(T(2, 5), 'OWNER, VERBATIM: drop it')])
+    ch = dc([ask('D1', T(1)), close('D1', T(3), 'no_effect'), close('D1', T(4))], base_his, base_mine, [fwd], adj)
     ck('a no-effect close followed by a landed one is closed', bool(ch['D1']['closed']), True)
-    ck('and both attempts are recorded', [o for _, o in ch['D1']['close_attempts']],
-       ['no_effect', 'landed'])
-
-    # a close that FAILED leaves the decision open
-    ch = dc([ask('D1', T(1)), close('D1', T(3), 'failed')], [say(T(2), 'drop it')],
-            [say(T(1, 5), 'D1 for you')], [send(T(2, 5), 'OWNER, VERBATIM: drop it')])
+    ck('and both attempts are recorded', [o for _, o in ch['D1']['close_attempts']], ['no_effect', 'landed'])
+    ch = dc([ask('D1', T(1)), close('D1', T(3), 'failed')], base_his, base_mine, [fwd], adj)
     ck('a failed close -> close_failed + answered_not_closed',
        sorted(ch['D1']['verdicts']), ['answered_not_closed', 'close_failed'])
+    ch = dc([ask('D1', T(1)), close('D1', T(1, 30))], base_his, base_mine, [fwd], adj)
+    ck('closed before he answered -> closed_without_answer', 'closed_without_answer' in ch['D1']['verdicts'], True)
 
-    # a close BEFORE the answer
-    ch = dc([ask('D1', T(1)), close('D1', T(2))], [say(T(3), 'drop it')],
-            [say(T(1, 5), 'D1 for you')], [send(T(3, 5), 'OWNER, VERBATIM: drop it')])
-    ck('closed before he answered -> closed_without_answer',
-       'closed_without_answer' in ch['D1']['verdicts'], True)
+    # --- facts that need no reading ------------------------------------------------------
+    ch = dc([ask('D1', T(1)), close('D1', T(1, 30))], base_his, base_mine, [])
+    ck('closed before he said anything to it -> closed_before_any_reply',
+       'closed_before_any_reply' in ch['D1']['verdicts'], True)
+    ch = dc([ask('D1', T(2))], [], [say(T(1), 'D1 from last week is closed')], [])
+    ck('text before the ask is not naming it', ch['D1']['verdicts'], ['never_named_to_owner'])
+    ch = dc([ask('D1', T(1)), close('D1', T(2))], [], [], [])
+    ck('never named but closed -> closed_without_answer + never_named_to_owner',
+       sorted(ch['D1']['verdicts']), ['closed_without_answer', 'never_named_to_owner'])
 
-    # an ask whose result minted no id
-    ch = dc([ask(None, T(1))], [], [], [])
-    ck('an ask that did not land is reported, keyed by its citation',
-       [v['verdicts'] for v in ch.values()], [['ask_did_not_land']])
+    # --- decision ids are UPPERCASE: lowercase d1/d2 are this project's field offsets ----
+    ch = dc([ask('D1', T(1)), ask('D2', T(1, 1))], [],
+            [say(T(1, 5), 'overlap reading purple out of the existing d1-red/d2-blue convention')], [])
+    ck('lowercase d1/d2 (field offsets) do not name D1/D2', (ch['D1']['named'], ch['D2']['named']), ([], []))
 
-    # a close of an id never asked in the window
-    ch = dc([close('D9', T(1))], [], [], [])
-    ck('a close with no ask in the window is an orphan_close', ch['D9']['verdicts'], ['orphan_close'])
-
-    # the same id minted twice (a store reset restarts the counter): TWO chains, never one
-    ch = dc([ask('D1', T(1), 'the first question, asked before the store was reset'),
-             close('D1', T(2)),
-             ask('D1', T(5), 'a different question, asked after the counter restarted')],
+    # --- the same id minted twice -----------------------------------------------------------
+    ch = dc([ask('D1', T(1), 'first'), close('D1', T(2)), ask('D1', T(5), 'second')],
             [say(T(1, 10), 'keep it')], [say(T(1, 5), 'D1 for you'), say(T(5, 5), 'D1 for you')], [])
     ck('an id minted twice yields TWO chains', sorted(ch), ['D1#1', 'D1#2'])
     ck('the close belongs to the minting it followed',
        (bool(ch['D1#1'].get('closed')), ch['D1#2'].get('closed')), (True, None))
-    ck('the second minting is its own chain', ch['D1#2'].get('verdicts'), ['put_not_answered'])
+    ck("the second minting's facts stay in its own window",
+       (ch['D1#2']['named'], ch['D1#2']['candidates']), ([T(5, 5)], []))
     ch = dc([close('D1', T(0)), ask('D1', T(1))], [], [say(T(1, 5), 'D1 for you')], [])
-    ck('a close BEFORE the id was minted is an orphan, not this chain\'s close',
+    ck("a close BEFORE the id was minted is an orphan, not this chain's close",
        (ch['D1'].get('closed'), ch.get('D1@orphan', {}).get('verdicts')), (None, ['orphan_close']))
 
-    # decision ids are UPPERCASE. Measured: the owner writes them so, and lowercase d1/d2 are
-    # this project's field-offset names in his text and mine -- a real false put came from
-    # "the existing d1-red/d2-blue convention"
-    ch = dc([ask('D1', T(1)), ask('D2', T(1, 1))], [],
-            [say(T(1, 5), 'overlap reading purple out of the existing d1-red/d2-blue convention')], [])
-    ck('lowercase d1/d2 (field offsets) do not name D1/D2', (ch['D1']['put'], ch['D2']['put']), (None, None))
-
+    ch = dc([ask(None, T(1))], [], [], [])
+    ck('an ask that did not land is reported, keyed by its citation',
+       [v['verdicts'] for v in ch.values()], [['ask_did_not_land']])
+    ch = dc([close('D9', T(1))], [], [], [])
+    ck('a close with no ask in the window is an orphan_close', ch['D9']['verdicts'], ['orphan_close'])
     ck('no decisions yields no chains', dc([], [], [], []), {})
     return fails
-
 
 
 def test_real_shapes():
@@ -1623,20 +1626,36 @@ def test_actions_and_chains_real_shapes():
         ck('an open whose result minted no id is recorded failed',
            [a['outcome'] for a in opens if not a['id']], ['failed'])
 
-        ch = R.decision_chains(acts, owner, my_text, sends, 'local_target')
+        # PUT and ANSWERED are read from his words by the reconciler and recorded as
+        # adjudications; without one a chain is OUTSTANDING, never guessed
+        bare = R.decision_chains(acts, owner, my_text, sends, 'local_target')
+        ck('unadjudicated named chains carry an adjudication as outstanding work',
+           all(any('adjudicate' in o for o in bare[k]['outstanding']) for k in ('D1', 'D2', 'D4', 'D5')), True)
+        ck('and no put/answer verdict is guessed for them',
+           any(v in ('complete', 'put_not_answered', 'answered_not_forwarded', 'answered_not_closed')
+               for k in ('D1', 'D2', 'D4', 'D5') for v in bare[k]['verdicts']), False)
+        ck('a terse reply ("drop it") is a CANDIDATE for the decision put before it',
+           T(2, 10) in bare['D2']['candidates'], True)
+        ck('his message naming D4 is among its mentions',
+           [r['ts'] for r in bare['D4']['mentions']], [T(4, 10)])
+        ck("a sibling's reply is only a candidate for D5, never auto-attributed",
+           (T(4, 10) in bare['D5']['candidates'], bare['D5']['answered']), (True, None))
+        ck('a decision never named to him, then closed, is two facts',
+           sorted(bare['D3']['verdicts']), ['closed_without_answer', 'never_named_to_owner'])
+        adj = {'D1': {'put': T(1, 5), 'answer': T(1, 10)}, 'D2': {'put': T(2, 5), 'answer': T(2, 10)},
+               'D4': {'put': T(4, 5), 'answer': T(4, 10)}, 'D5': {'put': T(4, 5), 'answer': 'none'}}
+        ch = R.decision_chains(acts, owner, my_text, sends, 'local_target', adj)
         want = {
             'D1': ['complete'],
             'D2': ['answered_not_forwarded'],
-            'D3': ['never_put_to_owner', 'closed_without_answer'],
-            'D4': ['close_had_no_effect', 'answered_not_closed'],
+            'D3': ['closed_without_answer', 'never_named_to_owner'],
+            'D4': ['answered_not_closed', 'close_had_no_effect'],
             'D5': ['put_not_answered'],
             'D99': ['orphan_close'],
         }
         for did, w in want.items():
-            ck('%s -> %s' % (did, '+'.join(w)), sorted(ch.get(did, {}).get('verdicts', [])), sorted(w))
-        ck('a terse reply ("drop it") IS the answer to the turn that put it',
-           ch['D2']['answer_text'], 'drop it')
-        ck('a reply naming a sibling does not answer this one', ch['D5']['answered'], None)
+            ck('adjudicated %s -> %s' % (did, '+'.join(w)), sorted(ch.get(did, {}).get('verdicts', [])), sorted(w))
+        ck('the adjudicated terse answer is the answer text', ch['D2']['answer_text'], 'drop it')
         ck('the failed ask is reported as not landed',
            any(v['verdicts'] == ['ask_did_not_land'] for v in ch.values()), True)
         ck('every chain verdict is in the declared vocabulary',
@@ -1694,7 +1713,7 @@ def test_repeats_and_peers():
     ch = R.decision_chains([ask('D1', T(0)), ask('D2', T(4))], msgs,
                            [{'ts': T(0, 30), 'text': 'D1 for you'}, {'ts': T(4, 30), 'text': 'D2 for you'}], [],
                            'local_target')
-    ck('a repeated reply still answers the LATER put', ch['D2']['answered'], T(5))
+    ck('a repeated reply is still a candidate for the LATER put', T(5) in ch['D2']['candidates'], True)
 
     m2 = R.owner_messages([RS.user_str(T(1), 'go ahead')] + RS.owner_turn(T(2), 'go ahead'))[0]
     ck('a delivery with no enqueue is its own message', [m['ts'] for m in m2], [T(1), T(2)])
@@ -1784,7 +1803,8 @@ def test_sends_to_target():
        any('local_OTHER' in x['why'] for x in rep if x['verb'] == 'sent1' and x.get('id') == 'Q1'), True)
     ck('sent1 whose text reached the target -> ok', by('sent1', 'Q2'), ['ok'])
     ck('nudged by a send to another session -> MISSTEER, then ok', by('nudged', 'K1'), ['MISSTEER', 'ok'])
-    ch = R.decision_chains(acts, owner, my_text, sends, 'local_target')
+    ch = R.decision_chains(acts, owner, my_text, sends, 'local_target',
+                           {'D1': {'put': T(8, 5), 'answer': T(9)}, 'D2': {'put': T(10, 5), 'answer': T(11)}})
     ck('a forward to another session is not a forward', ch['D1']['verdicts'], ['answered_not_forwarded'])
     ck('a forward to the target completes the chain', ch['D2']['verdicts'], ['complete'])
     raised = []

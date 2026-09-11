@@ -161,6 +161,11 @@ def outstanding(L):
     if stale:
         o.append('%d restore(s) unvalidated at pass %d (next #%d) -- supersession check owed'
                  % (len(stale), L.get('pass', 0), stale[0]))
+    chs = (L.get('stage3') or {}).get('chains') or {}
+    owed = [k for k, v in sorted(chs.items()) if v.get('outstanding')]
+    if owed:
+        o.append('%d decision chain(s) with work outstanding (next %s: %s)'
+                 % (len(owed), owed[0], chs[owed[0]]['outstanding'][0]))
     c, parts = confidence(L)
     if c != 100:
         o.append('confidence %d/100 (%s)' % (c, '; '.join('%s %d%%' % (k, v) for k, v in parts)))
@@ -181,9 +186,10 @@ def confidence(L):
         okn = sum(1 for r in rs if r.get('validated_pass') == L.get('pass', 0))
         cov.append(('restores', 100 * okn // len(rs)))
     for name, key in (('actions', 'actions'), ('state-keys', 'state_keys'),
-                      ('snapshots', 'snapshots'), ('records', 'records')):
+                      ('snapshots', 'snapshots'), ('records', 'records'), ('chains', 'chains')):
         seen, total = a.get(key, [0, 0])[0], a.get(key, [0, 0])[1]
-        cov.append((name, 100 * seen // total if total else 0))
+        # a MEASURED zero chains is nothing owed; an unmeasured count is still owed
+        cov.append((name, 100 * seen // total if total else (100 if key == 'chains' and key in a else 0)))
     return (min(v for _, v in cov) if cov else 0), cov
 
 
@@ -267,7 +273,8 @@ def run_stage(n, L, S, a):
         starts = RL.turn_starts(numbered)
         rep = RL.landed_replay(acts, starts, my_text, sends, peers, RL.live_stores(S)['raw'], tid)
         tally = _c.Counter(x['verdict'] for x in rep)
-        ch = RL.decision_chains(acts, owner, my_text, sends, tid)
+        ch = RL.decision_chains(acts, owner, my_text, sends, tid, L.get('adjudications') or {})
+        cov['chains'] = [sum(1 for x in ch.values() if not x.get('outstanding')), len(ch)]
         broken = {k: v for k, v in ch.items() if v['verdicts'] != ['complete']}
         import subprocess as _sp
         repos = []
@@ -377,6 +384,9 @@ def main():
     ap.add_argument('--validate', type=int)
     ap.add_argument('--superseded', action='store_true')
     ap.add_argument('--evidence'); ap.add_argument('--complete', action='store_true')
+    ap.add_argument('--adjudicate', help='a decision chain key from stage 3')
+    ap.add_argument('--put', help='the timestamp of my text that put it to him, or none')
+    ap.add_argument('--answer', help='the timestamp of his message that answered it, or none')
     a = ap.parse_args()
 
     # 1. MUTUAL EXCLUSION -- before reading or writing anything at all.
@@ -394,7 +404,7 @@ def main():
     os.makedirs(S, exist_ok=True)
     # Only a WRITING run takes the lock. The minute nagger calls this for status every 60 s;
     # if a read took the lock it would abort the very stage runs it exists to nag about.
-    writes = bool(a.stage or a.hour or a.snapshot or a.thinned or a.action or a.restore
+    writes = bool(a.adjudicate or a.stage or a.hour or a.snapshot or a.thinned or a.action or a.restore
                   or a.validate is not None or a.complete or a.init or a.repo)
     if not writes:
         return _main(a, S)
@@ -491,6 +501,23 @@ def _main(a, S):
         L['actions'][a.action] = {'landed': a.landed, 'ts': now_iso(), 'evidence': a.evidence}
         changed = True
         print('action %s landed=%s' % (a.action, a.landed))
+
+    if a.adjudicate:
+        # PUT and ANSWERED are MEANING: whether he answered is read from his words, not matched.
+        # The reading is recorded with the words it rests on, and stage 3 refuses one that cites a
+        # message the record does not contain for that chain.
+        if a.put is None or a.answer is None or not a.evidence:
+            raise SystemExit('--adjudicate needs --put <ts|none>, --answer <ts|none> and --evidence '
+                             '"<what his words say, quoted>"')
+        chains = (L.get('stage3') or {}).get('chains') or {}
+        if a.adjudicate not in chains:
+            raise SystemExit('no chain %s in the last stage 3 (have: %s)'
+                             % (a.adjudicate, ', '.join(sorted(chains)) or 'none -- run --stage 3'))
+        L.setdefault('adjudications', {})[a.adjudicate] = {'put': a.put, 'answer': a.answer,
+                                                           'evidence': a.evidence, 'ts': now_iso()}
+        changed = True
+        print('adjudication recorded for %s (put %s, answer %s); stage 3 applies it'
+              % (a.adjudicate, a.put, a.answer))
 
     if a.restore:
         if not a.evidence:

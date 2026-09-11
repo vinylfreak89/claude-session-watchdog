@@ -944,35 +944,42 @@ def carries(message, text):
 
 # ================================================================ decision chains, structural
 
-CHAIN_VERDICTS = ('complete', 'ask_did_not_land', 'never_put_to_owner', 'put_not_answered',
-                  'answered_not_forwarded', 'answered_not_closed', 'closed_without_answer',
-                  'close_had_no_effect', 'close_failed', 'orphan_close')
+CHAIN_VERDICTS = ('complete', 'ask_did_not_land', 'never_named_to_owner', 'never_put_to_owner',
+                  'put_not_answered', 'answered_not_forwarded', 'answered_not_closed',
+                  'closed_without_answer', 'closed_before_any_reply', 'close_had_no_effect',
+                  'close_failed', 'orphan_close')
 
+def decision_chains(acts, owner, my_text, sends, target, adjudications=None):
+    """Every decision's chain as FACTS from the record, plus the two links only his words settle.
 
-def decision_chains(acts, owner, my_text, sends, target):
-    """Every decision's chain from the record's STRUCTURE, never from word overlap.
+    Facts, never inferred:
+        ASKED      an `owe add` whose result (or later evidence) minted Dn
+        NAMED      my texts to the owner naming Dn (uppercase: lowercase d1/d2 are field offsets)
+        MENTIONS   his messages naming Dn, in time order
+        NEXT       his next message after each time I named it (a terse reply names nothing)
+        FORWARDED  a send to the target carrying a verbatim span of the adjudicated answer
+        CLOSED     an `owe done` of Dn whose outcome the evidence established as landed
 
-        ASKED      an `owe add` whose result minted Dn
-        PUT        my own text to the owner naming Dn, after the ask
-        ANSWERED   his message naming Dn after the put; failing that, his NEXT message after
-                   the put -- the reply to the turn that put it to him, however terse
-        FORWARDED  a send to the target carrying a VERBATIM span of that answer
-        CLOSED     an `owe done`/`owe-clear` of Dn whose result says it took effect
+    PUT and ANSWERED are not structural. Measured on the real record: my mentions of an id were
+    status reports, relays of his ruling and prose about a fixture as often as puts; his messages
+    naming an id were answers, a challenge ("I answered D13 when?"), a refusal ("I will not answer
+    D14 or D15 until the record is properly corrected"), a deferral ("I'll handle D16 and D17
+    next") and a request to rephrase. Which is which is READING HIS WORDS: answerable from the
+    transcript, by the reconciler, recorded as an ADJUDICATION that cites the message. An
+    adjudication may only cite a candidate the record contains; one that cites anything else is
+    refused. Until a chain is adjudicated, its put/answer verdicts are OUTSTANDING, never guessed.
+    Verdicts that need no reading are given regardless.
 
-    Every verdict is a fact about the record. Word overlap is gone: it attributed one ruling to
-    two decisions and could not match "drop it" at all.
-
-    AN ID CAN BE MINTED MORE THAN ONCE (a store reset restarts the counter). Each minting is
-    its own chain -- keyed Dn#1, Dn#2 when that happens -- and every event naming Dn belongs to
-    the most recent minting at or before it. Found by probe: a dict keyed by id kept only the
-    last ask, so the first chain vanished and its close was credited to the second."""
+    AN ID CAN BE MINTED MORE THAN ONCE (the counter restarted). Each minting is its own chain --
+    keyed Dn#1, Dn#2 -- and every fact naming Dn belongs to the most recent minting at or before it.
+    """
     if not target:
         raise ValueError('decision_chains needs the target session id: forwarding his answer '
                          'means a send TO THE TARGET, and a send elsewhere is not a forward')
+    adjudications = adjudications or {}
     acts = [a for a in acts if a.get('state', 'live') == 'live']
     decs = sorted((a for a in acts if a['kind'] == 'open' and a['store'] == 'owner_decisions'
                    and a['id']), key=lambda a: a['ts'])
-    # an ask with no id whose outcome is PENDING is outstanding work, not a failed ask
     failed_asks = [a for a in acts if a['kind'] == 'open' and a['store'] == 'owner_decisions'
                    and not a['id'] and a['outcome'] is not None]
     mintings = collections.defaultdict(list)
@@ -982,79 +989,94 @@ def decision_chains(acts, owner, my_text, sends, target):
     for a in acts:
         if a['kind'] == 'close' and a['verb'] in ('owe done', 'owe-clear') and a['id']:
             closes[a['id']].append(a)
-    # UPPERCASE ONLY. Measured on the real record: the owner writes every decision id in
-    # uppercase, and lowercase d1/d2 are this project's field-offset names in his text and mine
-    # ("d1 red d2 blue", "d1-red/d2-blue") -- a case-insensitive match made those into puts.
-    ids_rx = [re.compile(r'\b%s\b' % re.escape(d)) for d in mintings]
-    puts = [t for t in my_text if any(r.search(t['text']) for r in ids_rx)]
     out = {}
     for did, seq in mintings.items():
         rx = re.compile(r'\b%s\b' % re.escape(did))
         for k, ask in enumerate(seq):
             until = seq[k + 1]['ts'] if k + 1 < len(seq) else None
             inside = lambda t, lo=ask['ts'], hi=until: t >= lo and (hi is None or t < hi)
-            put = next((t for t in my_text if inside(t['ts']) and rx.search(t['text'])), None)
-            answer = None
-            if put:
-                answer = next((o for o in owner if o['ts'] > put['ts'] and inside(o['ts'])
-                               and rx.search(o['text'])), None)
-                if answer is None:
-                    # His NEXT message is the reply to the turn that put it to him -- however
-                    # terse -- UNLESS it names a decision id (then it has scoped itself), or
-                    # another decision was put to him in between (then it belongs to that later
-                    # turn: an unanswered D3 once took D4's terse answer), or it falls after
-                    # this id was minted again.
-                    nxt = next((o for o in owner if o['ts'] > put['ts']), None)
-                    later = [t for t in puts if t['ts'] > put['ts'] and nxt is not None
-                             and t['ts'] < nxt['ts'] and not rx.search(t['text'])]
-                    if (nxt is not None and inside(nxt['ts']) and not later
-                            and not re.search(r'\bD\d+\b', nxt['text'])):
-                        answer = nxt
-            fwd = next((s for s in sends if answer and s.get('to') == target
-                        and s['ts'] > answer['ts'] and carries(s['msg'], answer['text'])), None)
+            key = did if len(seq) == 1 else '%s#%d' % (did, k + 1)
+            named = [t for t in my_text if inside(t['ts']) and rx.search(t['text'])]
+            # which of these answers it is MEANING: read by the reconciler, never matched
+            mentions = [o for o in owner if inside(o['ts']) and rx.search(o['text'])]
+            nexts = []
+            for t in named:
+                n = next((o for o in owner if o['ts'] > t['ts']), None)
+                if n is not None and inside(n['ts']) and n not in nexts:
+                    nexts.append(n)
+            cands = {o['ts']: o for o in mentions + nexts}
             cl = [c for c in closes.get(did, []) if inside(c['ts'])]
             landed = [c for c in cl if c['outcome'] == 'landed']
             pend = [c for c in cl if c['outcome'] is None]
-            owed = []
-            if pend and not landed:
-                owed.append('a close of %s whose outcome is not yet established' % did)
+            v, owed = [], []
+            if not named:
+                v.append('never_named_to_owner')
             if ask.get('outcome') is None:
                 owed.append('whether the ask of %s landed' % did)
-            v = []
-            if not put:
-                v.append('never_put_to_owner')
-            elif not answer:
-                v.append('put_not_answered')
-            if answer and not fwd:
-                v.append('answered_not_forwarded')
-            if landed and (not answer or landed[0]['ts'] < answer['ts']):
-                v.append('closed_without_answer')
+            if pend and not landed:
+                owed.append('a close of %s whose outcome is not yet established' % did)
             if cl and not landed and not pend:
                 v.append('close_failed' if any(c['outcome'] == 'failed' for c in cl)
                          else 'close_had_no_effect')
-            if answer and not landed and not pend:
-                v.append('answered_not_closed')
-            key = did if len(seq) == 1 else '%s#%d' % (did, k + 1)
-            out[key] = {'asked': ask['ts'], 'ask_cite': ask['cite'],
-                        'put': put['ts'] if put else None,
-                        'answered': answer['ts'] if answer else None,
+            adj = adjudications.get(key)
+            put = answer = fwd = None
+            if adj is not None:
+                named_ts = {t['ts'] for t in named}
+                bad = []
+                if adj.get('put') not in (None, 'none') and adj['put'] not in named_ts:
+                    bad.append('put %s is not a text of mine naming %s' % (adj['put'], did))
+                if adj.get('answer') not in (None, 'none') and adj['answer'] not in cands:
+                    bad.append('answer %s is not a candidate message of his' % adj['answer'])
+                if bad:
+                    owed.append('adjudication REFUSED: ' + '; '.join(bad))
+                    adj = None
+            if adj is not None:
+                put = None if adj.get('put') in (None, 'none') else adj['put']
+                answer = None if adj.get('answer') in (None, 'none') else cands[adj['answer']]
+                if named and put is None:
+                    v.append('never_put_to_owner')
+                elif put is not None and answer is None:
+                    v.append('put_not_answered')
+                if answer is not None:
+                    fwd = next((s for s in sends if s.get('to') == target and s['ts'] > answer['ts']
+                                and carries(s['msg'], answer['text'])), None)
+                    if fwd is None:
+                        v.append('answered_not_forwarded')
+                    if not landed and not pend:
+                        v.append('answered_not_closed')
+                if landed and (answer is None or landed[0]['ts'] < answer['ts']):
+                    v.append('closed_without_answer')
+            elif not named and landed:
+                # never named to him, so he cannot have answered it: closing it is a fact
+                v.append('closed_without_answer')
+            elif named:
+                owed.append('adjudicate %s: was it put to him, and which message (if any) '
+                            'answered it -- %d candidate(s)' % (key, len(cands)))
+                if landed and not any(t < landed[0]['ts'] for t in cands):
+                    v.append('closed_before_any_reply')
+            out[key] = {'asked': ask['ts'], 'ask_cite': ask['cite'], 'text': ask['text'][:160],
+                        'named': [t['ts'] for t in named],
+                        'mentions': [{'ts': o['ts'], 'text': o['text'][:300]} for o in mentions],
+                        'candidates': sorted(cands),
+                        'adjudication': adjudications.get(key) if adj is not None else None,
+                        'put': put, 'answered': answer['ts'] if answer else None,
                         'answer_text': answer['text'][:300] if answer else None,
                         'forwarded': fwd['ts'] if fwd else None,
                         'closed': landed[0]['ts'] if landed else None,
                         'close_attempts': [(c['ts'], c['outcome']) for c in cl],
-                        'verdicts': v or ([] if owed else ['complete']), 'outstanding': owed,
-                        'text': ask['text'][:160]}
+                        'verdicts': v or ([] if owed else ['complete']), 'outstanding': owed}
     for did, cs in closes.items():
         first = mintings[did][0]['ts'] if did in mintings else None
         for c in cs:
             if first is None or c['ts'] < first:
                 key = did if did not in out else did + '@orphan'
-                out.setdefault(key, {'verdicts': ['orphan_close'], 'close_attempts': []})
+                out.setdefault(key, {'verdicts': ['orphan_close'], 'close_attempts': [],
+                                     'outstanding': []})
                 out[key]['close_attempts'].append((c['ts'], c['outcome']))
     for a in failed_asks:
         out['ASK@' + a['cite']] = {'asked': a['ts'], 'ask_cite': a['cite'],
                                    'verdicts': ['ask_did_not_land'], 'text': a['text'][:160],
-                                   'why': a['why']}
+                                   'why': a['why'], 'outstanding': []}
     return out
 
 
