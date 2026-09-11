@@ -282,7 +282,8 @@ if __name__ == '__main__':
     _s.exit(selftest())
 
 
-FORLOOP = re.compile(r'for\s+(\w+)\s+in\s+([^;\n]+?)\s*;\s*do\b(.*?)\bdone\b', re.S)
+FORLOOP = re.compile(r'for\s+(\w+)\s+in\s+([^;\n]+?)\s*;\s*do\b(.*?)(?:^|[;&\n])\s*done\b',
+                     re.S | re.M)
 
 
 def expand_loops(cmd):
@@ -306,9 +307,28 @@ def expand_loops(cmd):
     return cmd
 
 
+COMMENT = re.compile(r'^\s*#.*$', re.M)
+ECHOED = re.compile(r"""\b(?:echo|printf)\s+(?:-\w+\s+)*(['"])(?:\\.|(?!\1).)*\1""", re.S)
+
+
+def strip_comments(cmd):
+    """A commented-out example is not an invocation. Found by fixture 2026-09-11: a line
+    beginning `# ./wd.sh queue add "..."` registered as a genuine owner item."""
+    return COMMENT.sub('', cmd)
+
+
+def strip_echoes(cmd):
+    """Text that only ever reached a terminal is not an invocation. Same fixture: an
+    `echo './wd.sh owe add "..."'` registered as a genuine decision."""
+    return ECHOED.sub('echo', cmd)
+
+
 def normalize(cmd):
-    """The one preprocessing path every matcher must use: heredoc bodies gone, loops unrolled."""
-    return expand_loops(strip_heredocs(cmd))
+    """The ONE preprocessing path every matcher must use. Each step exists because its absence
+    produced a false item against a known-answer corpus: heredoc bodies (a document being
+    written), comments (an example), echoes (terminal output), and loops (an id that never
+    appears as a literal)."""
+    return expand_loops(strip_echoes(strip_comments(strip_heredocs(cmd))))
 
 
 def live_stores(state_dir):
@@ -394,3 +414,108 @@ def stage1_join(opens, closes, state_dir):
             'closed_more_than_once': dupes,
             'live_owner_queue': len(live['owner_queue']),
             'live_owner_decisions': len(live['owner_decisions'])}
+
+
+# ---------------------------------------------------------------- stage 3
+
+def stage3(actions, art, git_probe=None):
+    """LANDED-REPLAY: did each action I claimed actually happen?
+
+    Owner: "Then go back in the transcript and confirm every action landed. Do it as a replay."
+    Distinct from stage 1, which finds the ITEMS I lost; this finds the ACTIONS I claimed.
+
+    A verdict is OK / MISSTEER / UNDECIDABLE. Undecidable is a real outcome and is never
+    rounded to OK -- silence is not success. `git_probe` is injected so the corpus can be
+    synthetic; it answers "does this sha exist and on which refs"."""
+    out = []
+    for a in actions:
+        v, ident = a['verb'], a.get('arg')
+        verdict, why = 'undecidable', 'no artifact rule for this verb'
+        if v in ('sent1', 'nudged'):
+            near = _near(art['sends'], a['ts'])
+            if not near:
+                verdict, why = 'MISSTEER', 'no message to the target within 15 min'
+            elif ident and any(ident in s['msg'][:6000] for s in near):
+                verdict, why = 'ok', 'a send names %s' % ident
+            else:
+                verdict, why = 'undecidable', '%d send(s) near, none names %s' % (len(near), ident)
+        elif v == 'answered':
+            near = _near(art['sends'], a['ts'])
+            verdict, why = ('ok', '%d send(s) near' % len(near)) if near else \
+                           ('MISSTEER', '`answered` recorded with no send behind it')
+        elif v == 'relayed':
+            near = [x for x in _near(art['my_text'], a['ts'], 1800, 300) if len(x['text']) > 400]
+            verdict, why = ('ok', '%d substantial reply/ies to the owner' % len(near)) if near else \
+                           ('MISSTEER', '`relayed` with nothing said to the owner around it')
+        elif v in ('resolved', 'closed'):
+            near = _near(art['target'], a['ts'], 3600, 0)
+            verdict, why = ('ok', '%d target turn(s) precede it' % len(near)) if near else \
+                           ('MISSTEER', 'resolved with no target output before it')
+        out.append(dict(a, verdict=verdict, why=why))
+    return out
+
+
+SHA = re.compile(r'\b([0-9a-f]{7,40})\b')
+
+
+def claimed_commits(my_text):
+    """Every sha I asserted in my own words to the owner, with where I said it."""
+    seen = []
+    for t in my_text:
+        for m in SHA.finditer(t['text']):
+            s = m.group(1)
+            if re.fullmatch(r'\d+', s):
+                continue
+            seen.append({'ts': t['ts'], 'sha': s})
+    return seen
+
+
+def verify_commits(claims, git_probe):
+    """A commit claim is landed only if the object exists AND sits on a ref that matters.
+    'It is in my working tree' and 'it is on the branch the other agent reads' are different
+    claims, and the second is the one that counts."""
+    out = []
+    for c in claims:
+        exists, refs = git_probe(c['sha'])
+        out.append(dict(c, exists=exists, refs=refs,
+                        verdict='ok' if exists and refs else
+                                'MISSTEER' if not exists else 'undecidable'))
+    return out
+
+
+# ---------------------------------------------------------------- stage 4
+
+SUPERSEDE_HINT = re.compile(
+    r'\b(supersede[sd]?|withdraw[ns]?|withdrawn|retract(?:ed|ion)?|reversed?|'
+    r'no longer|instead of|replaced? by|answered|closed|resolved|overrul)\w*', re.I)
+
+
+def stage4_evidence(candidate, records, key_terms=None):
+    """For ONE restore candidate, every record AFTER its drop that could supersede it.
+
+    Owner: "some things might end up superseded, so you need to go and recursively check every
+    state restore you did to make sure it's valid in the face of new info."
+
+    This GATHERS; it does not decide. A candidate is reinstated only after a human-read verdict,
+    because 'he answered this later' is a judgement the text alone does not always carry."""
+    terms = key_terms or _terms(candidate['text'])
+    after = [r for r in records if (r.get('ts') or '') > candidate['ts']]
+    hits = []
+    for r in after:
+        txt = r.get('text') or ''
+        overlap = sum(1 for t in terms if t in txt.lower())
+        if overlap >= max(2, len(terms) // 4) or (overlap and SUPERSEDE_HINT.search(txt)):
+            hits.append({'ts': r['ts'], 'overlap': overlap, 'kind': r.get('kind', '?'),
+                         'excerpt': txt[:300]})
+    return {'candidate': candidate.get('cite'), 'terms': sorted(terms)[:12],
+            'records_after': len(after), 'hits': hits}
+
+
+STOP = set('the a an and or of to in is it that this for with on at by be are was as from '
+           'not you your i my he his we our they their if then so but do does did have has '
+           'had can will would should could must its into out up down over under again'.split())
+
+
+def _terms(text):
+    w = re.findall(r'[a-z]{4,}', text.lower())
+    return {x for x in w if x not in STOP}
