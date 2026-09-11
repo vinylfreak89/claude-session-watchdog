@@ -2055,9 +2055,11 @@ def test_snapshot_resolver():
     ck('answered: last_send_ts is its own run time -> landed',
        settle([act('answered', None, T(1, 30), kind='mark')], [row(1, {'last_send_ts': T(0, 5)}), row(2, {'last_send_ts': T(1, 30, 3)})]),
        [('landed', None)])
-    ck('answered: another send in the bracket overwrote it -> pending',
-       settle([act('answered', None, T(1, 30), kind='mark'), act('sent1', 'Q4', T(1, 50))],
-              [row(1, {'last_send_ts': T(0, 5)}), row(2, {'last_send_ts': T(1, 50, 1)})])[0],
+    # the other send lands a MINUTE later: its time is inside the window of `answered`, so only
+    # the check for other senders keeps it from being credited to `answered`
+    ck('answered: another send moments later overwrote it -> pending',
+       settle([act('answered', None, T(1, 30), kind='mark'), act('sent1', 'Q4', T(1, 31))],
+              [row(1, {'last_send_ts': T(0, 5)}), row(2, {'last_send_ts': T(1, 31, 1)})])[0],
        (None, None))
     ck('sent1: marked sent at that time -> landed',
        settle([act('sent1', 'Q4', T(1, 30))], [row(1, {'owner_queue': [{'id': 'Q4', 'ts': T(0, 1), 'text': 'x'}]}),
@@ -2084,10 +2086,13 @@ def test_snapshot_resolver():
     scr = dict(act('owe done', 'D3', T(1, 30)), state='scratch')
     ck('a scratch-state action is never settled from the live snapshots',
        settle([scr], [row(1, {'owner_decisions': dec('D3', T(0, 5))}), row(2, {'owner_decisions': {}})]), [(None, 'D3')])
+    # read as an empty state, the unreadable snapshot would show D3 gone; the next READABLE one
+    # still holds the same entry, so the clear did not take
     ck('an unreadable snapshot is skipped, never read as a state',
        settle([act('owe done', 'D3', T(1, 30))],
-              [row(1, {'owner_decisions': dec('D3', T(0, 5))}), row(2, None, readable=False), row(3, {'owner_decisions': {}})]),
-       [('landed', 'D3')])
+              [row(1, {'owner_decisions': dec('D3', T(0, 5))}), row(2, None, readable=False),
+               row(3, {'owner_decisions': dec('D3', T(0, 5))})]),
+       [('no_effect', 'D3')])
     refused = False
     try:
         R.resolve_from_snapshots([act('owe done', 'D3', T(1, 30))], [row(1, {}, at=False), row(2, {})])
