@@ -261,6 +261,18 @@ def run_stage(n, L, S, a):
         L['stage3']['commits'] = {'tally': dict(ctally),
                                   'missteers': [{'ts': x['ts'], 'sha': x['sha']}
                                                 for x in commits if x['verdict'] == 'MISSTEER'][:50]}
+        # DECISION CHAINS: a close is not a completed chain. Owner, 2026-09-11: "a decision is
+        # put to me, you record my decision and then never forward it. or you get an owed
+        # answer acknowledge it but never track or correct what it responds to."
+        if 'stage1' in L:
+            opens1, closes1, _u1 = RL.stage1(a.self_prefix, proj=a.proj)
+            ch = RL.chains(opens1, closes1, art)
+            broken = {k: v for k, v in ch.items() if v['verdicts'] != ['complete']}
+            L['stage3']['chains'] = ch
+            print('         %d decision chain(s): %d complete, %d broken'
+                  % (len(ch), len(ch) - len(broken), len(broken)))
+            for did, v in sorted(broken.items()):
+                print('   CHAIN %-4s %-46s %s' % (did, '+'.join(v['verdicts']), v['text'][:60]))
         decided = tally.get('ok', 0) + tally.get('MISSTEER', 0)
         cov['actions'] = [decided, len(adj)]
         print('stage 3: %d actions replayed -- %s' % (len(adj), dict(tally)))

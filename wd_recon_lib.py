@@ -738,3 +738,74 @@ def tm_state_at(raw):
         return json.loads(content), 'ok'
     except Exception as e:
         return None, 'content did not parse: %s' % e
+
+
+# ---------------------------------------------------------------- decision chains
+
+FORWARD_HINT = re.compile(r'\b(owner|his words|verbatim|he (?:says|said|ruled|answered))\b', re.I)
+
+
+def chains(opens, closes, art, snapshots=None):
+    """A DECISION IS A CHAIN, and every link can break independently.
+
+    Owner, 2026-09-11: "decisions can follow a chain. for example, a decision is put to me, you
+    record my decision and then never forward it. or you get an owed answer acknowledge it but
+    never track or correct what it responds to."
+
+        ASKED      `owe add` -- the question put to him
+        ANSWERED   his own words in the record, after the ask
+        FORWARDED  a message to the target carrying that answer
+        CLOSED     `owe done` / `owe-clear`
+        TRACKED    the thing the answer responds to is updated or closed after it
+
+    A store diff sees only CLOSED and calls the chain complete. These are the breaks it cannot
+    see, each a separate verdict rather than one 'incomplete':
+
+      answered_not_forwarded  he answered, I closed it, the target never received it
+      closed_without_answer   closed with nothing from him in the record
+      forwarded_not_tracked   relayed, but what it answers was never updated or closed
+      answered_not_closed     he answered and the item still sits open against him
+    """
+    by_id = {}
+    for o in opens:
+        if o['store'] != 'owner_decisions':
+            continue
+        by_id.setdefault(o.get('id') or o['cite'], {'asked': o['ts'], 'text': o['text'],
+                                                    'cite': o['cite']})
+    # attach ids positionally when the open did not carry one: D1 is the first, and so on
+    ordered = sorted(by_id.items(), key=lambda kv: kv[1]['asked'])
+    seq = {}
+    for n, (k, v) in enumerate(ordered, 1):
+        seq['D%d' % n] = v
+    for c in closes:
+        if c['id'] in seq:
+            seq[c['id']].setdefault('closed', c['ts'])
+    owner = sorted(art.get('owner') or [], key=lambda r: r['ts'])
+    sends = sorted(art.get('sends') or [], key=lambda r: r['ts'])
+    out = {}
+    for did, rec in seq.items():
+        terms = _terms(rec['text'])
+        answer = next((o for o in owner if o['ts'] > rec['asked']
+                       and sum(1 for t in terms if t in o['text'].lower()) >= max(2, len(terms) // 5)),
+                      None)
+        fwd = None
+        if answer:
+            fwd = next((s for s in sends if s['ts'] > answer['ts']
+                        and sum(1 for t in terms if t in s['msg'].lower()) >= max(2, len(terms) // 5)),
+                       None)
+        verdicts = []
+        if answer and not fwd:
+            verdicts.append('answered_not_forwarded')
+        if rec.get('closed') and not answer:
+            verdicts.append('closed_without_answer')
+        if answer and not rec.get('closed'):
+            verdicts.append('answered_not_closed')
+        if fwd and not rec.get('closed'):
+            verdicts.append('forwarded_not_tracked')
+        out[did] = {'asked': rec['asked'], 'cite': rec['cite'],
+                    'answered': answer['ts'] if answer else None,
+                    'forwarded': fwd['ts'] if fwd else None,
+                    'closed': rec.get('closed'),
+                    'verdicts': verdicts or ['complete'],
+                    'text': rec['text'][:120]}
+    return out

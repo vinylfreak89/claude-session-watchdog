@@ -714,9 +714,10 @@ def test_cli_all_stages():
         d3 = json.load(open(os.path.join(st, 'state.json')))
         ck('re-running the repair adds nothing', len(d3['owner_queue']), 1)
 
-        # stage 3 runs end to end against the corpus
+        # stage 3 runs end to end against the corpus, and reports decision chains
         rc, out = run('--stage', '3', '--proj', d, '--self-prefix', '80f99b89')
         ck('stage 3 runs from the CLI', 'actions replayed' in out or rc in (0, 1), True)
+        ck('stage 3 reports decision chains', 'decision chain' in out, True)
         return fails
     finally:
         shutil.rmtree(d, ignore_errors=True)
@@ -1021,6 +1022,150 @@ def test_robustness():
         shutil.rmtree(d, ignore_errors=True)
 
 
+
+# ======================================================================================
+# THE SYNTHETIC WORLD, in two halves that must agree:
+#   (a) a TRANSCRIPT that replays actions chronologically, and
+#   (b) a SERIES OF STATE SNAPSHOTS -- state.json as it stood at each backup.
+# Until now only (a) existed and stage 2 was tested against a hand-made dict, so the two
+# halves were never exercised together and a drop could not be dated against the actions
+# that caused it.
+# ======================================================================================
+
+CHAIN_DECISIONS = [
+    # (id, question text, answered?, forwarded?, closed?)  -- the truth, fixed here
+    ('D1', 'CHAIN COMPLETE: does the engine change to match the rule-8 ruling on partial lines',
+     True, True, True),
+    ('D2', 'ANSWERED BUT NEVER FORWARDED: which nominal threshold applies to the level cut',
+     True, False, True),
+    ('D3', 'CLOSED WITH NO ANSWER AT ALL: should the harness keep the fitted comb tolerance',
+     False, False, True),
+    ('D4', 'ANSWERED AND STILL OPEN: does position alone establish the head switch identity',
+     True, True, False),
+]
+CHAIN_TRUTH = {
+    'D1': ['complete'],
+    'D2': ['answered_not_forwarded'],
+    'D3': ['closed_without_answer'],
+    'D4': ['answered_not_closed', 'forwarded_not_tracked'],
+}
+
+
+def build_chain_world(dirpath):
+    """Transcript + snapshot series for the decision-chain cases."""
+    L, t = [], 0
+
+    def ts(h):
+        return '2026-09-10T%02d:00:00Z' % h
+
+    for n, (did, text, answered, forwarded, closed) in enumerate(CHAIN_DECISIONS):
+        base = 1 + n * 4
+        L.append(rec(ts(base), cmds=['./wd.sh owe add "%s"' % text]))
+        if answered:
+            # his answer arrives mid-turn, as an attachment -- not a `user` record
+            L.append({'type': 'attachment', 'timestamp': ts(base + 1),
+                      'message': {'role': 'user', 'content': [{'type': 'text',
+                                  'text': 'ruling on that: ' + text.split(':', 1)[1].strip()}]}})
+        if forwarded:
+            L.append({'type': 'assistant', 'timestamp': ts(base + 2),
+                      'message': {'role': 'assistant', 'content': [
+                          {'type': 'tool_use', 'name': 'mcp__ccd_session_mgmt__send_message',
+                           'input': {'session_id': 'local_target',
+                                     'message': 'OWNER, VERBATIM: ' + text.split(':', 1)[1].strip()}}]}})
+        if closed:
+            L.append(rec(ts(base + 3), cmds=['./wd.sh owe done %s' % did]))
+
+    p = os.path.join(dirpath, '80f99b89-chain.jsonl')
+    with open(p, 'w') as f:
+        for r in L:
+            f.write(json.dumps(r) + '\n')
+
+    # (b) the SNAPSHOT SERIES: state.json as it stood at each backup, evolving with the
+    # transcript above. D2's row disappears between 04 and 05 without a close in between.
+    snaps = {}
+    live_q = []
+    live_d = {}
+    for n, (did, text, answered, forwarded, closed) in enumerate(CHAIN_DECISIONS):
+        base = 1 + n * 4
+        live_d = dict(live_d)
+        live_d[did] = {'text': text}
+        snaps['2026-09-10-%02d0000' % base] = {'owner_queue': list(live_q),
+                                               'owner_decisions': dict(live_d),
+                                               'open_questions': {}, 'owner_decision_seq': n + 1}
+        if closed:
+            live_d = {k: v for k, v in live_d.items() if k != did}
+        snaps['2026-09-10-%02d0000' % (base + 3)] = {'owner_queue': list(live_q),
+                                                     'owner_decisions': dict(live_d),
+                                                     'open_questions': {},
+                                                     'owner_decision_seq': n + 1}
+    st = os.path.join(dirpath, 'state')
+    os.makedirs(st, exist_ok=True)
+    json.dump({'owner_queue': [], 'owner_decisions': {}, 'open_questions': {},
+               'owner_decision_seq': len(CHAIN_DECISIONS)},
+              open(os.path.join(st, 'state.json'), 'w'))
+    return p, st, snaps
+
+
+def test_decision_chains():
+    """A decision is a CHAIN and every link breaks independently. A store diff sees only the
+    close and calls all four of these complete."""
+    fails = []
+    def ck(name, got, want):
+        ok = got == want
+        print('%-56s %s%s' % (name, 'PASS' if ok else 'FAIL',
+                              '' if ok else '  got=%r want=%r' % (got, want)))
+        if not ok:
+            fails.append(name)
+
+    d = tempfile.mkdtemp(prefix='recon-chain-')
+    try:
+        _, st, snaps = build_chain_world(d)
+        opens, closes, _ = R.stage1('80f99b89', proj=d)
+        mine, tgt = R.load('80f99b89') if R.PROJ == d else ([], [])
+        # load() reads R.PROJ; drive it explicitly instead
+        old = R.PROJ
+        R.PROJ = d
+        try:
+            mine, tgt = R.load('80f99b89')
+            acts, art = R.timeline(mine, tgt)
+        finally:
+            R.PROJ = old
+
+        ck('all four decisions are seen as opened', len(opens), 4)
+        ck('the forwarding sends are seen',
+           len(art['sends']), sum(1 for _, _, _, f, _ in CHAIN_DECISIONS if f))
+        ck('his answers are read from attachment records',
+           len(art['owner']), sum(1 for _, _, a_, _, _ in CHAIN_DECISIONS if a_))
+
+        ch = R.chains(opens, closes, art)
+        for did, want in CHAIN_TRUTH.items():
+            ck('%s -> %s' % (did, '+'.join(want)), sorted(ch[did]['verdicts']), sorted(want))
+
+        ck('a complete chain records all four timestamps',
+           all(ch['D1'][k] for k in ('asked', 'answered', 'forwarded', 'closed')), True)
+        ck('an answered-not-forwarded chain has no forward', ch['D2']['forwarded'], None)
+        ck('a closed-without-answer chain has no answer', ch['D3']['answered'], None)
+        ck('an answered-not-closed chain has no close', ch['D4']['closed'], None)
+
+        # --- the SNAPSHOT half, agreeing with the transcript --------------------------
+        series = R.stage2_series(sorted(snaps), lambda s: snaps[s])
+        ck('every snapshot in the series is readable', len(series), len(snaps))
+        dis = R.stage2_disappearances(series)
+        ck('D1 disappearing is dated from the snapshots',
+           bool(dis['first_absent'].get('owner_decisions/D1')), True)
+        ck('a decision still present at the end is not reported absent',
+           'owner_decisions/D4' in dis['first_absent'], False)
+
+        # the two halves must AGREE: every dated disappearance has a close in the transcript
+        closed_ids = {c['id'] for c in closes if c['id']}
+        dated = {k.split('/')[1] for k in dis['first_absent'] if k.startswith('owner_decisions/')}
+        ck('every snapshot-dated disappearance has a transcript close',
+           dated <= closed_ids, True)
+        return fails
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def main():
     d = tempfile.mkdtemp(prefix='recon-fixture-')
     fails = []
@@ -1163,6 +1308,8 @@ def main():
         fails.extend(test_stage2())
         print('\n--- tm reader (synthesized) ---')
         fails.extend(test_tm_reader())
+        print('\n--- decision chains + snapshot series ---')
+        fails.extend(test_decision_chains())
         print('\n--- corner cases and error handling ---')
         fails.extend(test_corner_cases())
         print('\n--- robustness: concurrency, crash residue, hostile input ---')
