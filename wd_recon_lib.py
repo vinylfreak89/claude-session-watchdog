@@ -519,3 +519,135 @@ STOP = set('the a an and or of to in is it that this for with on at by be are wa
 def _terms(text):
     w = re.findall(r'[a-z]{4,}', text.lower())
     return {x for x in w if x not in STOP}
+
+
+# ---------------------------------------------------------------- stage 2
+
+def stage2_snapshots(tm_run, diskutil_run):
+    """Every backup that EXISTS, from ground truth -- not from the .timemachine listing.
+
+    Both parsers are written against REAL captured bytes (tests/fixtures/), because a mock of
+    output I invented would only prove the parser matches my invention. The real bytes settled
+    two things a hand-written mock would have got wrong:
+
+      * `diskutil apfs listSnapshots` names them `com.apple.TimeMachine.<date>.backup` in an
+        indented tree, and reports 47 on this drive;
+      * `tm ls` returns JSON with `count: 427` and `truncated: true` -- the stale-stub trap in
+        live form, and a TRUNCATION FLAG that must be honoured or the listing silently reads 8
+        of 427. An unhonoured truncation is indistinguishable from a short list.
+    """
+    truth = sorted(set(re.findall(r'(\d{4}-\d{2}-\d{2}-\d{6})', diskutil_run() or '')))
+    raw = tm_run('ls-backups') or ''
+    listed, count, truncated = [], None, False
+    try:
+        j = json.loads(raw)
+        listed = sorted({m.group(1) for e in j.get('entries', [])
+                         for m in [re.search(r'(\d{4}-\d{2}-\d{2}-\d{6})', e.get('name', ''))]
+                         if m})
+        count, truncated = j.get('count'), bool(j.get('truncated'))
+    except Exception:
+        listed = sorted(set(re.findall(r'(\d{4}-\d{2}-\d{2}-\d{6})', raw)))
+    return {'ground_truth': truth, 'listed': listed,
+            'listed_count': count, 'truncated': truncated,
+            'stale_stubs': [x for x in listed if x not in truth],
+            'unlisted_but_real': [x for x in truth if x not in listed],
+            'usable': not truncated,
+            'why_unusable': ('listing truncated at %d of %s -- page it before concluding '
+                             'anything' % (len(listed), count)) if truncated else ''}
+
+
+def stage2_series(snapshots, read_state):
+    """The state dir as it stood at EVERY snapshot. Owner: "reading that state directory since
+    it has existed. Do not binary search it. Do not sample it. Everything."
+
+    A snapshot whose state cannot be read is recorded as unreadable, NEVER skipped and never
+    treated as unchanged -- missing is not a value, and here it would hide the exact moment a
+    store lost a row."""
+    series = []
+    for s in snapshots:
+        d = read_state(s)
+        if d is None:
+            series.append({'snapshot': s, 'readable': False})
+            continue
+        series.append({'snapshot': s, 'readable': True,
+                       'owner_queue': [x.get('id') for x in (d.get('owner_queue') or [])],
+                       'owner_decisions': sorted((d.get('owner_decisions') or {}).keys()),
+                       'open_questions': sorted((d.get('open_questions') or {}).keys()),
+                       'keys': sorted(d.keys())})
+    return series
+
+
+def stage2_disappearances(series):
+    """For each id, the snapshot where it was last seen and the one where it was gone.
+    This is the audit source for misses: it dates a drop instead of inferring it."""
+    seen, gone = {}, {}
+    prev = None
+    for row in series:
+        if not row.get('readable'):
+            continue
+        now = set()
+        for store in ('owner_queue', 'owner_decisions', 'open_questions'):
+            for i in row.get(store) or []:
+                if i:
+                    now.add((store, i))
+                    seen[(store, i)] = row['snapshot']
+        if prev is not None:
+            for k in prev - now:
+                gone.setdefault(k, row['snapshot'])
+        prev = now
+    return {'last_seen': {'%s/%s' % k: v for k, v in seen.items()},
+            'first_absent': {'%s/%s' % k: v for k, v in gone.items()},
+            'unreadable': [r['snapshot'] for r in series if not r.get('readable')]}
+
+
+# ---------------------------------------------------------------- stage 5
+
+def stage5_repair(state_dir, restores, apply=False):
+    """ADDITIVE repair. Owner: "Do not clear any queues."
+
+    Appends what survived stage 4 and touches nothing that is already there. Existing rows must
+    be byte-identical afterwards, and running it twice must not duplicate -- a repair that is
+    not idempotent turns a re-run into corruption."""
+    p = os.path.join(state_dir, 'state.json')
+    d = json.load(open(p))
+    before = json.dumps(d, sort_keys=True)
+    added, skipped = [], []
+    for r in restores:
+        store = r['store']
+        if store == 'owner_queue':
+            rows = d.setdefault('owner_queue', [])
+            if any(x.get('restored_sha256') == r['sha256'] for x in rows):
+                skipped.append(r['sha256'][:12]); continue
+            rows.append({'id': r.get('id') or ('R%d' % (len(rows) + 1)),
+                         'text': r['text'], 'restored_from': r['cite'],
+                         'restored_sha256': r['sha256'], 'restored_ts': r.get('now')})
+        else:
+            rows = d.setdefault(store, {})
+            key = r.get('id') or ('R%d' % (len(rows) + 1))
+            if any(v.get('restored_sha256') == r['sha256'] for v in rows.values()):
+                skipped.append(r['sha256'][:12]); continue
+            rows[key] = {'text': r['text'], 'restored_from': r['cite'],
+                         'restored_sha256': r['sha256'], 'restored_ts': r.get('now')}
+        added.append(r['sha256'][:12])
+    # Nothing that existed at the START OF THIS CALL may have changed. Compare against a
+    # snapshot taken before mutation -- NOT against "rows without a restore marker", which
+    # misclassifies rows an earlier run restored and breaks the second run (found by the
+    # idempotency fixture, 2026-09-11).
+    orig = json.loads(before)
+    oq = orig.get('owner_queue') or []
+    if json.dumps(d.get('owner_queue', [])[:len(oq)], sort_keys=True) != json.dumps(oq, sort_keys=True):
+        raise AssertionError('repair modified or reordered existing owner_queue rows -- refused')
+    for store in ('owner_decisions', 'open_questions'):
+        for k, v in (orig.get(store) or {}).items():
+            if json.dumps((d.get(store) or {}).get(k), sort_keys=True) != json.dumps(v, sort_keys=True):
+                raise AssertionError('repair modified existing %s/%s -- refused' % (store, k))
+    for k in orig:
+        if k in ('owner_queue', 'owner_decisions', 'open_questions'):
+            continue
+        if json.dumps(d.get(k), sort_keys=True) != json.dumps(orig[k], sort_keys=True):
+            raise AssertionError('repair touched unrelated key %r -- refused' % k)
+    if apply:
+        tmp = p + '.tmp'
+        json.dump(d, open(tmp, 'w'), indent=1, sort_keys=True)
+        os.replace(tmp, p)
+    return {'added': added, 'skipped_duplicate': skipped, 'applied': bool(apply)}

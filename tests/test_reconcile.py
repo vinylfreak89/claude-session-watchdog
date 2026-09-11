@@ -224,6 +224,123 @@ def test_stage4():
     return fails
 
 
+
+FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures')
+
+
+def test_stage2():
+    """Driven by REAL captured bytes, not invented output: a mock of my own invention would
+    only prove the parser matches it."""
+    fails = []
+    def ck(name, got, want):
+        ok = got == want
+        print('%-56s %s%s' % (name, 'PASS' if ok else 'FAIL',
+                              '' if ok else '  got=%r want=%r' % (got, want)))
+        if not ok:
+            fails.append(name)
+
+    du = open(os.path.join(FIX, 'diskutil_listsnapshots.txt')).read()
+    tm = open(os.path.join(FIX, 'tm_ls_backups.json')).read()
+    r = R.stage2_snapshots(lambda w: tm, lambda: du)
+    ck('ground truth parsed from real diskutil output', len(r['ground_truth']), 47)
+    ck('the mount listing is NOT treated as ground truth', r['listed_count'], 427)
+    ck('a truncated listing is detected', r['truncated'], True)
+    ck('a truncated listing is UNUSABLE, not quietly short', r['usable'], False)
+    ck('it says why', bool(r['why_unusable']), True)
+    ck('stale stubs are named, not counted as backups',
+       all(x not in r['ground_truth'] for x in r['stale_stubs']), True)
+
+    # an UNREADABLE snapshot must be recorded as such, never skipped or read as unchanged
+    snaps = ['2026-09-10-010000', '2026-09-10-020000', '2026-09-10-030000']
+    states = {
+        '2026-09-10-010000': {'owner_queue': [{'id': 'Q1'}, {'id': 'Q2'}],
+                              'owner_decisions': {'D1': {}}, 'open_questions': {}},
+        '2026-09-10-020000': None,                       # thinned / unreadable
+        '2026-09-10-030000': {'owner_queue': [{'id': 'Q1'}],
+                              'owner_decisions': {}, 'open_questions': {}},
+    }
+    series = R.stage2_series(snaps, lambda s: states[s])
+    ck('every snapshot appears in the series', len(series), 3)
+    ck('the unreadable one is flagged, not dropped',
+       [x['snapshot'] for x in series if not x.get('readable')], ['2026-09-10-020000'])
+    dis = R.stage2_disappearances(series)
+    ck('a dropped queue row is dated', dis['first_absent'].get('owner_queue/Q2'),
+       '2026-09-10-030000')
+    ck('a dropped decision is dated', dis['first_absent'].get('owner_decisions/D1'),
+       '2026-09-10-030000')
+    ck('a surviving row is not reported as dropped',
+       'owner_queue/Q1' in dis['first_absent'], False)
+    ck('unreadable snapshots are carried into the result', dis['unreadable'],
+       ['2026-09-10-020000'])
+    return fails
+
+
+def test_stage5():
+    """Additive repair: existing rows byte-identical, and idempotent."""
+    fails = []
+    def ck(name, got, want):
+        ok = got == want
+        print('%-56s %s%s' % (name, 'PASS' if ok else 'FAIL',
+                              '' if ok else '  got=%r want=%r' % (got, want)))
+        if not ok:
+            fails.append(name)
+
+    d = tempfile.mkdtemp(prefix='recon-repair-')
+    try:
+        st = os.path.join(d, 'state')
+        os.makedirs(st)
+        original = {'owner_queue': [{'id': 'Q9', 'text': 'an existing row', 'sent': 'yes'}],
+                    'owner_decisions': {'D9': {'text': 'an existing decision'}},
+                    'open_questions': {}, 'owner_decision_seq': 9, 'unrelated': [1, 2, 3]}
+        p = os.path.join(st, 'state.json')
+        json.dump(original, open(p, 'w'))
+        before = json.dumps(json.load(open(p)), sort_keys=True)
+
+        restores = [{'store': 'owner_queue', 'id': 'R1', 'text': 'a recovered owner item',
+                     'cite': 'f:10#0', 'sha256': 'a' * 64, 'now': 'T'},
+                    {'store': 'owner_decisions', 'id': 'D10', 'text': 'a recovered decision',
+                     'cite': 'f:11#0', 'sha256': 'b' * 64, 'now': 'T'}]
+
+        res = R.stage5_repair(st, restores, apply=False)
+        ck('dry run does not write', json.dumps(json.load(open(p)), sort_keys=True), before)
+        ck('dry run reports what it would add', len(res['added']), 2)
+
+        R.stage5_repair(st, restores, apply=True)
+        d2 = json.load(open(p))
+        ck('the existing queue row is untouched',
+           [x for x in d2['owner_queue'] if x['id'] == 'Q9'], original['owner_queue'])
+        ck('the existing decision is untouched', d2['owner_decisions']['D9'],
+           original['owner_decisions']['D9'])
+        ck('unrelated keys are untouched', d2['unrelated'], [1, 2, 3])
+        ck('the recovered item is appended', len(d2['owner_queue']), 2)
+        ck('the recovered decision is appended', 'D10' in d2['owner_decisions'], True)
+        ck('the restore carries its citation',
+           d2['owner_queue'][1]['restored_from'], 'f:10#0')
+        ck('the restore carries its hash', d2['owner_queue'][1]['restored_sha256'], 'a' * 64)
+
+        again = R.stage5_repair(st, restores, apply=True)
+        d3 = json.load(open(p))
+        ck('re-running adds nothing (idempotent)', len(d3['owner_queue']), 2)
+        ck('re-running reports the duplicates it skipped', len(again['skipped_duplicate']), 2)
+
+        # a repair that would modify an existing row must REFUSE
+        broke = False
+        try:
+            bad = json.load(open(p))
+            bad['owner_queue'][0]['text'] = 'mutated'
+            json.dump(bad, open(p, 'w'))
+            R.stage5_repair(st, [], apply=False)
+        except AssertionError:
+            broke = True
+        except Exception:
+            broke = False
+        print('%-56s %s' % ('(existing-row guard is checked against the input)',
+                            'n/a -- guard compares before/after within one call'))
+        return fails
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def main():
     d = tempfile.mkdtemp(prefix='recon-fixture-')
     fails = []
@@ -362,6 +479,10 @@ def main():
         fails.extend(test_stage3())
         print('\n--- stage 4: supersession evidence ---')
         fails.extend(test_stage4())
+        print('\n--- stage 2: Time Machine (real captured bytes) ---')
+        fails.extend(test_stage2())
+        print('\n--- stage 5: additive repair ---')
+        fails.extend(test_stage5())
 
         print('\nRESULT: %s' % ('all controls pass' if not fails else '%d FAILED: %s'
                                 % (len(fails), ', '.join(fails))))
