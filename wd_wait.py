@@ -25,6 +25,18 @@ every wake); --follow streams.
                                                      re-arm. Default 60s, so the loop comes back every minute
                                                      rather than blocking for hours and losing a turn end.
 
+Every event is followed by TWO lines carrying the send gate's own verdict, so the decision is already
+made before the line is read rather than left to be remembered:
+
+  NEXT: TARGET BUSY (turn open). 5 queued. SEND NOTHING.
+  USAGE: send nothing. Only the owner marking an item send-immediately overrides the gate.
+
+  NEXT: SEND Q43 -- 5 queued.
+  USAGE: send THAT ONE item verbatim and nothing else, then run `wd.sh sent1 Q43`. Only the owner
+  marking an item send-immediately overrides the gate.
+
+They are `wd_check.next_item()`'s output, not a restatement of it, so they cannot drift from the gate.
+
 Exactly one event per transcript turn: a counter bump that lands while a turn is open, or after the turn was
 already reported, is logged to stderr as a lagged count and NOT emitted. Silent interrogation: while the target
 is idle past --stale-after and state.json lists in-flight work, every backstop tick re-checks each item's
@@ -40,6 +52,38 @@ def log(msg):
 
 def emit(line):
     sys.stdout.write(line + '\n'); sys.stdout.flush()
+
+def gate_lines(sess, state_dir):
+    """The SEND GATE's verdict, computed and printed beside every event this hook emits.
+
+    The hook already tells the watchdog what the target did. It did not tell it what it is allowed to
+    DO about that, so the decision was left to be remembered -- and it was not: two queued items went
+    out together, and the queue was bypassed for a whole evening while `wd.sh next` sat unused on the
+    send path.
+
+    A paragraph of usage would be a THIRD STORE of the rules (the gate's code, SKILL.md, and the
+    paragraph) with nothing keeping them in step, and it would go unread by the third firing. So this
+    prints the gate's own COMPUTED ANSWER instead: there is nothing to remember, because the decision
+    has already been made before the line is read. It cannot drift from the gate because it IS the
+    gate -- `next_item` is called, not re-described.
+
+    A gate that cannot run says so by name. `UNAVAILABLE` must never read like `nothing queued`:
+    missing is not a value, and a silent gate is how a send goes out ungated.
+    """
+    try:
+        import wd_check as C
+        import wd_wake as WK
+        verdict, item, why, n = C.next_item(sess, WK.load_state(state_dir))
+    except Exception as e:
+        return ['NEXT: UNAVAILABLE (%s: %s) -- the gate did NOT run. Send nothing; run `wd.sh next`.'
+                % (type(e).__name__, e)]
+    flat = ' '.join((why or '').split())
+    if verdict == 'send':
+        return ['NEXT: SEND %s -- %d queued.%s' % (item.get('id'), n, (' ' + flat) if flat else ''),
+                'USAGE: send THAT ONE item verbatim and nothing else, then run `wd.sh sent1 %s`. '
+                'Only the owner marking an item send-immediately overrides the gate.' % item.get('id')]
+    return ['NEXT: %s' % (flat or verdict.upper()),
+            'USAGE: send nothing. Only the owner marking an item send-immediately overrides the gate.']
 
 class Watch(object):
     def __init__(self, sess, state_dir, stale_after, stall_min, self_sess=None, idle_after=0):
@@ -386,16 +430,26 @@ def main():
         try: procs = len(W.live_children(sess))
         except Exception: procs = -1
         emit('AUDIT ct=%s idle_min=%d live=%d inflight=%d cec=%s open=%d' % (st['ct'], idle, procs, len(sj.get('in_flight') or []), st['cec'], 1 if _open else 0))
+        for g in gate_lines(sess, a.state_dir): emit(g)
         return 0
     while True:
-        for line in w.poll(a.backstop):
-            emit(line)
+        lines = w.poll(a.backstop)
+        if lines:
+            for line in lines:
+                emit(line)
+                if not a.follow: break
+            # The verdict rides with EVERY event, not only a turn end: a stall, an overdue reply and an
+            # interruption all change what may be sent, and all three were points at which the queue was
+            # bypassed. One computation per wake, after the event it is about.
+            for g in gate_lines(sess, a.state_dir): emit(g)
             if not a.follow: return 0
         if a.max_wait and time.time() - t0 > a.max_wait:
             _a = w.activity_ms()
             idle = int(time.time() - _a / 1000.0) if _a else -1
             st_ = w.state_json()
-            emit('HEARTBEAT idle_min=%d ct=%s inflight=%d open=%d' % (idle / 60.0, w.ct, len(st_.get('in_flight') or []), 1 if w.turn_open else 0)); return 3
+            emit('HEARTBEAT idle_min=%d ct=%s inflight=%d open=%d' % (idle / 60.0, w.ct, len(st_.get('in_flight') or []), 1 if w.turn_open else 0))
+            for g in gate_lines(sess, a.state_dir): emit(g)
+            return 3
 
 if __name__ == '__main__':
     sys.exit(main())
