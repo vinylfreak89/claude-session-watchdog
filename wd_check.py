@@ -145,6 +145,61 @@ def turn_made_a_dispatch(turn):
         if DISPATCH_CMD.search(json.dumps(u.get('input') or {})): return True
     return False
 
+def answered_allowed(tx_path, self_sel, state, owner_ack):
+    """May `answered` be recorded? Only on EVIDENCE, never on this session's say-so.
+
+    `answered` asserts that a message reached the target. Nothing verified it, and five invocations
+    in one session had no send behind them -- every one chained as `relayed <ts> && answered`, which
+    fuses relaying to the OWNER with discharging the obligation to the TARGET. Three of those turns
+    carried claims that then went unchecked while the alarm recorded them handled, and one reached
+    the owner before it was withdrawn. A sixth credited one send to two turns.
+
+    The evidence is the TARGET's own transcript: a delivered message appears there as a user record
+    carrying `<cross-session-message from="<self>"`. Each send is credited once, so a single reply
+    cannot discharge two turns. The owner's route is explicit and requires his words -- an empty
+    string must not launder a bypass. Control: tests/test_answered_needs_evidence.py.
+    """
+    if owner_ack is not None:
+        if not str(owner_ack).strip():
+            return False, 'an empty --owner-ack is not an acknowledgement'
+        state['owner_ack'] = dict(words=str(owner_ack).strip(), at=W.now_iso())
+        return True, 'owner acknowledged: %s' % W.short(str(owner_ack).strip(), 80)
+    marker = 'from="%s"' % (self_sel or '')
+    newest = None
+    try:
+        with open(tx_path, errors='replace') as f:
+            for line in f:
+                # Prefilter on the BARE id: in the raw JSON line the quotes around it are escaped
+                # (`from=\\"id\\"`), so filtering on the quoted marker here rejects real sends --
+                # a character form standing in for the decoded one. The precise check is below,
+                # against the DECODED body.
+                if (self_sel or '') not in line:
+                    continue
+                try: d = json.loads(line)
+                except Exception: continue
+                if d.get('type') != 'user':
+                    continue
+                c = d.get('message', {}).get('content')
+                body = c if isinstance(c, str) else json.dumps(c)
+                if marker not in body:
+                    continue
+                ts = d.get('timestamp') or ''
+                if ts and (newest is None or ts > newest):
+                    newest = ts
+    except FileNotFoundError:
+        return False, 'no target transcript at %s' % tx_path
+    if newest is None:
+        return False, ('NO MESSAGE FROM THIS SESSION IS IN THE TARGET\'S TRANSCRIPT. '
+                       'Relaying to the owner is not replying to the target. Send, or pass '
+                       '--owner-ack "<his words>".')
+    already = state.get('credited_send_ts')
+    if already and newest <= already:
+        return False, ('the newest delivered message (%s) was ALREADY credited to an earlier '
+                       '`answered`. One reply cannot discharge two turns.' % newest)
+    state['credited_send_ts'] = newest
+    return True, 'delivered message at %s' % newest
+
+
 def owed(sess, state):
     """What the watchdog still owes on each completed target turn.
 
@@ -277,8 +332,15 @@ def main():
     if a.mode == 'answered':
         # Sends go out through the MCP tool, which cannot write here, so this is the hook that
         # records them. Forgetting it makes `owed` claim a turn is unanswered when it was answered.
+        # It is now GATED ON EVIDENCE rather than on this session's word: five invocations in one
+        # session had no send behind them, each chained as `relayed <ts> && answered`, which fuses
+        # relaying to the OWNER with replying to the TARGET. See answered_allowed.
+        ack = ' '.join(a.rest).strip() if a.rest else None
+        ok, why = answered_allowed(W.transcript_path(sess), a.self_sel, state, ack)
+        if not ok:
+            print('REFUSED: %s' % why); return 1
         state['last_send_ts'] = W.now_iso(); WK.save_state(a.state_dir, state)
-        print('answered at %s' % state['last_send_ts']); return 0
+        print('answered at %s (%s)' % (state['last_send_ts'], why)); return 0
     if a.mode in ('relayed', 'hold'):
         ts = a.rest[0] if a.rest else ''
         if not ts: ap.error('%s <turn end_ts> %s' % (a.mode, '"reason"' if a.mode == 'hold' else ''))

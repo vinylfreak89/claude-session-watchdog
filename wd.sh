@@ -48,7 +48,13 @@ case "$cmd" in
   veto)   id=$1; shift; exec $PY "$D/wd_wake.py" --state-dir "$S" --veto "$id" --reason "$*" ;;
   cost)   [ -n "$SELF" ] || { echo "config.json: 'self' is not set" >&2; exit 2; }; exec $PY "$D/wd_cost.py" --self "$SELF" --state-dir "$S" "$@" ;;
   owed)   exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" owed ;;
-  answered) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" answered ;;
+  answered) # --owner-ack "<his words>" is the ONLY bypass, and it must be explicit: an earlier
+           # version took any trailing argument as the acknowledgement, and the historical usage
+           # was `answered <timestamp>`, so a timestamp would have been recorded as the owner
+           # saying so. Control: tests/test_owner_ack_explicit.py
+           if [ "$1" = "--owner-ack" ]; then shift; exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" answered "$@";
+           elif [ -n "$1" ]; then echo "answered takes no arguments; use --owner-ack \"<his words>\"" >&2; exit 2;
+           else exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" answered; fi ;;
   relayed) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" relayed "$@" ;;
   ask)    exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" ask "$@" ;;
   resolved) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" resolved "$@" ;;
