@@ -196,6 +196,20 @@ def status_line(L):
 
 
 
+def _target_id(a):
+    """The target's session id. sent1, nudged and answered claim a send TO THE TARGET, so the
+    replay must know which session that is; it is resolved from the configured selector the way
+    every other verb resolves it (local session metadata -- the target is never contacted)."""
+    if getattr(a, 'target_id', None):
+        return a.target_id
+    if getattr(a, 'target', None):
+        import wd_lib as W
+        return W.find_session(a.target)['sessionId']
+    raise SystemExit('stage 3 needs the target: sent1, nudged and answered claim a send TO THE '
+                     'TARGET, and a send elsewhere must not satisfy them. Run it through wd.sh '
+                     '(which passes --target) or give --target-id.')
+
+
 def run_stage(n, L, S, a):
     """RUN a stage and write what it measured into the ledger. Coverage is computed from these
     numbers, never typed -- finishing cannot be asserted."""
@@ -240,11 +254,12 @@ def run_stage(n, L, S, a):
     if n == 3:
         if 'stage1' not in L:
             raise SystemExit('run --stage 1 first: stage 3 replays the actions it found')
+        tid = _target_id(a)
         path, numbered, bad, recs, acts, owner, exc, peers, acct, my_text, sends = _world()
         starts = RL.turn_starts(numbered)
-        rep = RL.landed_replay(acts, starts, my_text, sends, peers, RL.live_stores(S)['raw'])
+        rep = RL.landed_replay(acts, starts, my_text, sends, peers, RL.live_stores(S)['raw'], tid)
         tally = _c.Counter(x['verdict'] for x in rep)
-        ch = RL.decision_chains(acts, owner, my_text, sends)
+        ch = RL.decision_chains(acts, owner, my_text, sends, tid)
         broken = {k: v for k, v in ch.items() if v['verdicts'] != ['complete']}
         import subprocess as _sp
         repos = []
@@ -269,7 +284,7 @@ def run_stage(n, L, S, a):
 
         commits = RL.verify_commits(RL.claimed_commits(my_text), _probe)
         ctally = _c.Counter(x['verdict'] for x in commits)
-        L['stage3'] = {'ts': now_iso(), 'tally': dict(tally),
+        L['stage3'] = {'ts': now_iso(), 'target': tid, 'tally': dict(tally),
                        'findings': [{'ts': x['ts'], 'cite': x['cite'], 'verb': x['verb'],
                                      'id': x.get('id'), 'verdict': x['verdict'], 'why': x['why']}
                                     for x in rep if x['verdict'] != 'ok'],
@@ -343,6 +358,8 @@ def main():
     ap.add_argument('--apply', action='store_true', help='stage 5 only: write the repair')
     ap.add_argument('--proj', help='transcript corpus (testing)')
     ap.add_argument('--self-prefix', default='80f99b89')
+    ap.add_argument('--target', help='the target session selector, as wd.sh passes it from config')
+    ap.add_argument('--target-id', help='the target session id directly (testing)')
     ap.add_argument('--repo', action='append', default=[],
                     help='a repo whose commits my claims may refer to (repeatable)')
     ap.add_argument('--validate', type=int)

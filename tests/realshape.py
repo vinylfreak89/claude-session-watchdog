@@ -75,12 +75,14 @@ def say(ts, text):
              'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': text}]}}]
 
 
-def send(ts, message, result='Message delivered (delivery: delivered; message_id: m)'):
+def send(ts, message, result='Message delivered (delivery: delivered; message_id: m)',
+         to='local_target'):
+    """A send_message call. Its destination is `session_id`, the key every real send carries."""
     uid = _uid()
     return [{'type': 'assistant', 'timestamp': ts,
              'message': {'role': 'assistant', 'content': [
                  {'type': 'tool_use', 'id': uid, 'name': 'mcp__ccd_session_mgmt__send_message',
-                  'input': {'session_id': 'local_target', 'message': message}}]}},
+                  'input': {'session_id': to, 'message': message}}]}},
             {'type': 'user', 'timestamp': ts,
              'message': {'role': 'user', 'content': [
                  {'type': 'tool_result', 'tool_use_id': uid, 'content': result}]}}]

@@ -204,7 +204,7 @@ def test_stage3():
               'to': 'local_target'}]
     peers = [{'ts': T(7, 2), 'from': 'local_target', 'text': 'here is my answer'}]
     state = {'owner_queue_sent': [{'id': 'Q10', 'text': 'the tenth item text sent after it was marked'}]}
-    rep = R.landed_replay(acts, starts, my_text, sends, peers, state)
+    rep = R.landed_replay(acts, starts, my_text, sends, peers, state, 'local_target')
     v = {(x['verb'], x.get('id'), x['ts']): x['verdict'] for x in rep}
     ck('sent1 with a same-turn send carrying its text -> ok', v[('sent1', 'Q7', T(5, 1))], 'ok')
     ck('sent1 whose turn sent a DIFFERENT item -> MISSTEER', v[('sent1', 'Q9', T(5, 2))], 'MISSTEER')
@@ -763,10 +763,23 @@ def test_cli_all_stages():
         d3 = json.load(open(os.path.join(st, 'state.json')))
         ck('re-running the repair adds nothing', len(d3['owner_queue']), 1)
 
-        # stage 3 runs end to end against the corpus, and reports decision chains
+        # stage 3 without a target REFUSES by name rather than replaying against any session
         rc, out = run('--stage', '3', '--proj', d, '--self-prefix', '80f99b89')
-        ck('stage 3 runs from the CLI', 'actions replayed' in out or rc in (0, 1), True)
+        # BY NAME means a refusal, not a crash that happens to contain the phrase: with the
+        # CLI's refusal removed, the lib's own check still stopped stage 3 -- as a traceback
+        ck('stage 3 without a target refuses by name',
+           (rc != 0, 'needs the target' in out, 'Traceback' in out), (True, True, False))
+        # stage 3 runs end to end against the corpus, and reports decision chains
+        rc, out = run('--stage', '3', '--proj', d, '--self-prefix', '80f99b89',
+                      '--target-id', 'local_target')
+        ck('stage 3 runs from the CLI', 'actions replayed' in out, True)
         ck('stage 3 reports decision chains', 'decision chain' in out, True)
+        led = json.load(open(os.path.join(st, 'reconcile.json')))
+        ck('stage 3 records which target it replayed against',
+           (led.get('stage3') or {}).get('target'), 'local_target')
+        wdsh = open(os.path.join(here, 'wd.sh')).read()
+        ck('wd.sh passes the configured target to reconcile',
+           bool(re.search(r'reconcile\) exec .*--target "\$TARGET"', wdsh)), True)
         return fails
     finally:
         shutil.rmtree(d, ignore_errors=True)
@@ -1242,7 +1255,7 @@ def test_decision_chains():
         ck('his answers are read from queued_command attachments',
            len(owner), sum(1 for x in CHAIN_DECISIONS if x[3]))
 
-        ch = R.decision_chains(acts, owner, my_text, sends)
+        ch = R.decision_chains(acts, owner, my_text, sends, 'local_target')
         for did, want in CHAIN_TRUTH.items():
             ck('%s -> %s' % (did, '+'.join(want)), sorted(ch[did]['verdicts']), sorted(want))
         ck('a complete chain records every timestamp',
@@ -1293,8 +1306,8 @@ def test_chain_edges():
                 'outcome': oc, 'why': 'result'}
 
     say = lambda ts, text: {'ts': ts, 'text': text}
-    send = lambda ts, msg: {'ts': ts, 'msg': msg}
-    dc = R.decision_chains
+    send = lambda ts, msg, to='local_target': {'ts': ts, 'msg': msg, 'to': to}
+    dc = lambda *a: R.decision_chains(*a, target='local_target')
 
     # a window that starts mid-history: the id is whatever the RESULT minted
     ch = dc([ask('D5', T(5)), close('D5', T(6, 30))], [say(T(5, 30), 'yes')],
@@ -1532,12 +1545,7 @@ def test_actions_and_chains_real_shapes():
         acts = R.my_actions(numbered, fname)
         recs_ = [r for _, r in numbered]
         owner, exc, peers, acct = R.owner_messages(recs_)
-        my_text = [{'ts': r['timestamp'], 'text': b['text']} for r in recs_
-                   if r.get('type') == 'assistant'
-                   for b in (r['message']['content']) if b.get('type') == 'text']
-        sends = [{'ts': r['timestamp'], 'msg': b['input']['message']} for r in recs_
-                 if r.get('type') == 'assistant' for b in r['message']['content']
-                 if b.get('type') == 'tool_use' and 'send_message' in b.get('name', '')]
+        my_text, sends = R.artifacts(recs_)
 
         # --- batch delivery + accounting ---
         ck('a batched delivery does not double-count its messages',
@@ -1553,7 +1561,7 @@ def test_actions_and_chains_real_shapes():
         ck('an open whose result minted no id is recorded failed',
            [a['outcome'] for a in opens if not a['id']], ['failed'])
 
-        ch = R.decision_chains(acts, owner, my_text, sends)
+        ch = R.decision_chains(acts, owner, my_text, sends, 'local_target')
         want = {
             'D1': ['complete'],
             'D2': ['answered_not_forwarded'],
@@ -1574,7 +1582,7 @@ def test_actions_and_chains_real_shapes():
 
         starts = R.turn_starts(numbered)
         rep = R.landed_replay(acts, starts, my_text, sends, peers,
-                              {'owner_queue': [], 'owner_queue_sent': []})
+                              {'owner_queue': [], 'owner_queue_sent': []}, 'local_target')
         by = lambda verb, ident: [x['verdict'] for x in rep if x['verb'] == verb and x.get('id') == ident]
         ck('sent1 Q1 with a send carrying it -> ok', by('sent1', 'Q1'), ['ok'])
         ck('sent1 Q2 marked sent, never sent -> MISSTEER', by('sent1', 'Q2'), ['MISSTEER'])
@@ -1622,7 +1630,8 @@ def test_repeats_and_peers():
                            'ts': ts, 'cite': 'c', 'text': 'q', 'text_resolved': True,
                            'outcome': 'landed', 'why': ''}
     ch = R.decision_chains([ask('D1', T(0)), ask('D2', T(4))], msgs,
-                           [{'ts': T(0, 30), 'text': 'D1 for you'}, {'ts': T(4, 30), 'text': 'D2 for you'}], [])
+                           [{'ts': T(0, 30), 'text': 'D1 for you'}, {'ts': T(4, 30), 'text': 'D2 for you'}], [],
+                           'local_target')
     ck('a repeated reply still answers the LATER put', ch['D2']['answered'], T(5))
 
     m2 = R.owner_messages([RS.user_str(T(1), 'go ahead')] + RS.owner_turn(T(2), 'go ahead'))[0]
@@ -1650,12 +1659,81 @@ def test_repeats_and_peers():
     acts = R.my_actions(numbered, 'f')
     _o, _e, peers, _a = R.owner_messages(recs)
     my_text, sends = R.artifacts(recs)
-    rep = R.landed_replay(acts, R.turn_starts(numbered), my_text, sends, peers, {})
+    rep = R.landed_replay(acts, R.turn_starts(numbered), my_text, sends, peers, {}, 'local_target')
     got = {x['id']: x['verdict'] for x in rep if x['verb'] == 'resolved'}
     ck('a send records where it went', [x.get('to') for x in sends], ['local_target', 'local_target'])
     ck('each peer reply is recorded once, not once per channel', len(peers), 2)
     ck('a reply from a session never sent to does not resolve', got.get('K1'), 'MISSTEER')
     ck('a reply from the session it was sent to resolves', got.get('K2'), 'ok')
+    return fails
+
+
+def test_sends_to_target():
+    """sent1, nudged and answered claim a send TO THE TARGET, and a forward of his answer counts
+    only if it reached the target. Measured on the real record: of 393 sends, 4 went to another
+    session, and before this any of them satisfied these checks."""
+    import realshape as RS
+    fails = []
+    def ck(name, got, want):
+        ok = got == want
+        print('%-56s %s%s' % (name, 'PASS' if ok else 'FAIL',
+                              '' if ok else '  got=%r want=%r' % (got, want)))
+        if not ok:
+            fails.append(name)
+
+    T = lambda h, m=0: '2026-09-10T%02d:%02d:00Z' % (h, m)
+    ITEM1 = 'the first owner item, long enough to be a sentence of his'
+    ITEM2 = 'the second owner item, also long enough to be a sentence'
+    recs = []
+    recs += RS.bash(T(1), './wd.sh queue add "%s"' % ITEM1, 'queued Q1')
+    recs += RS.owner_turn(T(2), 'send the first one')
+    recs += RS.send(T(2, 1), 'OWNER: ' + ITEM1, to='local_OTHER')
+    recs += RS.bash(T(2, 2), './wd.sh sent1 Q1', 'item Q1 marked sent at T')
+    recs += RS.bash(T(3), './wd.sh queue add "%s"' % ITEM2, 'queued Q2')
+    recs += RS.owner_turn(T(4), 'and the second')
+    recs += RS.send(T(4, 1), 'OWNER: ' + ITEM2)
+    recs += RS.bash(T(4, 2), './wd.sh sent1 Q2', 'item Q2 marked sent at T')
+    recs += RS.bash(T(5), './wd.sh ask "is the box held once acquired?"', 'open question K1 registered')
+    recs += RS.owner_turn(T(6), 'nudge them')
+    recs += RS.send(T(6, 1), 'nudge: is the box held once acquired?', to='local_OTHER')
+    recs += RS.bash(T(6, 2), './wd.sh nudged K1', 'nudged K1 (1 resend(s)); due again')
+    recs += RS.owner_turn(T(7), 'nudge again')
+    recs += RS.send(T(7, 1), 'nudge: is the box held once acquired?')
+    recs += RS.bash(T(7, 2), './wd.sh nudged K1', 'nudged K1 (2 resend(s)); due again')
+    recs += RS.bash(T(8), './wd.sh owe add "keep the fitted tolerance or not?"', 'recorded D1 READY')
+    recs += RS.say(T(8, 5), 'D1 for you: keep the fitted tolerance or not?')
+    recs += RS.owner_turn(T(9), 'D1: drop the fitted tolerance, it was only ever a crutch.')
+    recs += RS.send(T(9, 1), 'OWNER, VERBATIM: D1: drop the fitted tolerance, it was only ever a crutch.',
+                    to='local_OTHER')
+    recs += RS.bash(T(9, 2), './wd.sh owe done D1', 'D1 answered and cleared')
+    recs += RS.bash(T(10), './wd.sh owe add "is the head switch rule settled?"', 'recorded D2 READY')
+    recs += RS.say(T(10, 5), 'D2 for you: is the head switch rule settled?')
+    recs += RS.owner_turn(T(11), 'D2: settled, the contract already says so.')
+    recs += RS.send(T(11, 1), 'OWNER, VERBATIM: D2: settled, the contract already says so.')
+    recs += RS.bash(T(11, 2), './wd.sh owe done D2', 'D2 answered and cleared')
+    numbered = [(i + 1, r) for i, r in enumerate(recs)]
+    acts = R.my_actions(numbered, 'f')
+    owner, _e, peers, _a = R.owner_messages(recs)
+    my_text, sends = R.artifacts(recs)
+    rep = R.landed_replay(acts, R.turn_starts(numbered), my_text, sends, peers, {}, 'local_target')
+    by = lambda verb, ident: [x['verdict'] for x in rep if x['verb'] == verb and x.get('id') == ident]
+    ck('sent1 whose text went to ANOTHER session -> MISSTEER', by('sent1', 'Q1'), ['MISSTEER'])
+    ck('and its reason names where the text went',
+       any('local_OTHER' in x['why'] for x in rep if x['verb'] == 'sent1' and x.get('id') == 'Q1'), True)
+    ck('sent1 whose text reached the target -> ok', by('sent1', 'Q2'), ['ok'])
+    ck('nudged by a send to another session -> MISSTEER, then ok', by('nudged', 'K1'), ['MISSTEER', 'ok'])
+    ch = R.decision_chains(acts, owner, my_text, sends, 'local_target')
+    ck('a forward to another session is not a forward', ch['D1']['verdicts'], ['answered_not_forwarded'])
+    ck('a forward to the target completes the chain', ch['D2']['verdicts'], ['complete'])
+    raised = []
+    for fn, args in ((R.landed_replay, (acts, [], my_text, sends, peers, {}, None)),
+                     (R.decision_chains, (acts, owner, my_text, sends, None))):
+        try:
+            fn(*args)
+            raised.append(False)
+        except ValueError:
+            raised.append(True)
+    ck('with no target both refuse by name, never accept any send', raised, [True, True])
     return fails
 
 
@@ -1877,6 +1955,8 @@ def main():
         fails.extend(_guarded(test_stage5))
         print('\n--- repeated replies and peer senders ---')
         fails.extend(_guarded(test_repeats_and_peers))
+        print('\n--- sends must reach the TARGET ---')
+        fails.extend(_guarded(test_sends_to_target))
         print('\n--- vocabulary: no unknown-type verdict ---')
         fails.extend(_guarded(test_vocabulary))
 

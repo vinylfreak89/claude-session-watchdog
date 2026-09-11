@@ -911,7 +911,7 @@ CHAIN_VERDICTS = ('complete', 'ask_did_not_land', 'never_put_to_owner', 'put_not
                   'close_had_no_effect', 'close_failed', 'orphan_close')
 
 
-def decision_chains(acts, owner, my_text, sends):
+def decision_chains(acts, owner, my_text, sends, target):
     """Every decision's chain from the record's STRUCTURE, never from word overlap.
 
         ASKED      an `owe add` whose result minted Dn
@@ -923,6 +923,9 @@ def decision_chains(acts, owner, my_text, sends):
 
     Every verdict is a fact about the record. Word overlap is gone: it attributed one ruling to
     two decisions and could not match "drop it" at all."""
+    if not target:
+        raise ValueError('decision_chains needs the target session id: forwarding his answer '
+                         'means a send TO THE TARGET, and a send elsewhere is not a forward')
     asks = {a['id']: a for a in acts if a['kind'] == 'open' and a['store'] == 'owner_decisions'
             and a['id']}
     failed_asks = [a for a in acts if a['kind'] == 'open' and a['store'] == 'owner_decisions'
@@ -952,7 +955,7 @@ def decision_chains(acts, owner, my_text, sends):
                          and t['ts'] < nxt['ts'] and not rx.search(t['text'])]
                 if nxt is not None and not later and not re.search(r'\bD\d+\b', nxt['text']):
                     answer = nxt
-        fwd = next((s for s in sends if answer and s['ts'] > answer['ts']
+        fwd = next((s for s in sends if answer and s.get('to') == target and s['ts'] > answer['ts']
                     and carries(s['msg'], answer['text'])), None)
         cl = closes.get(did, [])
         landed = [c for c in cl if c['outcome'] == 'landed']
@@ -1008,7 +1011,7 @@ def item_texts(state, acts):
     return out
 
 
-def landed_replay(acts, starts, my_text, sends, peers, state):
+def landed_replay(acts, starts, my_text, sends, peers, state, target):
     """Did each action of mine ACTUALLY happen? Owner: "go back in the transcript and confirm
     every action landed. Do it as a replay."
 
@@ -1021,6 +1024,12 @@ def landed_replay(acts, starts, my_text, sends, peers, state):
       resolved K a reply from the target after K was asked
     Every verdict is a fact. There is no undecidable: a check the record cannot satisfy is a
     MISSTEER with the reason, which is itself a finding."""
+    if not target:
+        # sent1, nudged and answered claim a send TO THE TARGET. Measured on the real record:
+        # of 393 sends, 4 went to another session, and any of them satisfied these checks.
+        raise ValueError('landed_replay needs the target session id: sent1, nudged and answered '
+                         'claim a send TO THE TARGET, and a send elsewhere must not satisfy them')
+    tsends = [s for s in sends if s.get('to') == target]
     texts = item_texts(state, acts)
     asked = {a['id']: a['ts'] for a in acts if a['kind'] == 'open' and a['verb'] == 'ask' and a['id']}
     out = []
@@ -1036,14 +1045,20 @@ def landed_replay(acts, starts, my_text, sends, peers, state):
             if not cand:
                 v, why = 'MISSTEER', 'no text for %s survives in the record or project state' % ident
             else:
-                hit = [s for s in sends if same_turn(starts, s['ts'], ts) and s['ts'] <= ts
+                hit = [s for s in tsends if same_turn(starts, s['ts'], ts) and s['ts'] <= ts
                        and any(carries(s['msg'], t) for t in cand)]
-                v, why = ('ok', 'a send in the same turn carries %s verbatim' % ident) if hit else \
-                         ('MISSTEER', '%s marked sent, but no send in that turn carries its text' % ident)
+                elsewhere = sorted({s.get('to') or '(no destination recorded)' for s in sends
+                                    if s.get('to') != target and same_turn(starts, s['ts'], ts)
+                                    and s['ts'] <= ts and any(carries(s['msg'], t) for t in cand)})
+                v, why = (('ok', 'a send to the target in the same turn carries %s verbatim' % ident)
+                          if hit else
+                          ('MISSTEER', '%s marked sent, but its text went to %s, not the target'
+                           % (ident, ', '.join(elsewhere))) if elsewhere else
+                          ('MISSTEER', '%s marked sent, but no send in that turn carries its text' % ident))
         elif verb in ('nudged', 'answered'):
-            hit = [s for s in sends if same_turn(starts, s['ts'], ts) and s['ts'] <= ts]
-            v, why = ('ok', 'a send in the same turn precedes it') if hit else \
-                     ('MISSTEER', '`%s` recorded with no send in that turn' % verb)
+            hit = [s for s in tsends if same_turn(starts, s['ts'], ts) and s['ts'] <= ts]
+            v, why = ('ok', 'a send to the target in the same turn precedes it') if hit else \
+                     ('MISSTEER', '`%s` recorded with no send to the target in that turn' % verb)
         elif verb == 'relayed':
             hit = [t for t in my_text if same_turn(starts, t['ts'], ts)]
             v, why = ('ok', 'text to the owner in the same turn') if hit else \
