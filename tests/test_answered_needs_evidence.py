@@ -90,7 +90,14 @@ def main():
     if ok:
         fails.append("credited another session's message as mine")
 
-    # 8. A MID-TURN delivery is evidence too. It does not land as a `user` record: it is absorbed
+    # 8. TO MUTATION-VERIFY THIS CONTROL, DISABLE THE `attachment` BRANCH -- not the `user` one.
+    #    Disabling `user` also turns this suite red, which is why it was first reported as verifying
+    #    this control when it does not: controls 1-4 use `user` fixtures and fail instead, and THIS
+    #    control does not appear in the output at all. A mutation that fires proves SOMETHING caught
+    #    it, never that this control did. Disabling `attachment` produces exactly one failure and it
+    #    is the line below.
+    #
+    #    A MID-TURN delivery is evidence too. It does not land as a `user` record: it is absorbed
     #    into the target's context as an `attachment` whose `rendered` block is the system-reminder.
     #    Reading `user` only, the gate refused a send that had demonstrably arrived -- measured on
     #    the live transcript at 2026-09-11T05:58:30Z -- and would have nagged forever on an answered
