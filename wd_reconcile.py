@@ -228,11 +228,16 @@ def run_stage(n, L, S, a):
 
     if n == 1:
         path, numbered, bad, recs, acts, owner, exc, peers, acct, my_text, sends = _world()
+        fmts = RL.ts_formats(recs)
+        if len(fmts) > 1:
+            raise SystemExit('stage 1 REFUSED: the transcript mixes timestamp formats %s. Events '
+                             'are ordered by comparing timestamps as strings, and mixed formats '
+                             'misorder them; normalise the reader before reconciling.' % dict(fmts))
         opens = [x for x in acts if x['kind'] == 'open']
         live = RL.live_stores(S)
         inv = acct['seen'] == acct['attributed'] + acct['excluded_total'] + acct.get('batch_deliveries', 0)
         L['stage1'] = {'ts': now_iso(), 'transcript': os.path.basename(path),
-                       'records': len(numbered), 'unparseable': bad,
+                       'records': len(numbered), 'unparseable': bad, 'ts_formats': dict(fmts),
                        'actions': len(acts), 'opens': len(opens),
                        'by_outcome': dict(_c.Counter(x['outcome'] for x in acts)),
                        'owner_messages': len(owner), 'owner_accounting': acct,

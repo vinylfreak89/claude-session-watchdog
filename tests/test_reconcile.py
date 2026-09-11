@@ -1030,6 +1030,17 @@ def test_corner_cases():
         ck('running stage 1 twice does not double its result',
            (led2.get('stage1') or {}).get('opens'), n1)
 
+        # timestamps are compared as strings: a corpus mixing formats is REFUSED by name
+        ck('ts_formats reads the shape of every timestamp',
+           sorted(R.ts_formats([{'timestamp': '2026-09-10T01:00:00Z'},
+                                {'timestamp': '2026-09-10T01:00:00.123Z'}, {}]).values()), [1, 1])
+        RS.write(os.path.join(d, 'mixedpfx-x.jsonl'),
+                 RS.bash('2026-09-11T01:00:00Z', './wd.sh sent1 Q1', 'item Q1 marked sent at T')
+                 + RS.bash('2026-09-11T01:00:00.500Z', './wd.sh sent1 Q2', 'item Q2 marked sent at T'))
+        rc, out = run('--stage', '1', '--proj', d, '--self-prefix', 'mixedpfx')
+        ck('stage 1 REFUSES a corpus mixing timestamp formats, by name',
+           (rc != 0, 'mixes timestamp formats' in out, 'Traceback' in out), (True, True, False))
+
         rc, out = run('--validate', '99', '--evidence', 'x')
         ck('--validate out of range refuses', rc != 0, True)
         ck('and names the range', 'no restore #99' in out, True)
@@ -1393,6 +1404,19 @@ def test_chain_edges():
     # a close of an id never asked in the window
     ch = dc([close('D9', T(1))], [], [], [])
     ck('a close with no ask in the window is an orphan_close', ch['D9']['verdicts'], ['orphan_close'])
+
+    # the same id minted twice (a store reset restarts the counter): TWO chains, never one
+    ch = dc([ask('D1', T(1), 'the first question, asked before the store was reset'),
+             close('D1', T(2)),
+             ask('D1', T(5), 'a different question, asked after the counter restarted')],
+            [say(T(1, 10), 'keep it')], [say(T(1, 5), 'D1 for you'), say(T(5, 5), 'D1 for you')], [])
+    ck('an id minted twice yields TWO chains', sorted(ch), ['D1#1', 'D1#2'])
+    ck('the close belongs to the minting it followed',
+       (bool(ch['D1#1'].get('closed')), ch['D1#2'].get('closed')), (True, None))
+    ck('the second minting is its own chain', ch['D1#2'].get('verdicts'), ['put_not_answered'])
+    ch = dc([close('D1', T(0)), ask('D1', T(1))], [], [say(T(1, 5), 'D1 for you')], [])
+    ck('a close BEFORE the id was minted is an orphan, not this chain\'s close',
+       (ch['D1'].get('closed'), ch.get('D1@orphan', {}).get('verdicts')), (None, ['orphan_close']))
 
     # the owner writes in lowercase: "d4" names D4 exactly as "D4" does
     two = [say(T(1, 5), 'Two for you. D4: captions? D5: the box?')]
