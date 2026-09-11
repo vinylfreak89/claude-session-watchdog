@@ -225,12 +225,58 @@ def test_stage4():
 
 
 
-FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures')
+# --------------------------------------------------------------------------------------
+# SYNTHESIZED Time Machine output. Every shape below was observed once against a real
+# wrapper and is reproduced here in code: no captured file, no machine-specific path, no
+# drive, no broker. The test runs anywhere.
+#
+# The shapes that matter, each of which the first hand-written mock got WRONG:
+#   * `tm read` emits FILE BYTES with a JSON status trailer appended -- not pure JSON and
+#     not pure content.
+#   * the trailer carries `truncated` for a --max-bytes read, so the content is PARTIAL.
+#   * a miss is `{"ok": false}` -- with a ZERO exit status, so exit code proves nothing.
+#   * `diskutil apfs listSnapshots` names backups `com.apple.TimeMachine.<date>.backup` in
+#     an indented tree; the .timemachine listing returns far more entries than exist,
+#     because it keeps a stub for every backup that ever existed.
+UUID = '00000000-0000-4000-8000-000000000000'
+REAL_BACKUPS = ['2026-09-10-010000', '2026-09-10-020000', '2026-09-11-030000']
+STUB_BACKUPS = REAL_BACKUPS + ['2026-08-01-010000', '2026-08-02-010000', '2026-08-03-010000']
+
+
+def syn_diskutil(names=REAL_BACKUPS):
+    """The indented tree `diskutil apfs listSnapshots <disk>` prints."""
+    out = ['Snapshots for disk0s0 (%d found)' % len(names), '|']
+    for i, n in enumerate(names):
+        out += ['+-- %08X-0000-4000-8000-000000000000' % i,
+                '|   Name:        com.apple.TimeMachine.%s.backup' % n,
+                '|   XID:         %d' % (100000 + i),
+                '|   Purgeable:   Yes', '|']
+    return '\n'.join(out) + '\n'
+
+
+def syn_tm_ls(names, count=None, truncated=False):
+    """`tm ls` JSON. `count` may exceed the entries returned; `truncated` then says so."""
+    return json.dumps({
+        'ok': True, 'path': '/Volumes/.timemachine/' + UUID,
+        'count': count if count is not None else len(names),
+        'truncated': truncated,
+        'entries': [{'name': '%s.backup' % n, 'type': 'dir', 'mode': '0755',
+                     'mtime': '2026-09-11T00:00:00Z', 'birthtime': '2026-09-11T00:00:00Z'}
+                    for n in names]})
+
+
+def syn_tm_read(content, truncated=False, ok=True, error=None):
+    """`tm read`: the file's bytes, then a JSON status trailer. Exit status is always 0."""
+    if not ok:
+        return json.dumps({'ok': False, 'error': error or 'source does not exist or cannot '
+                                                          'be resolved: /Volumes/...'})
+    return content + json.dumps({'ok': True, 'bytes': len(content.encode()),
+                                 'truncated': truncated, 'path': '/Volumes/...'})
 
 
 def test_stage2():
-    """Driven by REAL captured bytes, not invented output: a mock of my own invention would
-    only prove the parser matches it."""
+    """Driven by SYNTHESIZED output built to shapes observed once against the real wrapper.
+    No captured file, no drive, no broker, no machine-specific path: reproducible anywhere."""
     fails = []
     def ck(name, got, want):
         ok = got == want
@@ -239,11 +285,11 @@ def test_stage2():
         if not ok:
             fails.append(name)
 
-    du = open(os.path.join(FIX, 'diskutil_listsnapshots.txt')).read()
-    tm = open(os.path.join(FIX, 'tm_ls_backups.json')).read()
+    du = syn_diskutil()
+    tm = syn_tm_ls(STUB_BACKUPS[:2], count=len(STUB_BACKUPS), truncated=True)
     r = R.stage2_snapshots(lambda w: tm, lambda: du)
-    ck('ground truth parsed from real diskutil output', len(r['ground_truth']), 47)
-    ck('the mount listing is NOT treated as ground truth', r['listed_count'], 427)
+    ck('ground truth parsed from the diskutil tree', len(r['ground_truth']), len(REAL_BACKUPS))
+    ck('the mount listing is NOT treated as ground truth', r['listed_count'], len(STUB_BACKUPS))
     ck('a truncated listing is detected', r['truncated'], True)
     ck('a truncated listing is UNUSABLE, not quietly short', r['usable'], False)
     ck('it says why', bool(r['why_unusable']), True)
@@ -343,7 +389,7 @@ def test_stage5():
 
 
 def test_tm_reader():
-    """Every assertion here is against REAL captured bytes in tests/fixtures/."""
+    """Synthesized `tm read` output. The shapes are the finding; the bytes are generated."""
     fails = []
     def ck(name, got, want):
         ok = got == want
@@ -352,13 +398,16 @@ def test_tm_reader():
         if not ok:
             fails.append(name)
 
-    hit = open(os.path.join(FIX, 'tm_read_state_hit.raw')).read()
-    comp = open(os.path.join(FIX, 'tm_read_complete.raw')).read()
-    miss = open(os.path.join(FIX, 'tm_read_miss.json')).read()
+    body = json.dumps({'owner_queue': [{'id': 'Q1'}], 'owner_decisions': {'D1': {}}},
+                      indent=1)
+    comp = syn_tm_read('WAKE #59 trigger=TURN_END\nnot json at all\n')   # complete, not JSON
+    hit = syn_tm_read(body[:40], truncated=True)                          # partial state file
+    miss = syn_tm_read('', ok=False)
 
     c, st = R.tm_read_split(comp)
     ck('a complete read is recognised complete', st.get('truncated'), False)
     ck('the JSON trailer is stripped from the content', c.endswith('}'), False)
+    ck('the trailing newline of the content survives', c.endswith('\n'), True)
     ck('content length matches the reader own byte count', len(c.encode()), st.get('bytes'))
     d, why = R.tm_state_at(comp)
     ck('a non-JSON file is refused, not half-parsed', d, None)
@@ -532,9 +581,9 @@ def main():
         fails.extend(test_stage3())
         print('\n--- stage 4: supersession evidence ---')
         fails.extend(test_stage4())
-        print('\n--- stage 2: Time Machine (real captured bytes) ---')
+        print('\n--- stage 2: Time Machine (synthesized) ---')
         fails.extend(test_stage2())
-        print('\n--- tm reader (real captured bytes) ---')
+        print('\n--- tm reader (synthesized) ---')
         fails.extend(test_tm_reader())
         print('\n--- stage 5: additive repair ---')
         fails.extend(test_stage5())
