@@ -23,8 +23,9 @@ import wd_check as C
 class A:
     repo = '/tmp'
 
-def run(ident):
-    return C.check(A(), {'cwd': '/tmp'}, 'dispatch', [ident], {})
+def run(*ident):
+    # *ident so control 4 can call it with NOTHING, which is the case under test.
+    return C.check(A(), {'cwd': '/tmp'}, 'dispatch', list(ident), {})
 
 def main():
     fails = []
@@ -51,9 +52,23 @@ def main():
     if ev.get('id_form') == 'unrecognised':
         fails.append('a hex thread-id prefix was called unrecognised')
 
+    # 4. NO id at all is a FOURTH outcome and must be a refusal, never a crash. It used to raise
+    #    IndexError, so a caller reading the last line saw a traceback and could not tell a missing
+    #    argument from a missing dispatch -- the two have opposite consequences.
+    try:
+        checked, result, ev = run()
+        if ev.get('id_form') != 'absent':
+            fails.append('a missing id was not reported as an absent id form: %r' % ev)
+        if ev.get('found') is not None:
+            fails.append('a missing id reported a found verdict it cannot have: %r' % ev)
+        if 'NOT a missing dispatch' not in result:
+            fails.append('the refusal does not say it is a missing ARGUMENT: %r' % result)
+    except IndexError:
+        fails.append('check dispatch with no id raised IndexError instead of refusing')
+
     for f in fails:
         print('FAIL:', f)
-    print('SELFTEST', 'FAILED' if fails else 'PASS', '(3 controls)')
+    print('SELFTEST', 'FAILED' if fails else 'PASS', '(4 controls)')
     return 1 if fails else 0
 
 if __name__ == '__main__':

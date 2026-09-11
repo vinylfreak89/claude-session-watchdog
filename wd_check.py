@@ -121,6 +121,13 @@ def check(a, sess, kind, args, state):
         # miss, and return a bare `no rollout found`, which reads as "the claimed dispatch never
         # happened" and is one step from filing dispatch_claim_no_call against work that was done.
         # A negative must say WHICH negative it is. Control: tests/test_dispatch_check.py.
+        # And NO id at all is a third outcome again: it used to raise IndexError, which is a crash
+        # where a refusal belongs -- a caller reading only the last line sees a traceback and cannot
+        # tell a missing argument from a missing dispatch.
+        if not args:
+            return ('no id given', 'NO ID GIVEN -- `check dispatch` needs the thread id to resolve. '
+                    'This is a missing argument, NOT a missing dispatch.',
+                    dict(found=None, id_form='absent'))
         if not __import__('re').fullmatch(r'[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}|[0-9a-fA-F]{8,}', args[0]):
             return ('id %r against Codex thread ids' % args[0],
                     'NOT A THREAD ID -- this check only resolves UUID-shaped Codex thread ids, so it '
