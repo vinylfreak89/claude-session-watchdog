@@ -203,8 +203,8 @@ def run_stage(n, L, S, a):
     import wd_recon_lib as RL
     cov = L.setdefault('coverage', {})
     if n == 1:
-        opens, closes = RL.stage1(a.self_prefix, proj=a.proj)
-        join = RL.stage1_join(opens, closes, S)
+        opens, closes, unres = RL.stage1(a.self_prefix, proj=a.proj)
+        join = RL.stage1_join(opens, closes, S, unres)
         L['stage1'] = {'ts': now_iso(), 'opens': len(opens), 'closes': len(closes),
                        'join': join,
                        'items': [{'cite': o['cite'], 'ts': o['ts'], 'store': o['store'],
@@ -329,6 +329,48 @@ def main():
         return 0
 
     S = a.state_dir
+    # A second RECONCILE is also a rival: two of them over one ledger interleave
+    # read-modify-write and lose whichever finished first. The rival scan deliberately skips
+    # reconcile processes (so it does not see itself), so exclusion between them is a lock.
+    os.makedirs(S, exist_ok=True)
+    lock = os.path.join(S, 'reconcile.lock')
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+    except FileExistsError:
+        try:
+            holder = open(lock).read().strip()
+        except OSError:
+            holder = '?'
+        alive = False
+        try:
+            os.kill(int(holder), 0)
+            alive = True
+        except Exception:
+            alive = False
+        if alive:
+            print('RECONCILE ABORTED -- another reconcile (pid %s) holds the ledger lock; '
+                  'no action taken' % holder)
+            return 0
+        # A stale lock from a killed run must not wedge the instrument forever, but it is
+        # REPORTED rather than silently reclaimed.
+        print('note: reclaiming a stale lock from pid %s (no such process)' % holder)
+        os.unlink(lock)
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+    try:
+        return _main(a, S)
+    finally:
+        try:
+            if open(lock).read().strip() == str(os.getpid()):
+                os.unlink(lock)
+        except OSError:
+            pass
+
+
+def _main(a, S):
     if a.init:
         if len(a.dates) != 2:
             raise SystemExit('--init needs exactly two dates: reconcile <start> <end> --init')

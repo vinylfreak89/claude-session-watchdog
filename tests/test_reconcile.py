@@ -788,13 +788,238 @@ def test_remaining_units():
         shutil.rmtree(d, ignore_errors=True)
 
 
+
+def test_corner_cases():
+    """Errors and corner cases. Each of these either crashed, or was silently wrong, before
+    the probe that found it -- none was hypothetical."""
+    import subprocess
+    fails = []
+    def ck(name, got, want):
+        ok = got == want
+        print('%-56s %s%s' % (name, 'PASS' if ok else 'FAIL',
+                              '' if ok else '  got=%r want=%r' % (got, want)))
+        if not ok:
+            fails.append(name)
+
+    def mkstate(content):
+        t = tempfile.mkdtemp(prefix='recon-bad-')
+        open(os.path.join(t, 'state.json'), 'w').write(content)
+        return t
+
+    # --- malformed state: refuse, never read as empty ---------------------------------
+    for label, content in (('corrupt JSON', '{"broken'),
+                           ('a list, not an object', '[1,2,3]'),
+                           ('null', 'null'),
+                           ('a bare string', '"hello"')):
+        refused = False
+        try:
+            R.live_stores(mkstate(content))
+        except ValueError:
+            refused = True
+        except Exception:
+            refused = False
+        ck('state.json %s is refused, not read as empty' % label, refused, True)
+    ck('a genuinely absent state.json IS empty, not an error',
+       R.live_stores(tempfile.mkdtemp())['all_keys'], [])
+
+    # --- item text --------------------------------------------------------------------
+    ck('a NUL byte in item text is rejected', R.is_real_item('a\x00b' + 'x' * 40), False)
+    ck('a bell/escape char is rejected', R.is_real_item('a\x1bb' + 'x' * 40), False)
+    ck('a newline inside item text is allowed',
+       R.is_real_item('a real multi-line item\nwith a second line here'), True)
+    ck('a tab is allowed', R.is_real_item('a real item\twith a tab in it, long enough'), True)
+    ck('whitespace-only is rejected', R.is_real_item('   \n  \t '), False)
+    ck('exactly-at-threshold text is accepted', R.is_real_item('x' * 25), True)
+    ck('one char under threshold is rejected', R.is_real_item('x' * 24), False)
+
+    # --- ids that cannot be resolved to a literal --------------------------------------
+    u = R.unresolved_ids('while read d; do ./wd.sh owe done $d; done')
+    ck('a while-read loop id is surfaced as unresolvable', bool(u), True)
+    ck('and is labelled a while-loop', any(x.get('form') == 'while-loop' for x in u), True)
+    u2 = R.unresolved_ids('./wd.sh owe done $(cat id.txt)')
+    ck('a $(...) substitution is surfaced', bool(u2), True)
+    ck('a plain literal id is NOT flagged unresolvable',
+       R.unresolved_ids('./wd.sh sent1 Q1'), [])
+
+    d = tempfile.mkdtemp(prefix='recon-corner-')
+    try:
+        p2 = os.path.join(d, '80f99b89-corner.jsonl')
+        with open(p2, 'w') as f:
+            for r in [
+                # open AND close in one command
+                rec('2026-09-11T01:00:00Z', cmds=[
+                    './wd.sh queue add "an item added and closed in the same command line"'
+                    ' && ./wd.sh sent1 QX']),
+                # an id that cannot be resolved
+                rec('2026-09-11T02:00:00Z', cmds=[
+                    'for d in $(cat ids.txt); do ./wd.sh owe done $d; done']),
+                # a heredoc whose BODY mentions its own delimiter
+                rec('2026-09-11T03:00:00Z', cmds=[
+                    "cat <<'EOF'\nthe word EOF appears here\n"
+                    "./wd.sh queue add \"this must not leak out of the heredoc body at all\"\nEOF"]),
+                # close before open, chronologically
+                rec('2026-09-11T00:30:00Z', cmds=['./wd.sh sent1 QY']),
+                rec('2026-09-11T04:00:00Z', cmds=[
+                    './wd.sh queue add "an item opened after its own close, out of order"']),
+                # an id reused after being closed
+                rec('2026-09-11T05:00:00Z', cmds=['./wd.sh sent1 QX']),
+            ]:
+                f.write(json.dumps(r) + '\n')
+        opens, closes, unres = R.stage1('80f99b89', proj=d)
+        ids = [c['id'] for c in closes]
+        ck('an open and a close in ONE command are both seen',
+           ('QX' in ids and any('same command line' in o['text'] for o in opens)), True)
+        ck('a heredoc mentioning its own delimiter does not leak',
+           any('must not leak' in o['text'] for o in opens), False)
+        ck('an unresolvable loop id is reported, not invented', bool(unres), True)
+        ck('and no substitution text is recorded as an id',
+           any(i and '$' in i for i in ids), False)
+        ck('a close with no matching open is still recorded', 'QY' in ids, True)
+        ck('an id closed twice is recorded twice', ids.count('QX'), 2)
+
+        # --- CLI corner cases ----------------------------------------------------------
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        st = os.path.join(d, 'state')
+        os.makedirs(st, exist_ok=True)
+        json.dump({'owner_queue': [], 'owner_decisions': {}, 'open_questions': {},
+                   'owner_decision_seq': 0}, open(os.path.join(st, 'state.json'), 'w'))
+
+        def run(*args):
+            r = subprocess.run([sys.executable, os.path.join(here, 'wd_reconcile.py'),
+                                '--state-dir', st] + list(args),
+                               capture_output=True, text=True)
+            return r.returncode, r.stdout + r.stderr
+
+        rc, out = run('--stage', '1', '--proj', d)
+        ck('a stage before --init refuses', rc, 1)
+        ck('and says to init first', 'no reconciliation open' in out, True)
+
+        rc, out = run('2026-09-11T05:00:00Z', '2026-09-11T01:00:00Z', '--init')
+        ck('--init with end before start refuses', rc != 0, True)
+        rc, out = run('2026-09-11T01:00:00Z', '2026-09-11T01:00:00Z', '--init')
+        ck('--init with start == end refuses', rc != 0, True)
+        rc, out = run('not-a-date', '2026-09-11T01:00:00Z', '--init')
+        ck('--init with a malformed date refuses by name', 'not an ISO' in out, True)
+
+        run('2026-09-11T00:00:00Z', '2026-09-11T06:00:00Z', '--init')
+        rc, out = run('--stage', '1', '--proj', d)
+        led = json.load(open(os.path.join(st, 'reconcile.json')))
+        n1 = led['stage1']['opens']
+        rc, out = run('--stage', '1', '--proj', d)
+        led2 = json.load(open(os.path.join(st, 'reconcile.json')))
+        ck('running stage 1 twice does not double its result', led2['stage1']['opens'], n1)
+
+        rc, out = run('--validate', '99', '--evidence', 'x')
+        ck('--validate out of range refuses', rc != 0, True)
+        ck('and names the range', 'no restore #99' in out, True)
+        rc, out = run('--validate', '-1', '--evidence', 'x')
+        ck('--validate with a negative index refuses', rc != 0, True)
+        rc, out = run('--restore', 'an item long enough to be treated as real words here')
+        ck('--restore without evidence refuses', rc != 0, True)
+        rc, out = run('--hour', '2026-01-01T00', '--part', 'tm', '--evidence', 'x')
+        ck('an hour outside the window refuses', rc != 0, True)
+        ck('and says so', 'not an hour in the window' in out, True)
+        return fails
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+
+def test_robustness():
+    """Concurrency, crash residue, hostile filesystem and hostile bytes."""
+    import subprocess, stat
+    fails = []
+    def ck(name, got, want):
+        ok = got == want
+        print('%-56s %s%s' % (name, 'PASS' if ok else 'FAIL',
+                              '' if ok else '  got=%r want=%r' % (got, want)))
+        if not ok:
+            fails.append(name)
+
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    d = tempfile.mkdtemp(prefix='recon-rob-')
+    try:
+        st = os.path.join(d, 'state')
+        os.makedirs(st)
+        json.dump({'owner_queue': [], 'owner_decisions': {}, 'open_questions': {},
+                   'owner_decision_seq': 0}, open(os.path.join(st, 'state.json'), 'w'))
+
+        def run(*args):
+            r = subprocess.run([sys.executable, os.path.join(here, 'wd_reconcile.py'),
+                                '--state-dir', st] + list(args),
+                               capture_output=True, text=True)
+            return r.returncode, r.stdout + r.stderr
+
+        run('2026-09-11T00:00:00Z', '2026-09-11T02:00:00Z', '--init')
+
+        # a LIVE second reconcile must abort with no action
+        lock = os.path.join(st, 'reconcile.lock')
+        open(lock, 'w').write(str(os.getpid()))
+        before = open(os.path.join(st, 'reconcile.json')).read()
+        rc, out = run('--restore', 'this must never be written while the lock is held',
+                      '--evidence', 'x')
+        ck('a second reconcile aborts on a live lock', 'ABORTED' in out, True)
+        ck('and changes nothing', open(os.path.join(st, 'reconcile.json')).read(), before)
+
+        # a STALE lock is reclaimed, but REPORTED
+        open(lock, 'w').write('999999')
+        rc, out = run()
+        ck('a stale lock is reclaimed', 'reclaiming a stale lock' in out, True)
+        ck('and the run proceeds', 'RECONCILE' in out, True)
+        ck('the lock is released afterwards', os.path.exists(lock), False)
+
+        # crash residue: a leftover .tmp must not be mistaken for the ledger
+        open(os.path.join(st, 'reconcile.json.tmp'), 'w').write('{"partial":')
+        rc, out = run()
+        ck('a leftover .tmp does not break the next run', rc in (0, 1), True)
+        ck('and the real ledger is still read', 'RECONCILE 2026-09-11' in out, True)
+
+        # a read-only state dir must fail loudly, not silently skip the write
+        ro = os.path.join(d, 'ro')
+        os.makedirs(ro)
+        json.dump({'owner_queue': []}, open(os.path.join(ro, 'state.json'), 'w'))
+        subprocess.run([sys.executable, os.path.join(here, 'wd_reconcile.py'),
+                        '--state-dir', ro, '2026-09-11T00:00:00Z', '2026-09-11T01:00:00Z',
+                        '--init'], capture_output=True)
+        os.chmod(ro, stat.S_IRUSR | stat.S_IXUSR)
+        r = subprocess.run([sys.executable, os.path.join(here, 'wd_reconcile.py'),
+                            '--state-dir', ro, '--restore', 'an item long enough to be real',
+                            '--evidence', 'x'], capture_output=True, text=True)
+        ck('a read-only state dir fails loudly rather than silently',
+           r.returncode != 0 or 'Permission' in (r.stdout + r.stderr), True)
+        os.chmod(ro, stat.S_IRWXU)
+
+        # hostile bytes in a transcript must not stop the scan
+        p2 = os.path.join(d, '80f99b89-rob.jsonl')
+        with open(p2, 'wb') as f:
+            f.write(b'{"type":"assistant","timestamp":"2026-09-11T00:00:00Z","message":'
+                    b'{"content":[{"type":"tool_use","name":"Bash","input":{"command":'
+                    b'"./wd.sh queue add \\"an item with \xc3\xbf high bytes, long enough to count\\""}}]}}\n')
+            f.write(b'\xff\xfe not json at all\n')
+            f.write(json.dumps(rec('not-a-timestamp',
+                                   cmds=['./wd.sh sent1 QBAD'])).encode() + b'\n')
+            f.write(json.dumps(rec('2026-09-11T01:00:00Z',
+                                   cmds=['./wd.sh sent1 QGOOD'])).encode() + b'\n')
+        opens, closes, _ = R.stage1('80f99b89', proj=d)
+        ck('a high-byte item still parses', len(opens), 1)
+        ck('a binary garbage line does not stop the scan',
+           'QGOOD' in [c['id'] for c in closes], True)
+        ck('a malformed timestamp is kept, not crashed on',
+           'QBAD' in [c['id'] for c in closes], True)
+        ck('the malformed timestamp is carried as-is',
+           any(c['id'] == 'QBAD' and c['ts'] == 'not-a-timestamp' for c in closes), True)
+        return fails
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def main():
     d = tempfile.mkdtemp(prefix='recon-fixture-')
     fails = []
     try:
         _, st = build(d)
-        opens, closes = R.stage1(self_prefix='80f99b89', proj=d)
-        join = R.stage1_join(opens, closes, st)
+        opens, closes, _u = R.stage1(self_prefix='80f99b89', proj=d)
+        join = R.stage1_join(opens, closes, st, _u)
 
         def ck(name, got, want):
             ok = got == want
@@ -835,13 +1060,13 @@ def main():
         # changes nothing means the guard protects nothing, and that FAILS the suite.
         print('\n--- mutation battery (each must break the result) ---')
         import copy as _copy
-        base_opens, base_closes = R.stage1('80f99b89', proj=d)
+        base_opens, base_closes, _bu = R.stage1('80f99b89', proj=d)
         base_ids = {c['id'] for c in base_closes if c['id']}
         saved = {'normalize': R.normalize, 'is_real_item': R.is_real_item,
                  'CLOSE_RX': R.CLOSE_RX, 'FORLOOP': R.FORLOOP, 'OPEN_RX': list(R.OPEN_RX)}
 
         def run():
-            o, c = R.stage1('80f99b89', proj=d)
+            o, c, _ = R.stage1('80f99b89', proj=d)
             return o, {x['id'] for x in c if x['id']}
 
         def mutate(name, apply_fn, broke_fn):
@@ -930,6 +1155,10 @@ def main():
         fails.extend(test_stage2())
         print('\n--- tm reader (synthesized) ---')
         fails.extend(test_tm_reader())
+        print('\n--- corner cases and error handling ---')
+        fails.extend(test_corner_cases())
+        print('\n--- robustness: concurrency, crash residue, hostile input ---')
+        fails.extend(test_robustness())
         print('\n--- remaining units ---')
         fails.extend(test_remaining_units())
         print('\n--- citation: the certainty mechanism ---')

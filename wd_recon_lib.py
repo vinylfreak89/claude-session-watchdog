@@ -230,6 +230,10 @@ def is_real_item(text):
     than a sentence is a parse artifact -- REFUSE rather than reinstate it."""
     if not text or SHELLISH.match(text):
         return False
+    # Control characters are never the owner's words; a NUL in particular sailed through the
+    # length test and would have been restored as an item.
+    if any(ord(c) < 32 and c not in '\t\n\r' for c in text):
+        return False
     return len(text.strip()) >= 25
 
 
@@ -304,6 +308,28 @@ def strip_echoes(cmd):
     return ECHOED.sub('echo', cmd)
 
 
+WHILELOOP = re.compile(r'while\s+.*?;\s*do\b(.*?)(?:^|[;&\n])\s*done\b', re.S | re.M)
+UNRESOLVED = re.compile(r'\$\(|\$\{?\w+\}?')
+
+
+def unresolved_ids(cmd):
+    """Ids this pass could not resolve to a literal -- a `while read` variable, a `$(...)`
+    substitution, a leftover `$var`. These must be REPORTED, never silently recorded as an id
+    whose name is the substitution text. A `for` loop is unrolled; these cannot be."""
+    out = []
+    for m in CLOSE_RX.finditer(cmd):
+        arg = m.group(3)
+        if arg and UNRESOLVED.search(arg):
+            out.append({'verb': m.group(1) or m.group(2), 'literal': arg})
+    for m in WHILELOOP.finditer(cmd):
+        body = m.group(1)
+        for mm in CLOSE_RX.finditer(body):
+            if mm.group(3) and UNRESOLVED.search(mm.group(3)):
+                out.append({'verb': mm.group(1) or mm.group(2), 'literal': mm.group(3),
+                            'form': 'while-loop'})
+    return out
+
+
 def normalize(cmd):
     """The ONE preprocessing path every matcher must use. Each step exists because its absence
     produced a false item against a known-answer corpus: heredoc bodies (a document being
@@ -316,7 +342,18 @@ def live_stores(state_dir):
     """The live stores, read-only. Never the reference for what SHOULD be there -- the store is
     the thing under repair, and an instrument cannot corroborate itself."""
     p = os.path.join(state_dir, 'state.json')
-    d = json.load(open(p)) if os.path.exists(p) else {}
+    d = {}
+    if os.path.exists(p):
+        try:
+            d = json.load(open(p))
+        except Exception as e:
+            # A corrupt store is NOT an empty store. Reading it as empty would make every
+            # item look dropped and manufacture a restore for each one.
+            raise ValueError('state.json at %s is unreadable (%s) -- refused rather than '
+                             'treated as empty' % (p, e))
+        if not isinstance(d, dict):
+            raise ValueError('state.json at %s is a %s, not an object -- refused'
+                             % (p, type(d).__name__))
     return {'owner_queue': d.get('owner_queue') or [],
             'owner_decisions': d.get('owner_decisions') or {},
             'open_questions': d.get('open_questions') or {},
@@ -358,7 +395,7 @@ def stage1(self_prefix='80f99b89', proj=None):
             p = os.path.join(root, f)
     if not p:
         raise ValueError('no transcript for %s' % self_prefix)
-    opens, closes = [], []
+    opens, closes, unresolved = [], [], []
     for i, line in enumerate(open(p, 'rb'), 1):
         try:
             rec = json.loads(line)
@@ -374,14 +411,20 @@ def stage1(self_prefix='80f99b89', proj=None):
                         opens.append({'ts': ts, 'cite': '%s:%d#%d' % (os.path.basename(p), i, j),
                                       'store': store, 'text': t,
                                       'sha256': hashlib.sha256(t.encode()).hexdigest()})
+            for u in unresolved_ids(c):
+                unresolved.append(dict(u, ts=ts,
+                                       cite='%s:%d#%d' % (os.path.basename(p), i, j)))
             for m in CLOSE_RX.finditer(c):
                 verb, arg = (m.group(1) or m.group(2)), m.group(3)
+                aid = (arg or '').strip('"\'') or None
+                if aid and UNRESOLVED.search(aid):
+                    aid = None        # never record a substitution as if it were an id
                 closes.append({'ts': ts, 'cite': '%s:%d#%d' % (os.path.basename(p), i, j),
-                               'verb': verb, 'id': (arg or '').strip('"\'') or None})
-    return opens, closes
+                               'verb': verb, 'id': aid})
+    return opens, closes, unresolved
 
 
-def stage1_join(opens, closes, state_dir):
+def stage1_join(opens, closes, state_dir, unresolved=()):
     """Which created items are accounted for, and which are candidates for restore."""
     live = live_stores(state_dir)
     closed_ids = collections.Counter(c['id'] for c in closes if c['id'])
@@ -390,6 +433,8 @@ def stage1_join(opens, closes, state_dir):
     never = [i for i in ids if i not in closed_ids]
     dupes = {i: n for i, n in closed_ids.items() if n > 1 and re.fullmatch(r'D\d+|Q\d+', i or '')}
     return {'opens': len(opens), 'closes': len(closes),
+            'ids_unresolvable': len(unresolved),
+            'unresolvable_detail': [dict(u) for u in unresolved][:20],
             'decision_ids_issued': seq, 'decision_ids_closed': len([i for i in ids if i in closed_ids]),
             'decision_ids_never_closed': never,
             'closed_more_than_once': dupes,
