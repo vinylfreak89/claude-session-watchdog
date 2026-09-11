@@ -78,8 +78,10 @@ Findings the wake itself produced from tool facts appear in the report already w
 ## The owner's items are queued HERE, not in the target's inbox
 
 When the owner gives you something for the target, hold it: `wd.sh queue add "<his words>"`. Do NOT send it on
-arrival. Every wake prints the queue at the top of the report, and you send the held items together with that
-wake's findings as ONE message, then `wd.sh queue clear <message_id>`. Sending on the owner's cadence fragments
+arrival. **EVERY send goes through `wd.sh next` and nothing else is a sanctioned send path.** It hands back at
+most ONE item, and only when the target is not mid-turn, nothing is owed, and the item is not held. Send exactly
+that item, verbatim, alone -- then `wd.sh sent1 <id>`. Never batch two items, and never send a queued item
+because a wake happened to print it. Sending on the owner's cadence fragments
 the target's work: each message opens or queues a turn there, so a run of small relays interrupts it repeatedly
 and fills its context with your messages instead of the job.
 
@@ -434,7 +436,7 @@ On every event line (`TURN`, `TURN_END`, `INTERRUPTED`, `API_ERROR`, `CONTEXT_EX
 2. Relay FOR THE OWNER to the owner if non-empty.
 3. Decide what to raise; `wd.sh finding …` for each; veto only what you misread.
 4. `wd.sh due`. If it says BUSY, hold everything and go to 5. If RECEPTIVE, send the held findings and the
-   owner's queued items as ONE message, then `wd.sh sent F…  <message_id>` and `wd.sh queue clear <message_id>`.
+   owner's queued item -- ONE, from `wd.sh next` -- then `wd.sh sent F…  <message_id>` and `wd.sh sent1 <id>`.
 5. `wd.sh cost`; re-arm `wd.sh wait` in the background — every wake, without exception; end the turn.
 
 The hook returns every 60 seconds with a HEARTBEAT when nothing happened. That is normal: re-arm and end the
