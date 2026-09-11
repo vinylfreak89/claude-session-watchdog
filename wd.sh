@@ -15,6 +15,9 @@
 #   wd.sh due                       what is undelivered (owner items + findings) and whether the target is receptive
 #   wd.sh owe add|list|ungate|done   decisions the owner owes, each READY or GATED behind unfinished target work
 #   wd.sh status                    one-screen state summary
+#   wd.sh reconcile <start> <end> --init | --next | --hour ... | --complete
+#                                   rebuild state from the record hour by hour and restore what was dropped;
+#                                   aborts with no action if any other hook is running; local/reconcile.md is the procedure
 #   wd.sh check <kind> [args]       verify one thing now (running | commit <sha> | file <path> [since] | task <id> | row <ID> | msg-to-watchdog [since] | dispatch <thread> | tree [path] | grep <path> <regex> | csv <path> <col><op><val> [idcol])
 #   wd.sh finding <class> "<quote>" check <kind> [args]   build a fixed-form finding from a check the model chose; the result text is the script's
 # Overrides: WD_STATE (state dir), WD_CONFIG (config file). Everything is read-only except the state dir.
@@ -88,6 +91,7 @@ case "$cmd" in
             done)   exec $PY "$D/wd_wake.py" --state-dir "$S" --owe-clear "$1" ;;
             *) echo 'wd.sh owe add [--gated-on "<what must finish first>"] "<decision>" | list | ungate <id> | done <id>' >&2; exit 2 ;;
           esac ;;
+  reconcile) exec $PY "$D/wd_reconcile.py" --state-dir "$S" "$@" ;;
   status) $PY - "$S" <<'PYS'
 import json,sys,os
 p=os.path.join(sys.argv[1],'state.json'); d=json.load(open(p)) if os.path.exists(p) else {}
