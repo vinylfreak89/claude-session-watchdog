@@ -89,6 +89,62 @@ The exception is an item that changes what the target is doing RIGHT NOW — a w
 working from, or a destructive risk. Queue that with `--urgent`, send it immediately, and say why it could not
 wait. Nothing else earns an immediate send.
 
+## RECONCILIATION -- `wd.sh reconcile <start> <end>`
+
+When state is wrong, you do not repair it from memory. You replay the record.
+
+**The provenance rule, his words:** *"Everything is answerable from transcripts because they
+are all your actions, project state or things I owe you."* Those three are the ONLY admissible
+sources. Never send to the target and never query it -- a reconciliation that asks the thing it
+is auditing has no reference left.
+
+**The unit is YOUR ACTION, chronologically**, not a store count. His words: *"a replay of your
+entire set of actions to catch things that you steered incorrectly, be they owed info, nudges,
+queues, owner requests, anything you own. The idea of reconciliation is to fix the current
+state to control your fuck ups."* A store diff finds dropped rows and is blind to the larger
+class -- a `relayed` that relayed nothing, an `answered` with no send behind it, a `resolved`
+with no answer, a `nudged` that re-sent nothing. Every action needs the artifact that must
+exist if it was honest, computed from the record, never attested.
+
+**Extraction is total.** His words: *"Extraction should examine the ENTIRE state directory.
+Plus your ENTIRE transcript. Absolutely no estimation, sampling or concision."* Every file in
+the state dir and every key in state.json -- there are far more stores than the obvious three.
+Every record type in the transcript, including the ones a naive reader skips: his mid-turn
+messages arrive as `attachment` and `queue-operation`, not `user`, and `tool_result` blocks are
+where the OUTCOME of each of your actions lives. Records without a timestamp are accounted for,
+never silently dropped. *"Do not binary search it. Do not sample it. Everything."*
+
+**Confidence is COMPUTED, never asserted.** There is no flag to type a number. It is the
+WEAKEST of the coverages -- hours, actions, state keys, snapshots, records -- so one unexamined
+store cannot be averaged away by a hundred finished hours. *"You may only end it when you have
+reached 100 % confidence state is fully reconciled."*
+
+**Repairs are additive.** *"Do not clear any queues."* Restore what was dropped; remove
+nothing, resolve nothing, tidy nothing.
+
+**A restore is a CANDIDATE until it survives supersession, and the check is recursive.** His
+words: *"some things might end up superseded, so you need to go and recursively check every
+state restore you did to make sure it's valid in the face of new info."* A dropped row is not
+automatically a row to reinstate -- he may have answered it, reversed it or replaced it later,
+and reinstating it would put a wrong item back in front of the target. So every candidate is
+scanned FORWARD from its drop to the end of the record, and marked stands or superseded with
+the evidence. Reinstating any row changes what the record says about the others, so landing a
+restore invalidates the check on every restore already made and the set is re-run to a FIXED
+POINT. The instrument enforces this with a pass counter rather than trusting you to remember.
+
+**This skill is deliberately expensive.** His words: *"This skill will be extremely expensive
+token wise and that's fine. More than fine."* Do not economise by sampling, summarising, or
+checking a class once and generalising. Cost is not a reason to narrow any of it.
+
+**It is mutually exclusive of every other hook** and ends immediately with no action if one is
+alive, because two writers over one state dir is how the dropping starts. It fires every minute
+until it is done, modelled on the owed nagger -- and a nagger only works if its output reaches
+your context, so it is a Monitor, not a background loop writing to a file nobody reads.
+
+The local overlay carries ONE thing: how to reach Time Machine. Everything else -- how it
+searches, what it compares against, the audit source -- is built from his explicit instructions
+and lives in the code.
+
 ## NOTHING GOES TO THE OWNER THAT HIS OWN WORDS ALREADY ANSWER
 
 **The default is that you answer it, from his transcript, yourself.** Escalating is the exception and it has

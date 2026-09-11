@@ -27,7 +27,7 @@ This file carries no TM knowledge; it reads the overlay and prints it.
   reconcile --snapshot <name> --evidence "..."      | --thinned <name> --evidence "..."
   reconcile --action <id> --landed yes|no --evidence "..."
   reconcile --restore "<what>" --evidence "..."     an additive restoration, never a removal
-  reconcile --confidence <0-100> --evidence "..."
+  (confidence is COMPUTED, never typed -- see below)
   reconcile --complete                   refuses unless everything above is satisfied
 """
 import os, sys, json, argparse, subprocess, datetime, re
@@ -136,7 +136,7 @@ def init(state_dir, start, end):
     L = {'window': {'start': a.strftime('%Y-%m-%dT%H:%M:%SZ'),
                     'end': b.strftime('%Y-%m-%dT%H:%M:%SZ')},
          'created': now_iso(), 'hours': hours, 'snapshots': {}, 'actions': {},
-         'restored': [], 'confidence': 0, 'confidence_evidence': None, 'complete': False,
+         'restored': [], 'coverage': {}, 'complete': False,
          'log': [{'ts': now_iso(), 'what': 'init %d hours' % len(hours)}]}
     save(state_dir, L)
     return L
@@ -156,9 +156,35 @@ def outstanding(L):
         o.append('%d actions unverified (next %s)' % (len(unver), unver[0]))
     if not L['snapshots']:
         o.append('no Time Machine snapshots enumerated yet')
-    if L.get('confidence', 0) != 100:
-        o.append('confidence %s/100' % L.get('confidence', 0))
+    stale = [i for i, r in enumerate(L.get('restored', []))
+             if r.get('validated_pass') != L.get('pass', 0)]
+    if stale:
+        o.append('%d restore(s) unvalidated at pass %d (next #%d) -- supersession check owed'
+                 % (len(stale), L.get('pass', 0), stale[0]))
+    c, parts = confidence(L)
+    if c != 100:
+        o.append('confidence %d/100 (%s)' % (c, '; '.join('%s %d%%' % (k, v) for k, v in parts)))
     return o
+
+
+def confidence(L):
+    """COMPUTED, never typed. The owner: "Everything is answerable from transcripts because
+    they are all your actions, project state or things I owe you." So confidence is how much of
+    that record is accounted for, and it is the WEAKEST of the coverages -- one unexamined
+    store cannot be averaged away by a hundred finished hours."""
+    cov = []
+    hrs = L['hours']
+    cov.append(('hours', 100 * sum(1 for v in hrs.values() if v['status'] == 'done') // max(1, len(hrs))))
+    a = L.get('coverage', {})
+    rs = L.get('restored', [])
+    if rs:
+        okn = sum(1 for r in rs if r.get('validated_pass') == L.get('pass', 0))
+        cov.append(('restores', 100 * okn // len(rs)))
+    for name, key in (('actions', 'actions'), ('state-keys', 'state_keys'),
+                      ('snapshots', 'snapshots'), ('records', 'records')):
+        seen, total = a.get(key, [0, 0])[0], a.get(key, [0, 0])[1]
+        cov.append((name, 100 * seen // total if total else 0))
+    return (min(v for _, v in cov) if cov else 0), cov
 
 
 def status_line(L):
@@ -166,7 +192,7 @@ def status_line(L):
     return ('RECONCILE %s..%s  hours %d/%d  snapshots %d  actions %d  restored %d  conf %d%s'
             % (L['window']['start'][:13], L['window']['end'][:13], done, len(L['hours']),
                len(L['snapshots']), len(L['actions']), len(L['restored']),
-               L.get('confidence', 0), '  COMPLETE' if L.get('complete') else ''))
+               confidence(L)[0], '  COMPLETE' if L.get('complete') else ''))
 
 
 def main():
@@ -179,7 +205,9 @@ def main():
     ap.add_argument('--hour'); ap.add_argument('--part', choices=PARTS)
     ap.add_argument('--snapshot'); ap.add_argument('--thinned')
     ap.add_argument('--action'); ap.add_argument('--landed', choices=('yes', 'no'))
-    ap.add_argument('--restore'); ap.add_argument('--confidence', type=int)
+    ap.add_argument('--restore')
+    ap.add_argument('--validate', type=int)
+    ap.add_argument('--superseded', action='store_true')
     ap.add_argument('--evidence'); ap.add_argument('--complete', action='store_true')
     a = ap.parse_args()
 
@@ -240,20 +268,36 @@ def main():
     if a.restore:
         if not a.evidence:
             raise SystemExit('--restore needs --evidence naming where it was recovered from')
-        L['restored'].append({'ts': now_iso(), 'what': a.restore, 'evidence': a.evidence})
+        # Every restore lands UNVALIDATED and, per the owner 2026-09-11, invalidates the
+        # supersession check of every restore already made: "some things might end up
+        # superseded, so you need to go and recursively check every state restore you did to
+        # make sure it's valid in the face of new info." Reinstating a row changes what the
+        # record says about the others, so the set is re-checked to a FIXED POINT rather than
+        # once. The recursion is enforced here, not remembered: this loop cannot be skipped.
+        L['pass'] = L.get('pass', 0) + 1
+        for r in L['restored']:
+            r['validated_pass'] = None
+        L['restored'].append({'ts': now_iso(), 'what': a.restore, 'evidence': a.evidence,
+                              'validated_pass': None, 'superseded': None})
         changed = True
-        print('restored: %s' % a.restore)
+        print('restored (UNVALIDATED): %s' % a.restore)
+        print('   pass %d -- every restore now needs its supersession check re-run'
+              % L['pass'])
 
-    if a.confidence is not None:
+    if a.validate is not None:
         if not a.evidence:
-            raise SystemExit('--confidence needs --evidence')
-        if a.confidence == 100 and outstanding({**L, 'confidence': 100}):
-            raise SystemExit('REFUSED: confidence 100 with work outstanding:\n   '
-                             + '\n   '.join(outstanding({**L, 'confidence': 100})))
-        L['confidence'] = a.confidence
-        L['confidence_evidence'] = {'ts': now_iso(), 'evidence': a.evidence}
+            raise SystemExit('--validate needs --evidence: what was scanned FORWARD of the drop')
+        try:
+            r = L['restored'][a.validate]
+        except IndexError:
+            raise SystemExit('no restore #%d (have %d)' % (a.validate, len(L['restored'])))
+        r['validated_pass'] = L.get('pass', 1)
+        r['superseded'] = bool(a.superseded)
+        r['validation'] = {'ts': now_iso(), 'evidence': a.evidence}
         changed = True
-        print('confidence %d' % a.confidence)
+        print('restore #%d %s at pass %d'
+              % (a.validate, 'SUPERSEDED (do not reinstate)' if a.superseded else 'stands',
+                 r['validated_pass']))
 
     if a.complete:
         o = outstanding(L)
