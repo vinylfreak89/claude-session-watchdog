@@ -228,9 +228,33 @@ def run_stage(n, L, S, a):
         L['stage3'] = {'ts': now_iso(), 'tally': dict(tally),
                        'missteers': [{'ts': x['ts'], 'verb': x['verb'], 'arg': x.get('arg'),
                                       'why': x['why']} for x in adj if x['verdict'] == 'MISSTEER']}
+        # commits are actions too, and "it exists in my tree" is not "it landed on the
+        # branch the other agent reads" -- so each claimed sha is checked for the object AND
+        # for a ref.
+        import subprocess as _sp
+        repo = a.proj or os.getcwd()
+
+        def _probe(sha):
+            try:
+                ok = _sp.run(['git', 'cat-file', '-e', sha + '^{commit}'], cwd=repo,
+                             capture_output=True).returncode == 0
+                if not ok:
+                    return False, []
+                r = _sp.run(['git', 'branch', '-a', '--contains', sha], cwd=repo,
+                            capture_output=True, text=True)
+                return True, [x.strip('* ').strip() for x in r.stdout.splitlines() if x.strip()]
+            except Exception:
+                return False, []
+
+        commits = RL.verify_commits(RL.claimed_commits(art['my_text']), _probe)
+        ctally = _c.Counter(x['verdict'] for x in commits)
+        L['stage3']['commits'] = {'tally': dict(ctally),
+                                  'missteers': [{'ts': x['ts'], 'sha': x['sha']}
+                                                for x in commits if x['verdict'] == 'MISSTEER'][:50]}
         decided = tally.get('ok', 0) + tally.get('MISSTEER', 0)
         cov['actions'] = [decided, len(adj)]
         print('stage 3: %d actions replayed -- %s' % (len(adj), dict(tally)))
+        print('         %d commit claim(s) -- %s' % (len(commits), dict(ctally)))
         for m in L['stage3']['missteers'][:20]:
             print('   MISSTEER %s %-10s %s' % (m['ts'][:19], m['verb'], m['why']))
         return True

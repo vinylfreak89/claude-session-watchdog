@@ -119,34 +119,6 @@ def _near(items, ts, before_s=900, after_s=900):
             if -before_s <= (p(x['ts']) - t0).total_seconds() <= after_s]
 
 
-def adjudicate(actions, art):
-    """Per action: is the artifact that must exist, there? Undecidable stays undecidable."""
-    out = []
-    for a in actions:
-        v, verdict, why = a['verb'], 'unchecked', ''
-        if v in NEEDS_SEND:
-            near = _near(art['sends'], a['ts'])
-            if a.get('arg') and v == 'sent1':
-                hit = [s for s in near if a['arg'] in s['msg'][:4000]]
-                verdict, why = ('ok', 'send carries %s' % a['arg']) if hit else \
-                               ('ok-nearby', '%d send(s) near, id not matched' % len(near)) if near else \
-                               ('MISSTEER', 'no send within 15 min of sent1')
-            else:
-                verdict, why = ('ok', '%d send(s) near' % len(near)) if near else \
-                               ('MISSTEER', 'no send within 15 min')
-        elif v in NEEDS_RELAY_TEXT:
-            near = _near(art['my_text'], a['ts'], before_s=1800, after_s=300)
-            big = [x for x in near if len(x['text']) > 400]
-            verdict, why = ('ok', '%d relay-sized reply/ies' % len(big)) if big else \
-                           ('MISSTEER', 'no substantial reply to the owner around `relayed`')
-        elif v in NEEDS_TARGET_REPLY:
-            near = _near(art['target'], a['ts'], before_s=3600, after_s=0)
-            verdict, why = ('ok', '%d target turn(s) before' % len(near)) if near else \
-                           ('MISSTEER', 'no target output before resolving')
-        out.append(dict(a, verdict=verdict, why=why))
-    return out
-
-
 # ---------------------------------------------------------------- citation
 
 import hashlib
@@ -157,6 +129,11 @@ def cite(fname, lineno):
     recorded bytes -- not my rendering of them. Owner, 2026-09-11: "you need to be certain of
     what you are reconstructing." So a restore names a location in the record and the
     instrument reads it; there is no path that accepts text I typed."""
+    if not isinstance(lineno, int) or lineno < 1:
+        # A bad citation must be a NAMED refusal, not a TypeError from a format string.
+        # Found by the citation fixture, 2026-09-11: a caller passing None crashed here
+        # instead of being told the citation was unusable.
+        raise ValueError('citation line must be a positive integer, got %r' % (lineno,))
     p = os.path.join(PROJ, fname)
     if not os.path.exists(p):
         raise ValueError('no such transcript: %s' % fname)
@@ -204,8 +181,12 @@ def restore_payload(fname, lineno, which=0):
         raise ValueError('%s:%d carries no Bash command' % (fname, lineno))
     if which >= len(cmds):
         raise ValueError('%s:%d has %d command(s), asked for #%d' % (fname, lineno, len(cmds), which))
-    text = extract_item(cmds[which])
-    if text is None:
+    # normalize() FIRST. Without it this path restored a heredoc's example text as the
+    # owner's words -- the same defect that once produced the literal `$*` as an item, still
+    # live here after every other caller was fixed. Found by the citation fixture, 2026-09-11.
+    cmd = normalize(cmds[which])
+    text = extract_item(cmd)
+    if text is None or not is_real_item(text):
         raise ValueError('%s:%d command #%d carries no recognisable item argument -- REFUSED '
                          '(no guessing: fix the citation or widen ARGFORMS with a control)'
                          % (fname, lineno, which))

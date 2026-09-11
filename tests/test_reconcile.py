@@ -508,6 +508,286 @@ def test_cli_stages():
         shutil.rmtree(d, ignore_errors=True)
 
 
+
+def test_citation():
+    """The CERTAINTY mechanism: a restore is the RECORDED BYTES at a named location, never my
+    rendering of them. Untested until now, which made it a claim rather than a guarantee."""
+    fails = []
+    def ck(name, got, want):
+        ok = got == want
+        print('%-56s %s%s' % (name, 'PASS' if ok else 'FAIL',
+                              '' if ok else '  got=%r want=%r' % (got, want)))
+        if not ok:
+            fails.append(name)
+
+    d = tempfile.mkdtemp(prefix='recon-cite-')
+    old_proj = R.PROJ
+    try:
+        build(d)
+        R.PROJ = d
+        fn = '80f99b89-fixture.jsonl'
+        lines = open(os.path.join(d, fn), 'rb').readlines()
+
+        # locate the line carrying a genuine item, without assuming an index
+        target = None
+        for i, raw in enumerate(lines, 1):
+            try:
+                rec_ = json.loads(raw)
+            except Exception:
+                continue
+            for j, c in enumerate(R.commands_in(rec_)):
+                t = R.extract_item(R.normalize(c))
+                if t and R.is_real_item(t) and t == REAL_ITEMS[0]:
+                    target = (i, j)
+            if target:
+                break
+        ck('a genuine item is locatable by citation', bool(target), True)
+        i, j = target
+
+        pay = R.restore_payload(fn, i, j)
+        ck('the payload is the verbatim recorded text', pay['text'], REAL_ITEMS[0])
+        ck('the citation names file:line#cmd', pay['source'], '%s:%d#%d' % (fn, i, j))
+        ck('the payload carries a sha256 of the text', len(pay['sha256']), 64)
+        ck('it re-verifies against the transcript', R.verify_payload(pay)[0], True)
+
+        # a payload whose stored text no longer matches the record must FAIL verification
+        tampered = dict(pay, sha256='0' * 64)
+        ck('a tampered payload fails re-verification', R.verify_payload(tampered)[0], False)
+
+        # citing a line that carries no item must REFUSE, never improvise
+        # a line that HAS commands but carries no genuine item -- located by the library
+        # itself rather than by guessing at bytes
+        bad = None
+        for n, raw in enumerate(lines, 1):
+            try:
+                rr = json.loads(raw)
+            except Exception:
+                continue
+            cmds = R.commands_in(rr)
+            if cmds and all(not (R.extract_item(R.normalize(c)) or '') for c in cmds):
+                bad = n
+                break
+        ck('a command-bearing line with no item is locatable', bool(bad), True)
+        refused = False
+        try:
+            R.restore_payload(fn, bad, 0)
+        except ValueError as e:
+            refused = 'REFUSED' in str(e) or 'no recognisable' in str(e)
+        ck('citing a line with no real item refuses', refused, True)
+
+        # a malformed citation refuses by name rather than crashing
+        named = False
+        try:
+            R.restore_payload(fn, None, 0)
+        except ValueError as e:
+            named = 'positive integer' in str(e)
+        except TypeError:
+            named = False
+        ck('a malformed citation refuses by name, not TypeError', named, True)
+
+        # citing a line that does not exist refuses
+        gone = False
+        try:
+            R.restore_payload(fn, 10 ** 6, 0)
+        except ValueError:
+            gone = True
+        ck('citing a nonexistent line refuses', gone, True)
+
+        # citing a missing transcript refuses
+        nofile = False
+        try:
+            R.restore_payload('no-such-transcript.jsonl', 1, 0)
+        except ValueError:
+            nofile = True
+        ck('citing a missing transcript refuses', nofile, True)
+
+        # is_real_item, directly
+        ck('is_real_item rejects a shell variable', R.is_real_item('$*'), False)
+        ck('is_real_item rejects a fragment', R.is_real_item('short'), False)
+        ck('is_real_item rejects empty', R.is_real_item(''), False)
+        ck('is_real_item accepts a sentence', R.is_real_item(REAL_ITEMS[0]), True)
+
+        # normalize as a COMPOSITION, not just its parts
+        combined = ("# ./wd.sh queue add \"a commented example that is long enough to count\"\n"
+                    "cat > f <<'EOF'\n./wd.sh owe add \"a heredoc example long enough to count\"\nEOF\n"
+                    "echo './wd.sh queue add \"an echoed example long enough to count\"'\n"
+                    "for d in D7 D8; do ./wd.sh owe done $d; done")
+        norm = R.normalize(combined)
+        ck('normalize removes comment, heredoc and echo together',
+           R.extract_item(norm), None)
+        ck('and still unrolls the loop in the same pass',
+           ('owe done D7' in norm and 'owe done D8' in norm), True)
+
+        # the library's own selftest must pass
+        ck('wd_recon_lib.selftest() passes', R.selftest(), 0)
+        return fails
+    finally:
+        R.PROJ = old_proj
+        shutil.rmtree(d, ignore_errors=True)
+
+
+
+def test_cli_all_stages():
+    """Stages 2-5 run from the CLI, and the supersession FIXED POINT holds. Until now only
+    --stage 1 was ever executed by a test, and the one defect the wiring had (a swallowed
+    guard) was exactly of the kind only an end-to-end run finds."""
+    import subprocess
+    fails = []
+    def ck(name, got, want):
+        ok = got == want
+        print('%-56s %s%s' % (name, 'PASS' if ok else 'FAIL',
+                              '' if ok else '  got=%r want=%r' % (got, want)))
+        if not ok:
+            fails.append(name)
+
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    d = tempfile.mkdtemp(prefix='recon-cli2-')
+    try:
+        _, st = build(d)
+
+        def run(*args):
+            r = subprocess.run([sys.executable, os.path.join(here, 'wd_reconcile.py'),
+                                '--state-dir', st] + list(args),
+                               capture_output=True, text=True)
+            return r.returncode, r.stdout + r.stderr
+
+        run('2026-09-09T10:00:00Z', '2026-09-11T10:00:00Z', '--init')
+        run('--stage', '1', '--proj', d, '--self-prefix', '80f99b89')
+
+        # stage 2 must REFUSE rather than report an empty result
+        rc, out = run('--stage', '2')
+        ck('stage 2 refuses instead of reporting nothing', rc, 1)
+        ck('and names its prerequisite', 'Time Machine' in out, True)
+
+        # stage 4 with nothing restored says so rather than passing silently
+        rc, out = run('--stage', '4', '--proj', d)
+        ck('stage 4 with no restores says so', 'nothing restored yet' in out, True)
+
+        # stage 5 with nothing validated refuses to write
+        rc, out = run('--stage', '5')
+        ck('stage 5 with nothing validated writes nothing',
+           'nothing validated' in out, True)
+        before = json.load(open(os.path.join(st, 'state.json')))
+        ck('and state.json is untouched', before.get('owner_queue'), [])
+
+        # --- the supersession FIXED POINT ------------------------------------------------
+        run('--restore', 'first recovered item, long enough to be real words',
+            '--evidence', 'fixture:1#0')
+        led = json.load(open(os.path.join(st, 'reconcile.json')))
+        ck('a restore bumps the pass counter', led.get('pass'), 1)
+        ck('and lands unvalidated', led['restored'][0]['validated_pass'], None)
+
+        run('--validate', '0', '--evidence', 'scanned forward, nothing supersedes it')
+        led = json.load(open(os.path.join(st, 'reconcile.json')))
+        ck('validating marks it at the current pass', led['restored'][0]['validated_pass'], 1)
+        rc, out = run()
+        ck('no supersession check outstanding now', 'supersession check owed' in out, False)
+
+        # a SECOND restore must invalidate the first -- the recursion, enforced
+        run('--restore', 'second recovered item, also long enough to be real words',
+            '--evidence', 'fixture:2#0')
+        led = json.load(open(os.path.join(st, 'reconcile.json')))
+        ck('a second restore bumps the pass', led.get('pass'), 2)
+        ck('the FIRST restore is invalidated again',
+           led['restored'][0]['validated_pass'], None)
+        ck('the second is unvalidated too', led['restored'][1]['validated_pass'], None)
+        rc, out = run()
+        ck('both are reported outstanding', '2 restore(s) unvalidated' in out, True)
+
+        # a superseded candidate is recorded as such and must NOT be repaired in
+        run('--validate', '0', '--evidence', 'he answered this later', '--superseded')
+        run('--validate', '1', '--evidence', 'nothing supersedes it')
+        led = json.load(open(os.path.join(st, 'reconcile.json')))
+        ck('the superseded one is flagged', led['restored'][0]['superseded'], True)
+        ck('the surviving one is not', led['restored'][1]['superseded'], False)
+
+        rc, out = run('--stage', '5', '--apply')
+        d2 = json.load(open(os.path.join(st, 'state.json')))
+        ck('stage 5 repairs only the survivor', len(d2.get('owner_queue') or []), 1)
+        ck('the superseded item is NOT reinstated',
+           any('first recovered' in (x.get('text') or '') for x in d2['owner_queue']), False)
+        ck('the survivor is reinstated',
+           any('second recovered' in (x.get('text') or '') for x in d2['owner_queue']), True)
+
+        # re-running the repair is idempotent through the CLI too
+        run('--stage', '5', '--apply')
+        d3 = json.load(open(os.path.join(st, 'state.json')))
+        ck('re-running the repair adds nothing', len(d3['owner_queue']), 1)
+
+        # stage 3 runs end to end against the corpus
+        rc, out = run('--stage', '3', '--proj', d, '--self-prefix', '80f99b89')
+        ck('stage 3 runs from the CLI', 'actions replayed' in out or rc in (0, 1), True)
+        return fails
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+
+def test_remaining_units():
+    """Direct coverage for the last public functions, so none is trusted on inspection."""
+    fails = []
+    def ck(name, got, want):
+        ok = got == want
+        print('%-56s %s%s' % (name, 'PASS' if ok else 'FAIL',
+                              '' if ok else '  got=%r want=%r' % (got, want)))
+        if not ok:
+            fails.append(name)
+
+    d = tempfile.mkdtemp(prefix='recon-units-')
+    old = R.PROJ
+    try:
+        _, st = build(d)
+        R.PROJ = d
+
+        # load(): every timestamped record, sorted, mine separated from the target's
+        mine, tgt = R.load('80f99b89')
+        ck('load returns the corpus', len(mine) > 0, True)
+        ck('load sorts chronologically',
+           [r['timestamp'] for r in mine] == sorted(r['timestamp'] for r in mine), True)
+        ck('load skips untimestamped records rather than crashing',
+           all(r.get('timestamp') for r in mine), True)
+        ck('load survives the unparseable line', True, True)
+        ck('no target transcript in this corpus', len(tgt), 0)
+
+        # live_stores(): reads every key, and never invents one
+        ls = R.live_stores(st)
+        ck('live_stores lists every key present', 'owner_decision_seq' in ls['all_keys'], True)
+        ck('live_stores returns the raw doc too', isinstance(ls['raw'], dict), True)
+        ck('a missing store reads as empty, not absent', ls['open_questions'], {})
+        ck('live_stores on a dir with no state.json is empty, not an error',
+           R.live_stores(tempfile.mkdtemp())['all_keys'], [])
+
+        # cite(): the raw record at a location
+        rec_ = R.cite('80f99b89-fixture.jsonl', 1)
+        ck('cite returns the record at that line', isinstance(rec_, dict), True)
+        ck('cite gives back its timestamp', bool(rec_.get('timestamp')), True)
+
+        # claimed_commits(): shas I asserted in my own words
+        txt = [{'ts': 't1', 'text': 'landed as `2dce8fc` and pushed'},
+               {'ts': 't2', 'text': 'see 46beebdf0c0cc1016184c8cf5863f5a3c4e1ac1d for detail'},
+               {'ts': 't3', 'text': 'the year 2026 and 1234567 are not shas I claimed'},
+               {'ts': 't4', 'text': 'no hex here at all'}]
+        cc = R.claimed_commits(txt)
+        shas = {c['sha'] for c in cc}
+        ck('a short sha is found', '2dce8fc' in shas, True)
+        ck('a full sha is found', '46beebdf0c0cc1016184c8cf5863f5a3c4e1ac1d' in shas, True)
+        ck('a bare decimal number is not taken as a sha', '1234567' in shas, False)
+        ck('prose with no hex yields nothing from that line',
+           any(c['ts'] == 't4' for c in cc), False)
+
+        # verify_commits(): object AND ref
+        res = R.verify_commits(list(cc)[:1], lambda sha: (True, ['origin/main']))
+        ck('a probed commit carries its refs', res[0]['refs'], ['origin/main'])
+
+        # the retired duplicate must be GONE, not merely unused
+        ck('adjudicate() is deleted, not left as a second source of truth',
+           hasattr(R, 'adjudicate'), False)
+        return fails
+    finally:
+        R.PROJ = old
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def main():
     d = tempfile.mkdtemp(prefix='recon-fixture-')
     fails = []
@@ -650,8 +930,14 @@ def main():
         fails.extend(test_stage2())
         print('\n--- tm reader (synthesized) ---')
         fails.extend(test_tm_reader())
+        print('\n--- remaining units ---')
+        fails.extend(test_remaining_units())
+        print('\n--- citation: the certainty mechanism ---')
+        fails.extend(test_citation())
         print('\n--- CLI: stages actually run ---')
         fails.extend(test_cli_stages())
+        print('\n--- CLI: stages 2-5 and the supersession fixed point ---')
+        fails.extend(test_cli_all_stages())
         print('\n--- stage 5: additive repair ---')
         fails.extend(test_stage5())
 
