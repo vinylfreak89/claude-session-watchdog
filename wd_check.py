@@ -8,6 +8,8 @@
   wd_check.py --target SEL check row <ID>                   present in the ledger? its text
   wd_check.py --target SEL check msg-to-watchdog [since]    messages the target sent to the watchdog session since <iso>
   wd_check.py --target SEL check dispatch <thread>          Codex rollout state for a thread id (prefix ok)
+  wd_check.py --target SEL conditional <key> "<cond>"       park an item: still listed, not due until `fired`
+  wd_check.py --target SEL fired <key>                      its condition happened; it is due again
   wd_check.py --target SEL check tree [path]                uncommitted tracked changes, diff size, last commit, branch drift
   wd_check.py --target SEL check grep <path> <regex>        matching lines of a file (file-vs-file disagreements)
   wd_check.py --target SEL check csv <path> <col><op><val> [idcol]   rows of a CSV record matching a condition
@@ -253,6 +255,13 @@ def due_questions(sess, state, quiet_min):
     for k, q in sorted(qs.items()):
         try: age = int(ct) - int(q.get('asked_ct') or ct)
         except Exception: age = 0
+        # An item owed only IF something else happens is PARKED, not suppressed: it stays in
+        # open_questions and in the open listing, and `fired` makes it due like any other. Without
+        # this state a conditional sat in the nudge list and came due every three turns, and was
+        # marked nudged four times without being sent -- recording a send that did not happen.
+        # Control: tests/test_conditional_item.py, whose second case requires an ORDINARY overdue
+        # item to still come due, because that is what fails if this becomes a mute button.
+        if q.get('conditional'): continue
         if quiet: out.append((k, q, 'peer is quiet', age))
         elif age >= 3: out.append((k, q, 'moved %d turns past the ask' % age, age))
     return out
@@ -262,7 +271,7 @@ def main():
     ap.add_argument('--target', required=True); ap.add_argument('--self', dest='self_sel'); ap.add_argument('--repo'); ap.add_argument('--ledger')
     ap.add_argument('--state-dir', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'state')); ap.add_argument('--quiet-min', type=float, default=10.0)
     ap.add_argument('--row-pattern', default=W.DEFAULT_ROW_PATTERN)
-    ap.add_argument('mode', choices=['check', 'finding', 'owed', 'relayed', 'hold', 'answered', 'ask', 'resolved', 'open', 'next', 'sent1', 'nudged']); ap.add_argument('rest', nargs=argparse.REMAINDER)
+    ap.add_argument('mode', choices=['check', 'finding', 'owed', 'relayed', 'hold', 'answered', 'ask', 'resolved', 'open', 'next', 'sent1', 'nudged', 'conditional', 'fired']); ap.add_argument('rest', nargs=argparse.REMAINDER)
     a = ap.parse_args(); W.set_row_pattern(a.row_pattern)
     sess = W.find_session(a.target); state = WK.load_state(a.state_dir)
     if a.mode == 'answered':
@@ -325,6 +334,22 @@ def main():
         q['last_send'] = W.now_iso(); q['asked_ct'] = str(st.get('ct'))
         WK.save_state(a.state_dir, state)
         print('nudged %s (%d resend(s)); due again at the next gate crossing' % (key, q['resends'])); return 0
+    if a.mode in ('conditional', 'fired'):
+        key = a.rest[0] if a.rest else ''
+        if not key: ap.error('%s <key> [condition]' % a.mode)
+        qs = state.get('open_questions') or {}
+        q = qs.get(key)
+        if q is None: print('no open question %s' % key); return 1
+        if a.mode == 'conditional':
+            why = ' '.join(a.rest[1:]).strip()
+            if not why: ap.error('conditional <key> "<the condition that would make it due>"')
+            q['conditional'] = why
+            print('PARKED %s -- still open and still listed, but not due until: %s' % (key, why))
+        else:
+            was = q.pop('conditional', None)
+            q['asked_ct'] = str(W.read_state(sess).get('ct'))
+            print('FIRED %s (was parked on: %s); due at the next gate crossing' % (key, was or '-'))
+        WK.save_state(a.state_dir, state); return 0
     if a.mode == 'resolved':
         key = a.rest[0] if a.rest else ''
         if not key: ap.error('resolved <key>')

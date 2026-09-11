@@ -56,6 +56,8 @@ case "$cmd" in
   next)   exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" next ;;
   sent1)  exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" sent1 "$@" ;;
   nudged) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" nudged "$@" ;;
+  conditional) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" conditional "$@" ;;
+  fired)  exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" fired "$@" ;;
   hold)   exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" hold "$@" ;;
   check)  exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" check "$@" ;;
   finding) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" finding "$@" ;;
