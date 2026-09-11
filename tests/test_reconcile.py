@@ -1952,6 +1952,160 @@ def test_shell_reading():
     return fails
 
 
+
+def test_snapshot_resolver():
+    """Pending actions settled from a SERIES OF STATE SNAPSHOTS (stage 2): values the scripts wrote
+    at run time, compared across the snapshots that bracket each action. Synthetic series only --
+    the drive is never read here."""
+    fails = []
+    def ck(name, got, want):
+        ok = got == want
+        print('%-56s %s%s' % (name, 'PASS' if ok else 'FAIL',
+                              '' if ok else '  got=%r want=%r' % (got, want)))
+        if not ok:
+            fails.append(name)
+
+    T = lambda h, m=0, s=0: '2026-09-10T%02d:%02d:%02dZ' % (h, m, s)
+
+    def act(verb, ident, ts, kind='close', outcome=None, **kw):
+        return dict({'verb': verb, 'id': ident, 'ts': ts, 'kind': kind, 'state': 'live',
+                     'outcome': outcome, 'why': None, 'cite': 'f:%s' % ts}, **kw)
+
+    def row(h, state, readable=True, at=True):
+        r = {'snapshot': '2026-09-10-%02d0000' % h, 'readable': readable, 'state': state if readable else None}
+        if at:
+            r['at'] = T(h)
+        return r
+
+    def settle(acts, series):
+        R.resolve_from_snapshots(acts, series)
+        return [(a['outcome'], a.get('id')) for a in acts]
+
+    dec = lambda i, ts, text='a decision': {i: {'id': i, 'ts': ts, 'text': text, 'gated_on': None}}
+
+    # --- owe done -----------------------------------------------------------------------
+    ck('owe done: present before, gone after -> landed',
+       settle([act('owe done', 'D3', T(1, 30))], [row(1, {'owner_decisions': dec('D3', T(0, 5))}), row(2, {'owner_decisions': {}})]),
+       [('landed', 'D3')])
+    ck('owe done: the same entry still there after -> no_effect',
+       settle([act('owe done', 'D3', T(1, 30))], [row(1, {'owner_decisions': dec('D3', T(0, 5))}),
+                                                  row(2, {'owner_decisions': dec('D3', T(0, 5))})]),
+       [('no_effect', 'D3')])
+    ck('owe done: nothing there to clear -> no_effect',
+       settle([act('owe done', 'D3', T(1, 30))], [row(1, {'owner_decisions': {}}), row(2, {'owner_decisions': {}})]),
+       [('no_effect', 'D3')])
+    ck('owe done: another close of the same id in the bracket -> pending',
+       settle([act('owe done', 'D3', T(1, 30)), act('owe done', 'D3', T(1, 40))],
+              [row(1, {'owner_decisions': dec('D3', T(0, 5))}), row(2, {'owner_decisions': {}})])[0],
+       (None, 'D3'))
+    ck('owe done: cleared, then the id RE-MINTED in the same bracket -> landed',
+       settle([act('owe done', 'D1', T(1, 30)),
+               act('owe add', 'D1', T(1, 45), kind='open', outcome='landed', text='a new question', store='owner_decisions')],
+              [row(1, {'owner_decisions': dec('D1', T(0, 5))}), row(2, {'owner_decisions': dec('D1', T(1, 45), 'a new question')})])[0],
+       ('landed', 'D1'))
+    ck('owe done: minted AFTER the snapshot before it, cleared, gone -> landed',
+       settle([act('owe add', 'D2', T(1, 10), kind='open', outcome='landed', text='q', store='owner_decisions'),
+               act('owe done', 'D2', T(1, 30))],
+              [row(1, {'owner_decisions': {}}), row(2, {'owner_decisions': {}})])[1],
+       ('landed', 'D2'))
+    ck('no readable snapshot after it -> pending, and it says so',
+       [(a['outcome'], a.get('needs')) for a in R.resolve_from_snapshots(
+           [act('owe done', 'D3', T(3))], [row(1, {'owner_decisions': dec('D3', T(0, 5))})])],
+       [(None, 'no readable snapshot after it yet')])
+
+    # --- questions ----------------------------------------------------------------------
+    q = lambda k, **f: {k: dict({'text': 'q'}, **f)}
+    ck('ask: the next snapshot records it asked at that time -> landed',
+       settle([act('ask', 'K1', T(1, 30), kind='open')], [row(1, {}), row(2, {'open_questions': q('K1', asked_ts=T(1, 30, 2))})]),
+       [('landed', 'K1')])
+    ck('ask: no record of it after, nothing in between -> no_effect',
+       settle([act('ask', 'K1', T(1, 30), kind='open')], [row(1, {}), row(2, {'open_questions': {}})]),
+       [('no_effect', 'K1')])
+    ck('resolved: archived with its resolve time -> landed',
+       settle([act('resolved', 'K1', T(1, 30))], [row(1, {'open_questions': q('K1', asked_ts=T(0, 5))}),
+                                                  row(2, {'resolved_questions': q('K1', resolved_ts=T(1, 30, 1))})]),
+       [('landed', 'K1')])
+    ck('resolved: still open after it -> no_effect',
+       settle([act('resolved', 'K1', T(1, 30))], [row(1, {'open_questions': q('K1', asked_ts=T(0, 5))}),
+                                                  row(2, {'open_questions': q('K1', asked_ts=T(0, 5))})]),
+       [('no_effect', 'K1')])
+    ck('resolved: open before, gone after, before archives existed -> landed',
+       settle([act('resolved', 'K1', T(1, 30))], [row(1, {'open_questions': q('K1', asked_ts=T(0, 5))}), row(2, {})]),
+       [('landed', 'K1')])
+    ck('nudged: last_send moved to its time -> landed',
+       settle([act('nudged', 'K1', T(1, 30))], [row(1, {'open_questions': q('K1', last_send=T(0, 5))}),
+                                                row(2, {'open_questions': q('K1', last_send=T(1, 30, 1))})]),
+       [('landed', 'K1')])
+    ck('nudged: last_send did not move -> no_effect',
+       settle([act('nudged', 'K1', T(1, 30))], [row(1, {'open_questions': q('K1', last_send=T(0, 5))}),
+                                                row(2, {'open_questions': q('K1', last_send=T(0, 5))})]),
+       [('no_effect', 'K1')])
+
+    # --- relays and sends -----------------------------------------------------------------
+    ck('relayed: raised past its turn by the next snapshot, nothing later -> landed',
+       settle([act('relayed', T(1, 20), T(1, 30), kind='mark')], [row(1, {'last_relay_ts': T(0, 50)}), row(2, {'last_relay_ts': T(1, 20)})]),
+       [('landed', T(1, 20))])
+    ck('relayed: already recorded past it -> no_effect',
+       settle([act('relayed', T(0, 20), T(1, 30), kind='mark')], [row(1, {'last_relay_ts': T(0, 50)}), row(2, {'last_relay_ts': T(0, 50)})]),
+       [('no_effect', T(0, 20))])
+    ck('relayed: a later relay past it in the bracket -> pending',
+       settle([act('relayed', T(1, 20), T(1, 30), kind='mark'), act('relayed', T(1, 40), T(1, 45), kind='mark')],
+              [row(1, {'last_relay_ts': T(0, 50)}), row(2, {'last_relay_ts': T(1, 40)})])[0],
+       (None, T(1, 20)))
+    ck('answered: last_send_ts is its own run time -> landed',
+       settle([act('answered', None, T(1, 30), kind='mark')], [row(1, {'last_send_ts': T(0, 5)}), row(2, {'last_send_ts': T(1, 30, 3)})]),
+       [('landed', None)])
+    ck('answered: another send in the bracket overwrote it -> pending',
+       settle([act('answered', None, T(1, 30), kind='mark'), act('sent1', 'Q4', T(1, 50))],
+              [row(1, {'last_send_ts': T(0, 5)}), row(2, {'last_send_ts': T(1, 50, 1)})])[0],
+       (None, None))
+    ck('sent1: marked sent at that time -> landed',
+       settle([act('sent1', 'Q4', T(1, 30))], [row(1, {'owner_queue': [{'id': 'Q4', 'ts': T(0, 1), 'text': 'x'}]}),
+                                               row(2, {'owner_queue_sent': [{'id': 'Q4', 'ts': T(0, 1), 'text': 'x', 'sent_ts': T(1, 30, 1)}]})]),
+       [('landed', 'Q4')])
+    ck('hold: held from that time -> landed',
+       settle([act('hold', T(1, 0), T(1, 30), kind='mark')], [row(1, {}), row(2, {'held_turns': {T(1, 0): {'reason': 'owner', 'ts': T(1, 30, 2)}}})]),
+       [('landed', T(1, 0))])
+
+    # --- opens whose id no result showed ---------------------------------------------------
+    ck('owe add: the next snapshot holds it by text and time -> landed with its id',
+       settle([act('owe add', None, T(1, 30), kind='open', text='does position alone establish identity?', store='owner_decisions')],
+              [row(1, {}), row(2, {'owner_decisions': dec('D16', T(1, 30, 1), 'does position alone establish identity?')})]),
+       [('landed', 'D16')])
+    ck('queue add: the next snapshot holds it by text and time -> landed with its id',
+       settle([act('queue add', None, T(1, 30), kind='open', text='the box drawing is still wrong', store='owner_queue')],
+              [row(1, {}), row(2, {'owner_queue': [{'id': 'Q42', 'ts': T(1, 30, 1), 'text': 'the box drawing is still wrong'}]})]),
+       [('landed', 'Q42')])
+
+    # --- what the resolver must never do ---------------------------------------------------
+    done = act('owe done', 'D3', T(1, 30), outcome='failed')
+    ck('an action already established is never re-settled',
+       settle([done], [row(1, {'owner_decisions': dec('D3', T(0, 5))}), row(2, {'owner_decisions': {}})]), [('failed', 'D3')])
+    scr = dict(act('owe done', 'D3', T(1, 30)), state='scratch')
+    ck('a scratch-state action is never settled from the live snapshots',
+       settle([scr], [row(1, {'owner_decisions': dec('D3', T(0, 5))}), row(2, {'owner_decisions': {}})]), [(None, 'D3')])
+    ck('an unreadable snapshot is skipped, never read as a state',
+       settle([act('owe done', 'D3', T(1, 30))],
+              [row(1, {'owner_decisions': dec('D3', T(0, 5))}), row(2, None, readable=False), row(3, {'owner_decisions': {}})]),
+       [('landed', 'D3')])
+    refused = False
+    try:
+        R.resolve_from_snapshots([act('owe done', 'D3', T(1, 30))], [row(1, {}, at=False), row(2, {})])
+    except ValueError as e:
+        refused = 'local' in str(e)
+    ck('a snapshot row without an `at` time is REFUSED (TM names are local time)', refused, True)
+    ck('every outcome it gives is in the declared vocabulary',
+       all(o in R.OUTCOMES for o, _ in settle([act('owe done', 'D3', T(1, 30)), act('ask', 'K1', T(1, 40), kind='open')],
+                                               [row(1, {'owner_decisions': dec('D3', T(0, 5))}), row(2, {})]) if o), True)
+
+    # --- stage2_series keeps the full state and the snapshot time --------------------------
+    series = R.stage2_series(['2026-09-10-010000'], lambda s: {'last_relay_ts': T(0, 50)},
+                             at_of=lambda s: T(1))
+    ck('stage2_series keeps the full state and the time it was given',
+       (series[0]['state'].get('last_relay_ts'), series[0]['at']), (T(0, 50), T(1)))
+    return fails
+
+
 def test_vocabulary():
     """Unknown is not an answer class: everything is answerable from my actions, project state or
     what the owner owes me, so an item the instrument could not settle is WORK OUTSTANDING, and a
@@ -2185,6 +2339,8 @@ def main():
         fails.extend(_guarded(test_sends_to_target))
         print('\n--- reading commands as the shell does ---')
         fails.extend(_guarded(test_shell_reading))
+        print('\n--- stage 2: settling pending actions from snapshots ---')
+        fails.extend(_guarded(test_snapshot_resolver))
         print('\n--- vocabulary: no unknown-type verdict ---')
         fails.extend(_guarded(test_vocabulary))
 

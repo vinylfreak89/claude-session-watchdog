@@ -312,7 +312,7 @@ def stage2_snapshots(tm_run, diskutil_run):
                              'anything' % (len(listed), count)) if truncated else ''}
 
 
-def stage2_series(snapshots, read_state):
+def stage2_series(snapshots, read_state, at_of=None):
     """The state dir as it stood at EVERY snapshot. Owner: "reading that state directory since
     it has existed. Do not binary search it. Do not sample it. Everything."
 
@@ -322,10 +322,11 @@ def stage2_series(snapshots, read_state):
     series = []
     for s in snapshots:
         d = read_state(s)
+        at = at_of(s) if at_of else None          # an aware time: TM names are LOCAL time
         if d is None:
-            series.append({'snapshot': s, 'readable': False})
+            series.append({'snapshot': s, 'readable': False, 'at': at})
             continue
-        series.append({'snapshot': s, 'readable': True,
+        series.append({'snapshot': s, 'readable': True, 'at': at, 'state': d,
                        'owner_queue': [x.get('id') for x in (d.get('owner_queue') or [])],
                        'owner_decisions': sorted((d.get('owner_decisions') or {}).keys()),
                        'open_questions': sorted((d.get('open_questions') or {}).keys()),
@@ -1666,6 +1667,154 @@ def _wd_invocation(av, argv, env, cwd, live):
             'text_resolved': (not any(aexp)) if text is not None else None,
             'urgent': urgent, 'gated_on': gated, 'state': state,
             'state_dir': state_dir or state_literal, 'argv': av, 'via': via}
+
+
+# ---------------------------------------------------------------- stage 2: settling from snapshots
+
+def resolve_from_snapshots(acts, series):
+    """Settle PENDING live actions from the state as it stood at a series of snapshots (Time
+    Machine backups of state.json): rows {'snapshot', 'at', 'readable', 'state'} as built by
+    stage2_series. `at` is the snapshot's time as an aware ISO timestamp, supplied by the caller:
+    Time Machine names snapshots in LOCAL time and the transcript is UTC, so the zone is a fact
+    to establish before wiring the drive -- never a default. Rows without `at` are refused.
+
+    Every rule compares values the scripts WROTE AT RUN TIME (a decision's ts, asked_ts,
+    resolved_ts, last_send, last_relay_ts, sent_ts, a held turn's ts) between the last readable
+    snapshot at or before the action and the first readable one after it. A change is credited
+    to the action only when no other action in that bracket could have made it; otherwise it
+    stays pending, and so does anything no snapshot brackets yet. Absence decides only where the
+    script's contract makes it decisive -- e.g. a decision still in owner_decisions, same entry,
+    after its `owe done` did not get cleared."""
+    missing = [r.get('snapshot') for r in series if r.get('readable', True) and not r.get('at')]
+    if missing:
+        raise ValueError('snapshot rows without an `at` time: %s -- Time Machine names are local '
+                         'time; establish the zone and convert before settling anything' % missing[:3])
+    rows = sorted((r for r in series if r.get('readable', True) and r.get('state') is not None),
+                  key=lambda r: _dt(r['at']))
+    live = [a for a in acts if a.get('state') == 'live']
+
+    def bracket(ts):
+        t, before, after = _dt(ts), None, None
+        for r in rows:
+            if _dt(r['at']) <= t:
+                before = r
+            elif after is None:
+                after = r
+        return before, after
+
+    def between(ts, lo, hi):
+        t = _dt(ts)
+        return t is not None and (lo is None or t > _dt(lo)) and t <= _dt(hi)
+
+    def others(a, verbs, ident, lo, hi):
+        return [b for b in live if b is not a and b['verb'] in verbs and b.get('id') == ident
+                and between(b['ts'], lo, hi)]
+
+    for a in live:
+        if a['outcome'] is not None:
+            continue
+        before, after = bracket(a['ts'])
+        if after is None:
+            a['needs'] = 'no readable snapshot after it yet'
+            continue
+        B = (before or {}).get('state') or {}
+        A = after['state']
+        lo, hi = (before or {}).get('at'), after['at']
+        v, ident, res = a['verb'], a.get('id'), None
+        span = ' (snapshots %s .. %s)' % ((before or {}).get('snapshot') or 'none', after.get('snapshot'))
+
+        if v == 'owe done' and ident:
+            was = (B.get('owner_decisions') or {}).get(ident)
+            minted = [b for b in live if b['verb'] == 'owe add' and b.get('id') == ident
+                      and b['outcome'] == 'landed' and between(b['ts'], lo, a['ts'])]
+            remint = [b for b in others(a, ('owe add',), ident, a['ts'], hi) if b['outcome'] == 'landed']
+            reclose = others(a, ('owe done',), ident, a['ts'], hi)
+            now = (A.get('owner_decisions') or {}).get(ident)
+            if was is None and not minted:
+                res = ('no_effect', '%s was not in owner_decisions when it was cleared' % ident)
+            elif reclose:
+                res = None
+            elif now is None:
+                res = ('landed', '%s in owner_decisions before it, gone after' % ident)
+            elif remint and any(_in_window(now.get('ts'), b['ts']) for b in remint):
+                res = ('landed', 'the %s there before it is gone; the one after is a new minting' % ident)
+            elif not remint and (was is not None and now.get('ts') == was.get('ts')
+                                 or was is None and minted and _in_window(now.get('ts'), minted[-1]['ts'])):
+                res = ('no_effect', 'the same %s entry is still in owner_decisions after it' % ident)
+        elif v == 'ask' and ident:
+            q = (A.get('open_questions') or {}).get(ident) or (A.get('resolved_questions') or {}).get(ident)
+            if q and _in_window(q.get('asked_ts'), a['ts']):
+                res = ('landed', 'the snapshot records %s asked at %s' % (ident, q.get('asked_ts')))
+            elif not others(a, ('ask', 'resolved'), ident, a['ts'], hi) and \
+                    not (q and _dt(q.get('asked_ts')) and _dt(q.get('asked_ts')) > _dt(a['ts'])):
+                res = ('no_effect', 'the next snapshot records no ask of %s at this time' % ident)
+        elif v == 'resolved' and ident:
+            r = (A.get('resolved_questions') or {}).get(ident)
+            open_b, open_a = (B.get('open_questions') or {}), (A.get('open_questions') or {})
+            busy = others(a, ('ask', 'resolved'), ident, lo, hi)
+            if r and _in_window(r.get('resolved_ts'), a['ts']):
+                res = ('landed', 'the snapshot records %s resolved at %s' % (ident, r.get('resolved_ts')))
+            elif not busy and ident in open_a:
+                res = ('no_effect', '%s is still open after it' % ident)
+            elif not busy and ident in open_b and ident not in open_a:
+                res = ('landed', '%s open before it, gone after (resolved before archives were kept)' % ident)
+        elif v == 'nudged' and ident:
+            q = (A.get('open_questions') or {}).get(ident)
+            if q and _in_window(q.get('last_send'), a['ts']) and not others(a, ('nudged',), ident, a['ts'], hi):
+                res = ('landed', 'the snapshot shows %s re-sent at %s' % (ident, q.get('last_send')))
+            elif q and not others(a, ('nudged', 'ask'), ident, lo, hi) and _dt(q.get('last_send')) \
+                    and _dt(q.get('last_send')) < _dt(a['ts']):
+                res = ('no_effect', '%s last_send did not move' % ident)
+        elif v == 'relayed' and ident:
+            lb, la = _dt(B.get('last_relay_ts')), _dt(A.get('last_relay_ts'))
+            want = _dt(ident)
+            later = [b for b in live if b is not a and b['verb'] == 'relayed' and between(b['ts'], a['ts'], hi)]
+            if want and lb and lb >= want:
+                res = ('no_effect', 'already recorded up to %s before it' % B.get('last_relay_ts'))
+            elif want and la and la < want:
+                res = ('no_effect', 'last_relay_ts after it is still %s' % A.get('last_relay_ts'))
+            elif want and la and la >= want and not any(_dt(b.get('id')) and _dt(b.get('id')) >= want
+                                                         for b in later):
+                res = ('landed', 'last_relay_ts reached %s by the next snapshot' % A.get('last_relay_ts'))
+        elif v == 'answered':
+            senders = [b for b in live if b is not a and b['verb'] in ('answered', 'sent1', 'sent')
+                       and between(b['ts'], a['ts'], hi)]
+            ls = A.get('last_send_ts')
+            if not senders and ls and _in_window(ls, a['ts']):
+                res = ('landed', 'last_send_ts is %s, written when it ran' % ls)
+            elif not senders and _dt(ls) and _dt(ls) < _dt(a['ts']):
+                res = ('no_effect', 'last_send_ts did not move (%s)' % ls)
+        elif v == 'sent1' and ident:
+            items = [x for x in (A.get('owner_queue') or []) + (A.get('owner_queue_sent') or [])
+                     if x.get('id') == ident]
+            if any(_in_window(x.get('sent_ts') or x.get('sent'), a['ts']) for x in items):
+                res = ('landed', '%s marked sent at this time in the next snapshot' % ident)
+            elif items and not others(a, ('sent1',), ident, lo, hi) and \
+                    not any(x.get('sent_ts') or x.get('sent') for x in items):
+                res = ('no_effect', '%s is still unsent after it' % ident)
+        elif v == 'hold' and ident:
+            h = (A.get('held_turns') or {}).get(ident)
+            if h and _in_window(h.get('ts'), a['ts']):
+                res = ('landed', 'the snapshot holds %s from this time' % ident)
+        elif v == 'closed' and ident:
+            c = (A.get('closed_turns') or {}).get(ident)
+            if c and _in_window(c.get('at'), a['ts']):
+                res = ('landed', 'the snapshot records %s closed at this time' % ident)
+        elif v in ('queue add', 'owe add') and a.get('text'):
+            head = _norm(a['text'])[:50]
+            pool = ((A.get('owner_queue') or []) + (A.get('owner_queue_sent') or [])) if v == 'queue add' \
+                else list((A.get('owner_decisions') or {}).values())
+            ids = {x.get('id') for x in pool if _in_window(x.get('ts'), a['ts'])
+                   and _norm(x.get('text')).startswith(head)}
+            if len(ids) == 1:
+                a['id'], a['id_from'] = ids.pop(), 'snapshot'
+                res = ('landed', 'the next snapshot holds it as %s' % a['id'])
+        if res:
+            a.pop('needs', None)
+            _set(a, res[0], res[1] + span)
+        else:
+            a['needs'] = 'the snapshots bracketing it do not settle it' + span
+    return acts
 
 
 # At the END of the module: selftest() uses the shell reader, defined above. Mid-module it ran
