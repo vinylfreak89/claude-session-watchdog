@@ -628,57 +628,73 @@ def channel_texts(rec):
 
 
 def owner_messages(recs):
-    """The owner's words, once each, with provenance and an exclusion ledger.
+    """The owner's words, once per MESSAGE, with provenance and an exclusion ledger.
 
-    Dedupe is by text, and it must handle BATCHED DELIVERY: several queued messages are
-    dequeued together into ONE user record whose text is their newline-join. Measured on the
-    real record: exact-text dedupe counted those words twice -- once per enqueue and once as the
-    merged record. A delivery whose text is the join of pending enqueues is attributed to them.
+    A message is keyed by its DELIVERY, never by its text. Every message he types is enqueued
+    once; its delivery (a `user` record after a dequeue, a `queued_command` attachment after a
+    remove) is paired with the OLDEST UNDELIVERED enqueue of the same text. Text-keyed dedupe
+    was found wrong by probe: "yes" at 01:00, 05:00 and 06:00 collapsed into ONE message dated
+    01:00, so a decision he answered "yes" at 05:00 read as put-not-answered.
+
+    BATCHED DELIVERY: several queued messages are dequeued together into ONE user record whose
+    text is their newline-join; that delivery is paired with the pending enqueues it joins.
+    A delivery with no pending enqueue (a transcript that begins mid-way) is its own message.
+    Peer messages are paired the same way, so each is recorded once.
 
     Returns (messages, excluded, peers, accounting). accounting satisfies
         seen == attributed + excluded_total + batch_deliveries
     so no text leaves the corpus uncounted."""
-    seen, excluded, peers = {}, collections.Counter(), []
+    msgs, excluded, peers = [], collections.Counter(), []
     # Every key present from the start: a corpus with no owner text at all (a subagent's
     # transcript, a window before he spoke) crashed stage 1 with KeyError('seen'). Zero is a
     # measured count here -- every record was examined and none carried his words.
     acct = collections.Counter({'seen': 0, 'attributed': 0, 'batch_deliveries': 0})
+    pending = collections.defaultdict(list)       # text -> his undelivered enqueues, oldest first
+    peer_pending = collections.defaultdict(list)  # the same, for peer messages
     for r in recs:
         if r.get('isMeta'):
             excluded['meta'] += 1
             acct['seen'] += 1
             continue
+        ts = r.get('timestamp') or ''
         for src, txt in channel_texts(r):
             acct['seen'] += 1
             if not txt or not txt.strip():
                 excluded['empty'] += 1
                 continue
+            key = txt.strip()
             cls = next((name for name, rx in NOT_OWNER if rx.match(txt)), None)
             if cls:
                 excluded[cls] += 1
                 if cls == 'peer_message':
-                    m = PEER.search(txt)
-                    peers.append({'ts': r.get('timestamp') or '', 'from': m.group(1) if m else '',
-                                  'text': (m.group(2) if m else txt).strip()})
+                    if src != 'enqueue' and peer_pending[key]:
+                        peer_pending[key].pop(0)      # the delivery of one already recorded
+                    else:
+                        m = PEER.search(txt)
+                        pr = {'ts': ts, 'from': m.group(1) if m else '',
+                              'text': (m.group(2) if m else txt).strip()}
+                        peers.append(pr)
+                        if src == 'enqueue':
+                            peer_pending[key].append(pr)
                 continue
-            key = txt.strip()
-            ts = r.get('timestamp') or ''
-            if key in seen:
-                seen[key]['sources'].add(src)
-                if ts and ts < seen[key]['ts']:
-                    seen[key]['ts'] = ts
+            if src != 'enqueue' and pending[key]:
+                pending[key].pop(0)['sources'].add(src)
                 acct['attributed'] += 1
                 continue
-            parts = [x.strip() for x in key.split('\n')]
-            if src != 'enqueue' and len(parts) > 1 and all(x in seen for x in parts if x):
+            parts = [x.strip() for x in key.split('\n') if x.strip()]
+            need = collections.Counter(parts)
+            if src != 'enqueue' and len(parts) > 1 and all(len(pending[x]) >= n
+                                                            for x, n in need.items()):
                 for x in parts:
-                    if x:
-                        seen[x]['sources'].add(src + '(batch)')
+                    pending[x].pop(0)['sources'].add(src + '(batch)')
                 acct['batch_deliveries'] += 1
                 continue
-            seen[key] = {'ts': ts, 'text': key, 'sources': {src}, 'uuid': r.get('uuid')}
+            m = {'ts': ts, 'text': key, 'sources': {src}, 'uuid': r.get('uuid')}
+            msgs.append(m)
             acct['attributed'] += 1
-    msgs = sorted(seen.values(), key=lambda m: m['ts'])
+            if src == 'enqueue':
+                pending[key].append(m)
+    msgs.sort(key=lambda m: m['ts'])
     for m in msgs:
         m['sources'] = sorted(m['sources'])
     acct['excluded_total'] = sum(excluded.values())
@@ -1033,10 +1049,15 @@ def landed_replay(acts, starts, my_text, sends, peers, state):
             v, why = ('ok', 'text to the owner in the same turn') if hit else \
                      ('MISSTEER', '`relayed` with nothing said to the owner in that turn')
         elif verb == 'resolved':
+            # A reply counts only from a session I SENT TO after the ask and before the reply.
+            # Found by probe: chatter from an unrelated session satisfied `resolved`.
             since = asked.get(ident)
-            hit = [p for p in peers if (since is None or p['ts'] > since) and p['ts'] <= ts]
-            v, why = ('ok', 'the target replied before it was resolved') if hit else \
-                     ('MISSTEER', '%s resolved with no reply from the target after it was asked' % ident)
+            hit = [p for p in peers if (since is None or p['ts'] > since) and p['ts'] <= ts
+                   and any(s.get('to') and s['to'] == p['from'] and s['ts'] <= p['ts']
+                           and (since is None or s['ts'] >= since) for s in sends)]
+            v, why = ('ok', 'the session it was sent to replied before it was resolved') if hit else \
+                     ('MISSTEER', '%s resolved with no reply, after it was asked, from a session '
+                                  'it was sent to' % ident)
         out.append(dict(a, verdict=v, why=why))
     return out
 
@@ -1054,8 +1075,10 @@ def artifacts(recs):
             if b.get('type') == 'text' and b.get('text'):
                 my_text.append({'ts': r.get('timestamp') or '', 'text': b['text']})
             elif b.get('type') == 'tool_use' and 'send_message' in (b.get('name') or ''):
-                sends.append({'ts': r.get('timestamp') or '',
-                              'msg': (b.get('input') or {}).get('message') or ''})
+                inp = b.get('input') or {}
+                sends.append({'ts': r.get('timestamp') or '', 'msg': inp.get('message') or '',
+                              # where it went: a reply only answers what was sent to its sender
+                              'to': inp.get('session_id') or inp.get('to')})
     return my_text, sends
 
 

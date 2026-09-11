@@ -196,8 +196,12 @@ def test_stage3():
     ]
     starts = [T(5), T(6), T(7), T(8), T(9), T(10), T(20), T(21), T(22)]
     my_text = [{'ts': T(6), 'text': 'here is what the target said, relayed to you'}]
-    sends = [{'ts': T(5), 'msg': 'OWNER: ' + Q7},
-             {'ts': T(10, 2), 'msg': 'OWNER: the tenth item text sent after it was marked'}]
+    # every send records where it went: a reply resolves a question only from a session the
+    # question was SENT to, after it was asked (K1 is sent at 07:01; K2 is never sent)
+    sends = [{'ts': T(5), 'msg': 'OWNER: ' + Q7, 'to': 'local_target'},
+             {'ts': T(7, 1), 'msg': 'what does the target think?', 'to': 'local_target'},
+             {'ts': T(10, 2), 'msg': 'OWNER: the tenth item text sent after it was marked',
+              'to': 'local_target'}]
     peers = [{'ts': T(7, 2), 'from': 'local_target', 'text': 'here is my answer'}]
     state = {'owner_queue_sent': [{'id': 'Q10', 'text': 'the tenth item text sent after it was marked'}]}
     rep = R.landed_replay(acts, starts, my_text, sends, peers, state)
@@ -213,8 +217,8 @@ def test_stage3():
        'Q10' in R.item_texts(state, acts), True)
     ck('relayed with text to the owner in the same turn -> ok', v[('relayed', None, T(6, 1))], 'ok')
     ck('relayed with nothing said -> MISSTEER', v[('relayed', None, T(20))], 'MISSTEER')
-    ck('resolved after the target replied -> ok', v[('resolved', 'K1', T(7, 5))], 'ok')
-    ck('resolved with no reply -> MISSTEER', v[('resolved', 'K2', T(8, 5))], 'MISSTEER')
+    ck('resolved after the session it was sent to replied -> ok', v[('resolved', 'K1', T(7, 5))], 'ok')
+    ck('resolved with no reply (and never sent) -> MISSTEER', v[('resolved', 'K2', T(8, 5))], 'MISSTEER')
     ck('answered with a send before it in the turn -> ok', v[('answered', None, T(5, 3))], 'ok')
     ck('nudged with no send -> MISSTEER', v[('nudged', None, T(21, 1))], 'MISSTEER')
     ck('an action whose own result failed stays failed', v[('sent1', 'Q12', T(22))], 'failed')
@@ -1590,6 +1594,71 @@ def test_actions_and_chains_real_shapes():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_repeats_and_peers():
+    """Found by probe. (1) The owner giving the same short reply more than once collapsed into
+    ONE message at the earliest time, so a later decision he answered read as put-not-answered.
+    (2) A reply from a session I never sent to satisfied `resolved`, and every peer reply was
+    recorded once per channel."""
+    import realshape as RS
+    fails = []
+    def ck(name, got, want):
+        ok = got == want
+        print('%-56s %s%s' % (name, 'PASS' if ok else 'FAIL',
+                              '' if ok else '  got=%r want=%r' % (got, want)))
+        if not ok:
+            fails.append(name)
+
+    T = lambda h, m=0: '2026-09-10T%02d:%02d:00Z' % (h, m)
+    recs = RS.owner_turn(T(1), 'yes') + RS.owner_turn(T(5), 'yes') + RS.owner_midturn(T(6), 'yes')
+    msgs, _exc, _peers, acct = R.owner_messages(recs)
+    ck('the same reply given three times is three messages', [m['ts'] for m in msgs],
+       [T(1), T(5), T(6)])
+    ck('each delivery pairs with ITS OWN enqueue', [m['sources'] for m in msgs],
+       [['enqueue', 'user'], ['enqueue', 'user'], ['enqueue', 'queued_command']])
+    ck('accounting holds with repeats', acct.get('seen'),
+       acct.get('attributed', 0) + acct.get('excluded_total', 0) + acct.get('batch_deliveries', 0))
+
+    ask = lambda did, ts: {'kind': 'open', 'store': 'owner_decisions', 'verb': 'owe add', 'id': did,
+                           'ts': ts, 'cite': 'c', 'text': 'q', 'text_resolved': True,
+                           'outcome': 'landed', 'why': ''}
+    ch = R.decision_chains([ask('D1', T(0)), ask('D2', T(4))], msgs,
+                           [{'ts': T(0, 30), 'text': 'D1 for you'}, {'ts': T(4, 30), 'text': 'D2 for you'}], [])
+    ck('a repeated reply still answers the LATER put', ch['D2']['answered'], T(5))
+
+    m2 = R.owner_messages([RS.user_str(T(1), 'go ahead')] + RS.owner_turn(T(2), 'go ahead'))[0]
+    ck('a delivery with no enqueue is its own message', [m['ts'] for m in m2], [T(1), T(2)])
+    ck('an undelivered enqueue is still his words',
+       [m['text'] for m in R.owner_messages([RS.enqueue(T(1), 'stop')])[0]], ['stop'])
+    m3, _, _, a3 = R.owner_messages([RS.enqueue(T(1), 'yes'), RS.enqueue(T(1, 1), 'yes'),
+                                     RS.dequeue(T(1, 2)), RS.dequeue(T(1, 2)),
+                                     RS.user_str(T(1, 2), 'yes\nyes')])
+    ck('a batch of one word typed twice: two messages, one delivery',
+       (len(m3), a3.get('batch_deliveries')), (2, 1))
+
+    # --- a reply resolves a question only from a session it was SENT to ------------------
+    recs = []
+    recs += RS.bash(T(1), './wd.sh ask "what does the target think of the box rule?"',
+                    'open question K1 registered')
+    recs += RS.send(T(1, 5), 'question: what do you think of the box rule?')      # to local_target
+    recs += RS.peer_reply(T(2), 'unrelated chatter from another session', frm='local_OTHER')
+    recs += RS.bash(T(2, 5), './wd.sh resolved K1', 'resolved K1 (open since T)')
+    recs += RS.bash(T(3), './wd.sh ask "and the head switch rule?"', 'open question K2 registered')
+    recs += RS.send(T(3, 5), 'question: and the head switch rule?')
+    recs += RS.peer_reply(T(4), 'the head switch rule stands')                     # from local_target
+    recs += RS.bash(T(4, 5), './wd.sh resolved K2', 'resolved K2 (open since T)')
+    numbered = [(i + 1, r) for i, r in enumerate(recs)]
+    acts = R.my_actions(numbered, 'f')
+    _o, _e, peers, _a = R.owner_messages(recs)
+    my_text, sends = R.artifacts(recs)
+    rep = R.landed_replay(acts, R.turn_starts(numbered), my_text, sends, peers, {})
+    got = {x['id']: x['verdict'] for x in rep if x['verb'] == 'resolved'}
+    ck('a send records where it went', [x.get('to') for x in sends], ['local_target', 'local_target'])
+    ck('each peer reply is recorded once, not once per channel', len(peers), 2)
+    ck('a reply from a session never sent to does not resolve', got.get('K1'), 'MISSTEER')
+    ck('a reply from the session it was sent to resolves', got.get('K2'), 'ok')
+    return fails
+
+
 def test_vocabulary():
     """Unknown is not an answer class: everything is answerable from my actions, project state or
     what the owner owes me, so an item the instrument could not settle is WORK OUTSTANDING, and a
@@ -1806,6 +1875,8 @@ def main():
         fails.extend(_guarded(test_cli_all_stages))
         print('\n--- stage 5: additive repair ---')
         fails.extend(_guarded(test_stage5))
+        print('\n--- repeated replies and peer senders ---')
+        fails.extend(_guarded(test_repeats_and_peers))
         print('\n--- vocabulary: no unknown-type verdict ---')
         fails.extend(_guarded(test_vocabulary))
 
