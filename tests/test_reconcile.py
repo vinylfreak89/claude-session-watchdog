@@ -1428,16 +1428,12 @@ def test_chain_edges():
     ck('a close BEFORE the id was minted is an orphan, not this chain\'s close',
        (ch['D1'].get('closed'), ch.get('D1@orphan', {}).get('verdicts')), (None, ['orphan_close']))
 
-    # the owner writes in lowercase: "d4" names D4 exactly as "D4" does
-    two = [say(T(1, 5), 'Two for you. D4: captions? D5: the box?')]
-    ch = dc([ask('D4', T(1)), ask('D5', T(1, 1))], [say(T(2), 'd4: never. captions confirm.')], two, [])
-    ck('a lowercase "d4" scopes the reply to D4 (D5 unanswered)',
-       (bool(ch['D4']['answered']), ch['D5']['answered']), (True, None))
-    ch = dc([ask('D4', T(1)), ask('D5', T(1, 1))], [say(T(2), 'd5 yes, d4 no')], two, [])
-    ck('a reply naming both in lowercase answers both',
-       (bool(ch['D4']['answered']), bool(ch['D5']['answered'])), (True, True))
-    ch = dc([ask('D4', T(1))], [say(T(2), 'never')], [say(T(1, 5), 'd4 for you: captions?')], [])
-    ck('my own put written "d4" is a put', 'never_put_to_owner' in ch['D4']['verdicts'], False)
+    # decision ids are UPPERCASE. Measured: the owner writes them so, and lowercase d1/d2 are
+    # this project's field-offset names in his text and mine -- a real false put came from
+    # "the existing d1-red/d2-blue convention"
+    ch = dc([ask('D1', T(1)), ask('D2', T(1, 1))], [],
+            [say(T(1, 5), 'overlap reading purple out of the existing d1-red/d2-blue convention')], [])
+    ck('lowercase d1/d2 (field offsets) do not name D1/D2', (ch['D1']['put'], ch['D2']['put']), (None, None))
 
     ck('no decisions yields no chains', dc([], [], [], []), {})
     return fails

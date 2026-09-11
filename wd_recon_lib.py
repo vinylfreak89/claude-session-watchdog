@@ -982,14 +982,14 @@ def decision_chains(acts, owner, my_text, sends, target):
     for a in acts:
         if a['kind'] == 'close' and a['verb'] in ('owe done', 'owe-clear') and a['id']:
             closes[a['id']].append(a)
-    # CASE-INSENSITIVE: the owner writes in lowercase. Found by probe: "d4: never" was not
-    # read as naming D4, so it did not scope itself and was credited to D5 as well; and my
-    # own put written "d4 for you" read as never put.
-    ids_rx = [re.compile(r'\b%s\b' % re.escape(d), re.I) for d in mintings]
+    # UPPERCASE ONLY. Measured on the real record: the owner writes every decision id in
+    # uppercase, and lowercase d1/d2 are this project's field-offset names in his text and mine
+    # ("d1 red d2 blue", "d1-red/d2-blue") -- a case-insensitive match made those into puts.
+    ids_rx = [re.compile(r'\b%s\b' % re.escape(d)) for d in mintings]
     puts = [t for t in my_text if any(r.search(t['text']) for r in ids_rx)]
     out = {}
     for did, seq in mintings.items():
-        rx = re.compile(r'\b%s\b' % re.escape(did), re.I)
+        rx = re.compile(r'\b%s\b' % re.escape(did))
         for k, ask in enumerate(seq):
             until = seq[k + 1]['ts'] if k + 1 < len(seq) else None
             inside = lambda t, lo=ask['ts'], hi=until: t >= lo and (hi is None or t < hi)
@@ -1008,7 +1008,7 @@ def decision_chains(acts, owner, my_text, sends, target):
                     later = [t for t in puts if t['ts'] > put['ts'] and nxt is not None
                              and t['ts'] < nxt['ts'] and not rx.search(t['text'])]
                     if (nxt is not None and inside(nxt['ts']) and not later
-                            and not re.search(r'\bD\d+\b', nxt['text'], re.I)):
+                            and not re.search(r'\bD\d+\b', nxt['text'])):
                         answer = nxt
             fwd = next((s for s in sends if answer and s.get('to') == target
                         and s['ts'] > answer['ts'] and carries(s['msg'], answer['text'])), None)
