@@ -18,6 +18,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 import wd_lib as W
 
 DECLARED = [
+    # The widened head must not swallow these. A PAST-TENSE claim is the defect the probe exists
+    # for and must still be caught, and a negation in a PRIOR sentence must not reach across the
+    # full stop.
+    "I sent the brief to Codex for review.",
+    "That is not what I meant. Sending it to Codex for review now.",
+
     "I'm dispatching it to Codex now",
     "I'll send it to Codex",
     "I'm putting this to Codex",
@@ -25,6 +31,13 @@ DECLARED = [
     "getting that review now",
 ]
 NOT_DECLARED = [
+    # THE VERBLESS BRANCHES defeated the negation guard entirely: `to codex for` matches a
+    # three-word prepositional phrase with no verb, no subject and no tense, so the head was the
+    # phrase itself and could never contain the negator outside it. This exact sentence was reported
+    # as a DECLARED ACTION against the peer while naming the thing as not yet built.
+    "Still owed and not yet built: the replacement matched control, so it goes to Codex for "
+    "review before I write it rather than after.",
+
     "I'm not re-dispatching",
     "I'm not going to send it to Codex",
     "I will not dispatch this tonight",
