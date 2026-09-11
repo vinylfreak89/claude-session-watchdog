@@ -182,7 +182,7 @@ def owed(sess, state):
         if not why: continue
         text = ' '.join(x for _, x in t.assistant_texts)
         rows.append(dict(ts=t.end_ts, why=' + '.join(why),
-                         declared=[m.group(0).strip() for m in W.INTENT_RE.finditer(text)][:3],
+                         declared=W.declared_actions(text),
                          dispatched=turn_made_a_dispatch(t),
                          head=W.short(t.final_text or '', 130)))
     return rows

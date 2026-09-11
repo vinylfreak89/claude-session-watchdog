@@ -472,6 +472,37 @@ INTENT_RE = re.compile(
     r"|\bwith codex (?:for|now)\b|\bto codex (?:for|now)\b",
     re.I)
 
+# The gap in INTENT_RE's first branch is `[^.!?\n]{0,80}` -- anything -- so it swallows negation:
+# "I'm not re-dispatching" matched, and the turn was reported as an action DECLARED and not taken.
+# That is a false accusation against the other agent for a sentence saying the opposite, and unlike
+# the rest of this family it asserts a process failure rather than returning a wrong number.
+# Negation only counts BEFORE the action verb: "I'm dispatching it, not waiting" is a real
+# declaration. Control: tests/test_declared_negation.py.
+NEGATOR_RE = re.compile(r"\b(?:not|never|n'?t|no longer|rather than|instead of|without)\b", re.I)
+_INTENT_VERB_RE = re.compile(
+    r"\b(?:send|sending|dispatch\w*|put(?:ting)?|ask(?:ing)?|hand(?:ing)?|queue(?:ing)?|"
+    r"kick(?:ing)?|getting|running)\b", re.I)
+
+
+def declared_actions(text, limit=3):
+    """Intentions stated in `text`, with NEGATED ones dropped.
+
+    A negator counts only where it sits before the action verb inside the matched span, so
+    "I'm not re-dispatching" is rejected while "I'm dispatching it, not waiting" survives.
+    """
+    out = []
+    for m in INTENT_RE.finditer(text):
+        span = m.group(0)
+        verb = _INTENT_VERB_RE.search(span)
+        head = span[:verb.start()] if verb else span
+        if NEGATOR_RE.search(head):
+            continue
+        out.append(span.strip())
+        if len(out) >= limit:
+            break
+    return out
+
+
 PUSH_CLAIM_RE = re.compile(r'\b(pushed|push(?:ed)? to origin|committed and pushed|commit(?:ted)?/pushed)\b', re.I)
 COMMIT_CLAIM_RE = re.compile(r'\b(committed|commit(?:ted)? (?:as|at|in)|landed (?:as|at|in)|is at|now at|HEAD)\b', re.I)
 FILE_CLAIM_RE = re.compile(r'\b(wrote|written|saved|created|rendered|produced|generated|emitted|dumped|published|appended)\b', re.I)
