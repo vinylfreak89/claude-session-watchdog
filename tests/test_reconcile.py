@@ -1394,6 +1394,17 @@ def test_chain_edges():
     ch = dc([close('D9', T(1))], [], [], [])
     ck('a close with no ask in the window is an orphan_close', ch['D9']['verdicts'], ['orphan_close'])
 
+    # the owner writes in lowercase: "d4" names D4 exactly as "D4" does
+    two = [say(T(1, 5), 'Two for you. D4: captions? D5: the box?')]
+    ch = dc([ask('D4', T(1)), ask('D5', T(1, 1))], [say(T(2), 'd4: never. captions confirm.')], two, [])
+    ck('a lowercase "d4" scopes the reply to D4 (D5 unanswered)',
+       (bool(ch['D4']['answered']), ch['D5']['answered']), (True, None))
+    ch = dc([ask('D4', T(1)), ask('D5', T(1, 1))], [say(T(2), 'd5 yes, d4 no')], two, [])
+    ck('a reply naming both in lowercase answers both',
+       (bool(ch['D4']['answered']), bool(ch['D5']['answered'])), (True, True))
+    ch = dc([ask('D4', T(1))], [say(T(2), 'never')], [say(T(1, 5), 'd4 for you: captions?')], [])
+    ck('my own put written "d4" is a put', 'never_put_to_owner' in ch['D4']['verdicts'], False)
+
     ck('no decisions yields no chains', dc([], [], [], []), {})
     return fails
 

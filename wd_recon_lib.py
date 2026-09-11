@@ -934,11 +934,14 @@ def decision_chains(acts, owner, my_text, sends, target):
     for a in acts:
         if a['kind'] == 'close' and a['verb'] in ('owe done', 'owe-clear') and a['id']:
             closes.setdefault(a['id'], []).append(a)
-    ids_rx = [re.compile(r'\b%s\b' % re.escape(d)) for d in asks]
+    # CASE-INSENSITIVE: the owner writes in lowercase. Found by probe: "d4: never" was not
+    # read as naming D4, so it did not scope itself and was credited to D5 as well; and my
+    # own put written "d4 for you" read as never put.
+    ids_rx = [re.compile(r'\b%s\b' % re.escape(d), re.I) for d in asks]
     puts = [t for t in my_text if any(r.search(t['text']) for r in ids_rx)]
     out = {}
     for did, ask in sorted(asks.items(), key=lambda kv: kv[1]['ts']):
-        rx = re.compile(r'\b%s\b' % re.escape(did))
+        rx = re.compile(r'\b%s\b' % re.escape(did), re.I)
         put = next((t for t in my_text if t['ts'] >= ask['ts'] and rx.search(t['text'])), None)
         answer = None
         if put:
@@ -953,7 +956,7 @@ def decision_chains(acts, owner, my_text, sends, target):
                 # D3 took D4's terse answer as its own.
                 later = [t for t in puts if t['ts'] > put['ts'] and nxt is not None
                          and t['ts'] < nxt['ts'] and not rx.search(t['text'])]
-                if nxt is not None and not later and not re.search(r'\bD\d+\b', nxt['text']):
+                if nxt is not None and not later and not re.search(r'\bD\d+\b', nxt['text'], re.I):
                     answer = nxt
         fwd = next((s for s in sends if answer and s.get('to') == target and s['ts'] > answer['ts']
                     and carries(s['msg'], answer['text'])), None)
