@@ -443,6 +443,71 @@ def test_tm_reader():
     return fails
 
 
+
+def test_cli_stages():
+    """The CLI must RUN the stages and populate coverage from real counts. A ledger whose
+    numbers I type is the defect this whole instrument exists to remove, so the check is that
+    confidence MOVES on its own and refuses to reach 100 while anything is outstanding."""
+    import subprocess
+    fails = []
+    def ck(name, got, want):
+        ok = got == want
+        print('%-56s %s%s' % (name, 'PASS' if ok else 'FAIL',
+                              '' if ok else '  got=%r want=%r' % (got, want)))
+        if not ok:
+            fails.append(name)
+
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    d = tempfile.mkdtemp(prefix='recon-cli-')
+    try:
+        _, st = build(d)
+
+        def run(*args):
+            r = subprocess.run([sys.executable, os.path.join(here, 'wd_reconcile.py'),
+                                '--state-dir', st] + list(args),
+                               capture_output=True, text=True)
+            return r.returncode, r.stdout + r.stderr
+
+        rc, out = run('2026-09-09T10:00:00Z', '2026-09-11T10:00:00Z', '--init')
+        ck('init builds the ledger', rc, 0)
+        led = json.load(open(os.path.join(st, 'reconcile.json')))
+        ck('every hour of the window is enumerated', len(led['hours']), 49)
+        ck('confidence starts at zero', 'conf 0' in out, True)
+
+        rc, out = run('--stage', '1', '--proj', d, '--self-prefix', '80f99b89')
+        ck('stage 1 runs from the CLI', rc in (0, 1), True)
+        led = json.load(open(os.path.join(st, 'reconcile.json')))
+        ck('stage 1 wrote its result to the ledger', 'stage1' in led, True)
+        ck('it found exactly the genuine opens', led['stage1']['opens'], TRUTH['opens'])
+        ck('it recorded every item with a citation',
+           all('#' in i['cite'] for i in led['stage1']['items']), True)
+        ck('it recorded every item with a hash',
+           all(len(i['sha256']) == 64 for i in led['stage1']['items']), True)
+        ck('coverage: state keys counted from the live store',
+           led['coverage']['state_keys'][1] > 0, True)
+
+        # confidence must still be 0: hours and snapshots are untouched
+        rc, out = run()
+        ck('confidence stays 0 while hours are unreconciled', 'conf 0' in out, True)
+        ck('it names what is outstanding', 'OUTSTANDING' in out, True)
+
+        # --complete must refuse
+        rc, out = run('--complete')
+        ck('--complete refuses with work outstanding', rc, 1)
+        ck('and lists why', 'REFUSED' in out, True)
+
+        # a restore lands UNVALIDATED and blocks completion
+        rc, out = run('--restore', 'a recovered item', '--evidence', 'fixture:1#0')
+        ck('a restore lands unvalidated', 'UNVALIDATED' in out, True)
+        rc, out = run()
+        ck('an unvalidated restore is reported outstanding',
+           'supersession check owed' in out, True)
+        ck('and confidence carries a restores coverage', 'restores 0%' in out, True)
+        return fails
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def main():
     d = tempfile.mkdtemp(prefix='recon-fixture-')
     fails = []
@@ -585,6 +650,8 @@ def main():
         fails.extend(test_stage2())
         print('\n--- tm reader (synthesized) ---')
         fails.extend(test_tm_reader())
+        print('\n--- CLI: stages actually run ---')
+        fails.extend(test_cli_stages())
         print('\n--- stage 5: additive repair ---')
         fails.extend(test_stage5())
 

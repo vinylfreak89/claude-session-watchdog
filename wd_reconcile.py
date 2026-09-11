@@ -195,6 +195,85 @@ def status_line(L):
                confidence(L)[0], '  COMPLETE' if L.get('complete') else ''))
 
 
+
+def run_stage(n, L, S, a):
+    """RUN a stage and write what it measured into the ledger. Coverage is computed from these
+    numbers, never typed -- the whole point of the instrument is that finishing cannot be
+    asserted."""
+    import wd_recon_lib as RL
+    cov = L.setdefault('coverage', {})
+    if n == 1:
+        opens, closes = RL.stage1(a.self_prefix, proj=a.proj)
+        join = RL.stage1_join(opens, closes, S)
+        L['stage1'] = {'ts': now_iso(), 'opens': len(opens), 'closes': len(closes),
+                       'join': join,
+                       'items': [{'cite': o['cite'], 'ts': o['ts'], 'store': o['store'],
+                                  'sha256': o['sha256'], 'text': o['text']} for o in opens]}
+        live = RL.live_stores(S)
+        cov['state_keys'] = [len(live['all_keys']), len(live['all_keys'])]
+        cov['actions'] = [0, len(opens) + len(closes)]
+        print('stage 1: %d opens, %d closes, %d state keys examined'
+              % (len(opens), len(closes), len(live['all_keys'])))
+        for k, v in join.items():
+            print('   %-28s %s' % (k, v))
+        return True
+    if n == 3:
+        if 'stage1' not in L:
+            raise SystemExit('run --stage 1 first: stage 3 replays the actions it found')
+        mine, tgt = RL.load(a.self_prefix)
+        acts, art = RL.timeline(mine, tgt)
+        adj = RL.stage3(acts, art)
+        import collections as _c
+        tally = _c.Counter(x['verdict'] for x in adj)
+        L['stage3'] = {'ts': now_iso(), 'tally': dict(tally),
+                       'missteers': [{'ts': x['ts'], 'verb': x['verb'], 'arg': x.get('arg'),
+                                      'why': x['why']} for x in adj if x['verdict'] == 'MISSTEER']}
+        decided = tally.get('ok', 0) + tally.get('MISSTEER', 0)
+        cov['actions'] = [decided, len(adj)]
+        print('stage 3: %d actions replayed -- %s' % (len(adj), dict(tally)))
+        for m in L['stage3']['missteers'][:20]:
+            print('   MISSTEER %s %-10s %s' % (m['ts'][:19], m['verb'], m['why']))
+        return True
+    if n == 2:
+        raise SystemExit('stage 2 needs the Time Machine wrapper; drive it with --stage 2 once '
+                         'the overlay\'s tm path is confirmed by `tm status` (not wired to a '
+                         'live drive from here by design -- the reader is fixture-tested)')
+    if n == 4:
+        rs = L.get('restored') or []
+        if not rs:
+            print('stage 4: nothing restored yet, so nothing to check for supersession')
+            return False
+        mine, tgt = RL.load(a.self_prefix)
+        _, art = RL.timeline(mine, tgt)
+        recs = [{'ts': o['ts'], 'text': o['text'], 'kind': o['kind']} for o in art['owner']]
+        for i, r in enumerate(rs):
+            if r.get('validated_pass') == L.get('pass', 0):
+                continue
+            ev = RL.stage4_evidence({'cite': r.get('evidence'), 'ts': r.get('ts'),
+                                     'text': r['what']}, recs)
+            r['supersession_evidence'] = ev
+            print('restore #%d: %d record(s) after it, %d possible supersession(s)'
+                  % (i, ev['records_after'], len(ev['hits'])))
+            for h in ev['hits'][:3]:
+                print('     %s  %s' % (h['ts'][:19], h['excerpt'][:110].replace(chr(10), ' ')))
+        return True
+    if n == 5:
+        rs = [r for r in (L.get('restored') or [])
+              if r.get('validated_pass') == L.get('pass', 0) and not r.get('superseded')]
+        if not rs:
+            print('stage 5: nothing validated-and-not-superseded to repair')
+            return False
+        payload = [{'store': r.get('store', 'owner_queue'), 'id': r.get('id'),
+                    'text': r['what'], 'cite': r.get('evidence', ''),
+                    'sha256': r.get('sha256', ''), 'now': now_iso()} for r in rs]
+        res = RL.stage5_repair(S, payload, apply=a.apply)
+        print('stage 5: %s -- added %d, skipped %d duplicate(s)'
+              % ('APPLIED' if a.apply else 'dry run', len(res['added']),
+                 len(res['skipped_duplicate'])))
+        return bool(a.apply)
+    return False
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -206,6 +285,12 @@ def main():
     ap.add_argument('--snapshot'); ap.add_argument('--thinned')
     ap.add_argument('--action'); ap.add_argument('--landed', choices=('yes', 'no'))
     ap.add_argument('--restore')
+    ap.add_argument('--stage', type=int, choices=(1, 2, 3, 4, 5),
+                    help='RUN a stage: 1 replay my actions, 2 Time Machine, 3 did it land, '
+                         '4 supersession evidence, 5 additive repair')
+    ap.add_argument('--apply', action='store_true', help='stage 5 only: write the repair')
+    ap.add_argument('--proj', help='transcript corpus (testing)')
+    ap.add_argument('--self-prefix', default='80f99b89')
     ap.add_argument('--validate', type=int)
     ap.add_argument('--superseded', action='store_true')
     ap.add_argument('--evidence'); ap.add_argument('--complete', action='store_true')
@@ -234,6 +319,11 @@ def main():
         return 1
 
     changed = False
+    if a.stage:
+        import sys as _s, os as _o
+        _s.path.insert(0, _o.path.dirname(_o.path.abspath(__file__)))
+        changed = run_stage(a.stage, L, S, a) or changed
+
     if a.hour:
         if a.hour not in L['hours']:
             raise SystemExit('%s is not an hour in the window (%s..%s)'
