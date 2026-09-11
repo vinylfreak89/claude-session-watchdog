@@ -1133,6 +1133,463 @@ def transcript_for(prefix, proj=None):
     return os.path.join(root, hits[0])
 
 
+# ================================================================ reading commands as the shell does
+#
+# An invocation is recognised by the SHELL'S OWN STRUCTURE, never by a pattern found somewhere in
+# the text. Regexes over raw command text produced, on the real record: a `grep "--sent"` counted
+# as a `sent`; `answered && git add` giving `answered` the id `&&`; `relayed <ts>;` keeping the
+# `;`; a close inside a quoted `python3 -c` probe program counted as real; item text cut at an
+# escaped quote; and a loop unrolled INSIDE a quoted string. Every one of those is a question the
+# shell answers exactly: which words are a command, which are data, and which never ran.
+
+SH_REDIRS = ('<<<', '<<-', '<<', '>>', '>&', '>|', '<&', '<>', '&>>', '&>', '>', '<')
+SH_OPS = ('&&', '||', ';;', '|&', ';', '|', '&', '(', ')')
+SH_KEYWORDS = {'if', 'then', 'else', 'elif', 'fi', 'do', 'done', 'while', 'until', 'case', 'esac',
+               '{', '}', '!', 'time'}
+
+
+def _sh_balanced(s, i, open_, close):
+    """s[i] is just past `open_`; return the index just past the matching `close`, honouring
+    quotes and escapes."""
+    depth, q = 1, None
+    while i < len(s):
+        ch = s[i]
+        if q:
+            if ch == '\\' and q == '"':
+                i += 2
+                continue
+            if ch == q:
+                q = None
+        elif ch in '\'"':
+            q = ch
+        elif ch == '\\':
+            i += 2
+            continue
+        elif ch == open_:
+            depth += 1
+        elif ch == close:
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return len(s)
+
+
+def _sh_dollar(s, i, word):
+    """s[i] == '$': consume one expansion into `word`; return the new index."""
+    if s.startswith('$(', i):
+        j = _sh_balanced(s, i + 2, '(', ')')
+        word['expands'] = True
+        if not s.startswith('$((', i):          # $((...)) is arithmetic, not a command
+            word['subs'].append(s[i + 2:j - 1])
+        word['buf'].append(s[i:j])
+        return j
+    if s.startswith('${', i):
+        j = _sh_balanced(s, i + 2, '{', '}')
+        word['expands'] = True
+        word['buf'].append(s[i:j])
+        return j
+    j = i + 1
+    if j < len(s) and (s[j].isalnum() or s[j] == '_'):
+        while j < len(s) and (s[j].isalnum() or s[j] == '_'):
+            j += 1
+    elif j < len(s) and s[j] in '*@#?$!-':
+        j += 1
+    else:
+        word['buf'].append('$')                  # a lone `$` is literal
+        return j
+    word['expands'] = True
+    word['buf'].append(s[i:j])
+    return j
+
+
+def _sh_backtick(s, i, word):
+    j = i + 1
+    while j < len(s) and s[j] != '`':
+        j += 2 if s[j] == '\\' else 1
+    word['expands'] = True
+    word['subs'].append(s[i + 1:j])
+    word['buf'].append(s[i:j + 1])
+    return j + 1
+
+
+def sh_tokens(cmd):
+    """Tokenize like bash. Returns a list of
+        {'w': value, 'raw': source, 'expands': bool, 'subs': [...], 'quoted': bool}   a word
+        {'op': '&&' | '||' | ';' | ';;' | '|' | '|&' | '&' | '\\n' | '(' | ')'}          an operator
+        {'redir': op, 'fd': '0'|'1'|'2'|'both'|..., 'target': word, 'heredoc': body}   a redirection
+    `w` has quotes removed and escapes applied. `expands` marks an expansion the shell performs
+    at run time ($x, ${x}, $(...), backticks) at an unquoted or double-quoted position: the value
+    is then NOT the literal. `subs` are command-substitution sources, which bash executes.
+    Heredoc bodies are consumed (they are data to their command); comments are dropped; a
+    backslash-newline is a line continuation."""
+    s, i, out = cmd or '', 0, []
+    pending = []                                 # (redirection token, delimiter, strip tabs)
+    word = None
+
+    def fresh(pos):
+        return {'buf': [], 'expands': False, 'subs': [], 'start': pos, 'quoted': False}
+
+    def emit(w, end):
+        return {'w': ''.join(w['buf']), 'raw': s[w['start']:end], 'expands': w['expands'],
+                'subs': w['subs'], 'quoted': w['quoted']}
+
+    def scan(k, w):
+        while k < len(s):
+            ch = s[k]
+            if ch in ' \t\n<>' or s.startswith(SH_OPS, k):
+                return k
+            if ch == "'":
+                w['quoted'] = True
+                e = s.find("'", k + 1)
+                e = len(s) if e < 0 else e
+                w['buf'].append(s[k + 1:e])
+                k = e + 1
+            elif ch == '"':
+                w['quoted'] = True
+                k += 1
+                while k < len(s) and s[k] != '"':
+                    if s[k] == '\\' and k + 1 < len(s) and s[k + 1] in '\\$`"\n':
+                        if s[k + 1] != '\n':
+                            w['buf'].append(s[k + 1])
+                        k += 2
+                    elif s[k] == '$':
+                        k = _sh_dollar(s, k, w)
+                    elif s[k] == '`':
+                        k = _sh_backtick(s, k, w)
+                    else:
+                        w['buf'].append(s[k])
+                        k += 1
+                k += 1
+            elif s.startswith("$'", k):
+                w['quoted'] = True
+                e = k + 2
+                while e < len(s) and s[e] != "'":
+                    e += 2 if s[e] == '\\' else 1
+                w['buf'].append(s[k + 2:e])
+                k = e + 1
+            elif ch == '$':
+                k = _sh_dollar(s, k, w)
+            elif ch == '`':
+                k = _sh_backtick(s, k, w)
+            elif ch == '\\':
+                if s.startswith('\\\n', k):
+                    k += 2
+                else:
+                    w['buf'].append(s[k + 1:k + 2])
+                    k += 2
+            else:
+                w['buf'].append(ch)
+                k += 1
+        return k
+
+    def flush(end):
+        nonlocal word
+        if word is not None:
+            out.append(emit(word, end))
+            word = None
+
+    while i < len(s):
+        ch = s[i]
+        if ch in ' \t':
+            flush(i)
+            i += 1
+        elif s.startswith('\\\n', i):
+            i += 2
+        elif ch == '\n':
+            flush(i)
+            out.append({'op': '\n'})
+            i += 1
+            for tok, delim, strip in pending:     # bodies follow the line that opened them
+                body = []
+                while i < len(s):
+                    e = s.find('\n', i)
+                    e = len(s) if e < 0 else e
+                    line, i = s[i:e], e + 1
+                    if (line.lstrip('\t') if strip else line) == delim:
+                        break
+                    body.append(line)
+                tok['heredoc'] = '\n'.join(body)
+            pending = []
+        elif ch == '#' and word is None:
+            e = s.find('\n', i)
+            i = len(s) if e < 0 else e
+        elif ch in '<>' or s.startswith('&>', i):
+            fd = None
+            if word is not None and not word['quoted'] and not word['expands']:
+                b = ''.join(word['buf'])
+                if b.isdigit() and word['start'] + len(b) == i:
+                    fd, word = b, None
+            flush(i)
+            op = next(o for o in SH_REDIRS if s.startswith(o, i))
+            i += len(op)
+            tok = {'redir': op, 'fd': fd or ('0' if op[0] == '<' else ('both' if op[0] == '&' else '1')),
+                   'target': None, 'heredoc': None}
+            if op in ('>&', '<&') and i < len(s) and (s[i].isdigit() or s[i] == '-'):
+                tok['target'] = {'w': s[i], 'raw': s[i], 'expands': False, 'subs': [], 'quoted': False}
+                i += 1
+            else:
+                while i < len(s) and s[i] in ' \t':
+                    i += 1
+                w = fresh(i)
+                j = scan(i, w)
+                tok['target'] = emit(w, j)
+                i = j
+                if op in ('<<', '<<-'):
+                    pending.append((tok, tok['target']['w'], op == '<<-'))
+            out.append(tok)
+        elif s.startswith(SH_OPS, i):
+            flush(i)
+            op = next(o for o in SH_OPS if s.startswith(o, i))
+            out.append({'op': op})
+            i += len(op)
+        else:
+            if word is None:
+                word = fresh(i)
+            i = scan(i, word)
+    flush(i)
+    return out
+
+
+def sh_commands(cmd):
+    """Group sh_tokens into simple commands, in order:
+        {'words': [...], 'redirs': [...], 'keywords': [...], 'op_before': op, 'op_after': op,
+         'loop': None | 'for' | 'while'}
+    Leading keywords (do, then, if, ...) are peeled into `keywords`. A `for VAR in ITEMS` loop is
+    unrolled: its body is emitted once per literal item with $VAR replaced; an item list carrying
+    an expansion (`$(cat ids)`) is NOT unrolled -- word-splitting the substitution text invented
+    `ids.txt` as an id -- so its body is emitted once with $VAR unresolved. `while`/`until` bodies
+    are emitted once, marked; how many times they ran is not in the command."""
+    cmds, cur, before = [], None, None
+    for t in sh_tokens(cmd):
+        if 'op' in t:
+            if cur is not None:
+                cur['op_after'] = t['op']
+                cmds.append(cur)
+                cur = None
+            before = t['op']
+            continue
+        if cur is None:
+            cur = {'words': [], 'redirs': [], 'keywords': [], 'op_before': before, 'op_after': None,
+                   'loop': None}
+        if 'redir' in t:
+            cur['redirs'].append(t)
+        elif not cur['words'] and not t['quoted'] and not t['expands'] and t['w'] in SH_KEYWORDS:
+            cur['keywords'].append(t['w'])
+        else:
+            cur['words'].append(t)
+    if cur is not None:
+        cmds.append(cur)
+    return _sh_unroll(cmds)
+
+
+def _sh_unroll(cmds):
+    out, i = [], 0
+    while i < len(cmds):
+        c = cmds[i]
+        w = [x['w'] for x in c['words']]
+        is_for = w[:1] == ['for'] and len(w) >= 3 and w[2] == 'in' and not c['words'][0]['quoted']
+        is_while = c['keywords'][-1:] in (['while'], ['until'])
+        if is_for or is_while:
+            body, j = _sh_body(cmds, i + 1)
+            if is_for:
+                var, items = w[1], c['words'][3:]
+                literal = bool(items) and all(not it['expands'] for it in items)
+                for it in (items if literal else [None]):
+                    for bc in _sh_unroll([dict(x) for x in body]):
+                        bc = dict(bc, loop=bc.get('loop') or 'for')
+                        if it is not None:
+                            bc['words'] = [_sh_subst(x, var, it['w']) for x in bc['words']]
+                        out.append(bc)
+            else:
+                out.append(dict(c, loop='while'))          # the condition runs too
+                for bc in _sh_unroll([dict(x) for x in body]):
+                    out.append(dict(bc, loop='while'))
+            i = j + 1
+            continue
+        out.append(c)
+        i += 1
+    return [c for c in out if c['words'] or c['redirs']]
+
+
+def _sh_body(cmds, j):
+    """The commands from j to the `done` closing the loop opened just before j, honouring
+    nesting. Returns (body, index of that done)."""
+    body, depth = [], 1
+    while j < len(cmds):
+        c = cmds[j]
+        ww, kw = [x['w'] for x in c['words']], c['keywords']
+        if (ww[:1] == ['for'] and 'in' in ww[2:3]) or kw[-1:] in (['while'], ['until']):
+            depth += 1
+        if 'done' in kw:
+            depth -= kw.count('done')
+            if depth <= 0:
+                return body, j
+        body.append(c)
+        j += 1
+    return body, j
+
+
+def _sh_subst(word, var, value):
+    raw = word['raw']
+    if '$' + var not in raw and '${%s}' % var not in raw:
+        return word
+    w = word['w'].replace('${%s}' % var, value).replace('$' + var, value)
+    still = bool(re.search(r'\$[{(A-Za-z_*@#?!-]|`', w)) and word['expands']
+    return dict(word, w=w, expands=still)
+
+
+WD_SCRIPTS = {'wd_wake.py', 'wd_check.py', 'wd_reconcile.py'}
+WD_WAKE_FLAGS = {'--owe-add': 'owe add', '--owe-clear': 'owe done', '--owe-ungate': 'owe ungate',
+                 '--queue-add': 'queue add', '--queue-clear': 'queue clear',
+                 '--queue-hold': 'queue hold', '--sent': 'sent', '--veto': 'veto',
+                 '--outcome': 'outcome', '--owe-list': 'owe list', '--queue-list': 'queue list'}
+
+
+def _path_join(cwd, p):
+    if p.startswith('/'):
+        return os.path.normpath(p)
+    if p.startswith('~'):
+        return os.path.normpath(os.path.expanduser(p))
+    return os.path.normpath(os.path.join(cwd, p)) if cwd else None
+
+
+def invocations(cmd, live_state, cwd=None, _depth=0):
+    """Every watchdog invocation the shell would EXECUTE in `cmd`, from its own structure:
+        {'verb', 'args': [values], 'arg_expands': [bools], 'text', 'urgent', 'gated_on',
+         'state': 'live' | 'scratch', 'state_dir', 'diverted', 'op_before', 'op_after',
+         'loop', 'in_substitution', 'argv'}
+    `live_state` is the state directory under reconciliation; an invocation that touched any other
+    (WD_STATE exported or given as a prefix, --state-dir, another watchdog instance) is scratch.
+    `diverted` is True when the invocation's stdout never reached the result (redirected, piped,
+    or captured by a substitution): its silence then proves nothing."""
+    live = os.path.normpath(live_state) if live_state else None
+    out, env, shvars = [], {}, {}
+    for c in sh_commands(cmd):
+        words = c['words']
+        k, prefix = 0, {}
+        while k < len(words) and re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', words[k]['w']) and not words[k]['quoted']:
+            name, _, val = words[k]['w'].partition('=')
+            prefix[name] = (val, words[k]['expands'])
+            k += 1
+        argv = words[k:]
+        av = [x['w'] for x in argv]
+        # the shell's own bookkeeping, before looking for invocations
+        if not argv:
+            shvars.update(prefix)                  # plain assignment: NOT exported
+        elif av[0] == 'export':
+            for x in argv[1:]:
+                name, eq, val = x['w'].partition('=')
+                env[name] = (val, x['expands']) if eq else shvars.get(name, ('', True))
+        elif av[0] == 'cd' and len(av) > 1 and not argv[1]['expands']:
+            cwd = _path_join(cwd, av[1])
+        # substitutions execute wherever they sit
+        for x in words + [r['target'] for r in c['redirs'] if r.get('target')]:
+            for sub in x.get('subs') or []:
+                if _depth < 4:
+                    for inv in invocations(sub, live_state, cwd, _depth + 1):
+                        out.append(dict(inv, in_substitution=True, diverted=True))
+        if not argv:
+            continue
+        # a script given to a shell as a string, or on stdin, runs too
+        if av[0] in ('bash', 'sh', 'zsh', 'eval') or av[0].endswith(('/bash', '/sh', '/zsh')):
+            src = None
+            if av[0] == 'eval':
+                src = ' '.join(av[1:])
+            elif '-c' in av[1:]:
+                j = av.index('-c', 1)
+                src = av[j + 1] if j + 1 < len(av) else None
+            else:
+                src = next((r['heredoc'] for r in c['redirs'] if r.get('heredoc') is not None), None)
+            if src and _depth < 4:
+                out.extend(invocations(src, live_state, cwd, _depth + 1))
+            continue
+        env_here = dict(env)
+        env_here.update(prefix)
+        inv = _wd_invocation(av, argv, env_here, cwd, live)
+        if inv is None:
+            continue
+        diverted = any(r['redir'] in ('>', '>>', '>|', '&>', '&>>') and r['fd'] in ('1', 'both')
+                       or (r['redir'] == '>&' and r['fd'] == '1') for r in c['redirs']) \
+            or c['op_after'] in ('|', '|&')
+        inv.update(diverted=diverted, op_before=c['op_before'], op_after=c['op_after'],
+                   loop=c['loop'], in_substitution=False)
+        out.append(inv)
+    return out
+
+
+def _wd_invocation(av, argv, env, cwd, live):
+    """argv -> one watchdog invocation, read by wd.sh's own dispatch, or None."""
+    base = os.path.basename(av[0])
+    exp = [x['expands'] for x in argv]
+    if base == 'wd.sh' and '/' in av[0] and not argv[0]['expands']:
+        wd_dir = _path_join(cwd, os.path.dirname(av[0]))
+        st = env.get('WD_STATE')
+        if st is not None:
+            state_dir = None if st[1] else _path_join(cwd, st[0])
+            state_literal = st[0]
+        else:
+            state_dir = os.path.join(wd_dir, 'state') if wd_dir else None
+            state_literal = state_dir
+        rest, rexp = av[1:], exp[1:]
+        verb, args, aexp, urgent, gated = (rest[0] if rest else ''), rest[1:], rexp[1:], False, None
+        if verb in ('queue', 'owe') and rest[1:]:
+            verb = '%s %s' % (rest[0], rest[1])
+            args, aexp = rest[2:], rexp[2:]
+            if verb == 'queue add' and args[:1] == ['--urgent']:
+                urgent, args, aexp = True, args[1:], aexp[1:]
+            if verb == 'owe add' and args[:1] == ['--gated-on']:
+                gated, args, aexp = (args[1] if len(args) > 1 else ''), args[2:], aexp[2:]
+    elif base.startswith('python') and not argv[0]['expands']:
+        script = next((j for j in range(1, len(av)) if not av[j].startswith('-')), None)
+        if script is None or os.path.basename(av[script]) not in WD_SCRIPTS or argv[script]['expands']:
+            return None
+        flags = av[script + 1:]
+        fexp = exp[script + 1:]
+        st = None
+        if '--state-dir' in flags:
+            j = flags.index('--state-dir')
+            st = (flags[j + 1], fexp[j + 1]) if j + 1 < len(flags) else ('', True)
+        state_dir = (None if st[1] else _path_join(cwd, st[0])) if st else None
+        state_literal = st[0] if st else '(no --state-dir)'
+        verb, args, aexp, urgent, gated = None, [], [], False, None
+        if os.path.basename(av[script]) == 'wd_wake.py':
+            for j, f in enumerate(flags):
+                if f in WD_WAKE_FLAGS:
+                    verb = WD_WAKE_FLAGS[f]
+                    args, aexp = flags[j + 1:j + 2], fexp[j + 1:j + 2]
+                    if f == '--outcome':
+                        args, aexp = flags[j + 1:j + 3], fexp[j + 1:j + 3]
+                    break
+            urgent = '--queue-urgent' in flags
+            if '--gated-on' in flags:
+                j = flags.index('--gated-on')
+                gated = flags[j + 1] if j + 1 < len(flags) else ''
+        else:
+            pos, j = [], 0
+            while j < len(flags):
+                if flags[j].startswith('--'):
+                    j += 2 if flags[j] in ('--target', '--state-dir', '--self', '--repo', '--ledger',
+                                           '--quiet-min', '--row-pattern') else 1
+                    continue
+                pos.append(j)
+                j += 1
+            if not pos:
+                return None
+            verb = flags[pos[0]]
+            args, aexp = flags[pos[0] + 1:], fexp[pos[0] + 1:]
+        if verb is None:
+            return None
+    else:
+        return None
+    state = 'live' if (live and state_dir == live) else 'scratch'
+    text = ' '.join(args) if verb in ('queue add', 'owe add') else None
+    return {'verb': verb, 'args': args, 'arg_expands': aexp, 'text': text,
+            'text_resolved': (not any(aexp)) if text is not None else None,
+            'urgent': urgent, 'gated_on': gated, 'state': state,
+            'state_dir': state_dir or state_literal, 'argv': av}
+
+
 # At the END of the module: selftest() uses OPEN_RX and friends, defined above. Mid-module
 # it ran before they existed and the direct entry point died with NameError.
 if __name__ == '__main__':

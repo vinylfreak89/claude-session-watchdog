@@ -1772,6 +1772,123 @@ def test_sends_to_target():
     return fails
 
 
+
+def test_shell_reading():
+    """The command is read the way the SHELL reads it. Every case is a form from the real record
+    that a regex over raw text got wrong."""
+    fails = []
+    def ck(name, got, want):
+        ok = got == want
+        print('%-56s %s%s' % (name, 'PASS' if ok else 'FAIL',
+                              '' if ok else '  got=%r want=%r' % (got, want)))
+        if not ok:
+            fails.append(name)
+
+    words = lambda c: [t['w'] for t in R.sh_tokens(c) if 'w' in t]
+    ops = lambda c: [t['op'] for t in R.sh_tokens(c) if 'op' in t]
+    redirs = lambda c: [(t['redir'], t['fd'], (t['target'] or {}).get('w')) for t in R.sh_tokens(c) if 'redir' in t]
+
+    # --- tokens ---------------------------------------------------------------------------
+    c = './wd.sh sent1 Q1 >/dev/null 2>&1 | tail -1'
+    ck('tok: words around redirections', words(c), ['./wd.sh', 'sent1', 'Q1', 'tail', '-1'])
+    ck('tok: stdout to /dev/null, then 2>&1', redirs(c), [('>', '1', '/dev/null'), ('>&', '2', '1')])
+    ck('tok: a pipe is an operator', ops(c), ['|'])
+    ck('tok: escaped quotes inside double quotes',
+       words('./wd.sh queue add "he said \\"no\\" to it"')[-1], 'he said "no" to it')
+    t = [x for x in R.sh_tokens('./wd.sh queue add "$*"') if 'w' in x][-1]
+    ck('tok: "$*" expands', (t['w'], t['expands']), ('$*', True))
+    t = [x for x in R.sh_tokens("./wd.sh queue add 'costs $5 flat'") if 'w' in x][-1]
+    ck('tok: single-quoted $5 does not expand', (t['w'], t['expands']), ('costs $5 flat', False))
+    ck('tok: a quoted python -c program is ONE word',
+       words('python3 -c "t=\'./wd.sh owe done D1\'"'), ['python3', '-c', "t='./wd.sh owe done D1'"])
+    c = "cat > f <<'EOF'\n./wd.sh queue add \"x y z\"\nEOF\n./wd.sh sent1 Q2"
+    ck('tok: a heredoc body is data, not words', words(c), ['cat', './wd.sh', 'sent1', 'Q2'])
+    ck('tok: `> f` is a redirection target', redirs(c)[0], ('>', '1', 'f'))
+    ck('tok: the heredoc body is kept with its redirection',
+       [t['heredoc'] for t in R.sh_tokens(c) if t.get('redir') == '<<'], ['./wd.sh queue add "x y z"'])
+    c = "cat <<'EOF'\nthe word EOF appears here\n./wd.sh queue add \"must not leak\"\nEOF\n./wd.sh sent1 Q3"
+    ck('tok: a body line mentioning the delimiter does not end it', words(c), ['cat', './wd.sh', 'sent1', 'Q3'])
+    ck('tok: a comment is dropped', words('# ./wd.sh queue add "x"\necho done'), ['echo', 'done'])
+    ck('tok: # inside a word is literal', words('echo a#b'), ['echo', 'a#b'])
+    ck('tok: line continuation', words('./wd.sh queue add \\\n "text here"'), ['./wd.sh', 'queue', 'add', 'text here'])
+    t = [x for x in R.sh_tokens('git commit -m "fix `wd.sh` thing"') if 'w' in x][-1]
+    ck('tok: backticks in double quotes are a substitution', t['subs'], ['wd.sh'])
+    t = [x for x in R.sh_tokens('echo "$(printf \'a)b\')"') if 'w' in x][-1]
+    ck('tok: quotes inside $(...) are honoured', t['subs'], ["printf 'a)b'"])
+    t = [x for x in R.sh_tokens('a=$((1+2)); echo $a') if 'w' in x][0]
+    ck('tok: $((...)) is arithmetic, not a command', (t['expands'], t['subs']), (True, []))
+    ck('tok: a word glued to > is a redirection', redirs('./wd.sh owe list>out.txt'), [('>', '1', 'out.txt')])
+    ck('tok: digits that are an argument are not an fd', words('./wd.sh hold 12 x'), ['./wd.sh', 'hold', '12', 'x'])
+    ck('tok: &> redirects both streams', redirs('x &>/dev/null'), [('&>', 'both', '/dev/null')])
+    ck('tok: the empty command', R.sh_tokens(''), [])
+
+    # --- invocations ------------------------------------------------------------------------
+    LIVE = '/w/state'
+    inv = lambda c, cwd='/w': R.invocations(c, LIVE, cwd)
+    brief = lambda c, cwd='/w': [(i['verb'], i['args']) for i in inv(c, cwd)]
+    ck('inv: stdout diverted by >/dev/null', [(i['verb'], i['args'], i['diverted']) for i in inv('./wd.sh sent1 Q1 >/dev/null')],
+       [('sent1', ['Q1'], True)])
+    ck('inv: stdout into a pipe is diverted', [i['diverted'] for i in inv('./wd.sh sent1 Q1 2>&1 | tail -1')], [True])
+    ck('inv: 2>&1 alone does not divert stdout', [i['diverted'] for i in inv('./wd.sh sent1 Q1 2>&1')], [False])
+    ck('inv: queue add joins its words ("$*") and reads --urgent',
+       [(i['verb'], i['text'], i['urgent']) for i in inv('./wd.sh queue add --urgent fix the box')],
+       [('queue add', 'fix the box', True)])
+    ck('inv: owe add reads --gated-on apart from the text',
+       [(i['text'], i['gated_on']) for i in inv('./wd.sh owe add --gated-on "the harness\'s switch line" "Does it change?"')],
+       [('Does it change?', "the harness's switch line")])
+    ck('inv: expanded text is flagged unresolved',
+       [i['text_resolved'] for i in inv('./wd.sh queue add "$*"')], [False])
+    ck('inv: wd.sh inside a quoted python program is NOT an invocation',
+       inv('python3 -c "t=\'./wd.sh owe done D1\'"'), [])
+    ck('inv: an echoed invocation is not one', inv("echo './wd.sh owe add \"x\"'"), [])
+    ck('inv: a grep for "--sent" is not a `sent`', inv('grep -n "def record_sent\\|--sent" wd_wake.py'), [])
+    ck('inv: `answered && git add` has no id', brief('./wd.sh answered && git add -A'), [('answered', [])])
+    ck('inv: `relayed <ts>;` does not keep the `;`',
+       brief('./wd.sh relayed 2026-09-10T13:33:47.000Z; ./wd.sh relayed 2026-09-10T13:35:03.323Z'),
+       [('relayed', ['2026-09-10T13:33:47.000Z']), ('relayed', ['2026-09-10T13:35:03.323Z'])])
+    ck('inv: && chain position is recorded',
+       [(i['verb'], i['op_before']) for i in inv('./wd.sh relayed && ./wd.sh answered')],
+       [('relayed', None), ('answered', '&&')])
+    ck('inv: sent keeps its id list and message id', brief('./wd.sh sent F1,F2 b7f7de7d'), [('sent', ['F1,F2', 'b7f7de7d'])])
+    ck('inv: a for loop is unrolled at a command position',
+       brief('for d in D1 D3; do ./wd.sh owe done $d; done'), [('owe done', ['D1']), ('owe done', ['D3'])])
+    ck('inv: a substitution loop is NOT unrolled',
+       [(i['args'], i['arg_expands']) for i in inv('for d in $(cat ids.txt); do ./wd.sh owe done $d; done')],
+       [(['$d'], [True])])
+    ck('inv: a while-read loop body is read once, marked',
+       [(i['args'], i['loop']) for i in inv('while read d; do ./wd.sh owe done $d; done < ids.txt')],
+       [(['$d'], 'while')])
+    ck('inv: a heredoc body is not executed',
+       brief("cat > f <<'EOF'\n./wd.sh queue add \"x y z\"\nEOF\n./wd.sh sent1 Q2"), [('sent1', ['Q2'])])
+    ck('inv: a script fed to bash on stdin IS executed',
+       brief("bash <<'EOF'\n./wd.sh sent1 Q5\nEOF"), [('sent1', ['Q5'])])
+    ck('inv: bash -c runs its string', brief("bash -c './wd.sh sent1 Q9'"), [('sent1', ['Q9'])])
+    ck('inv: a bare `wd.sh` is not on PATH, so never runs', inv('git commit -m "fix `wd.sh` thing"'), [])
+    ck('inv: a substitution runs, and its stdout is captured',
+       [(i['verb'], i['in_substitution'], i['diverted']) for i in inv('out=$(./wd.sh reconcile 2>/dev/null)')],
+       [('reconcile', True, True)])
+
+    # --- which state each invocation touched -------------------------------------------------
+    ck('state: the default state dir is live', [i['state'] for i in inv('./wd.sh sent1 Q1')], ['live'])
+    ck('state: an exported WD_STATE is scratch for what follows',
+       [i['state'] for i in inv('export WD_STATE=/private/tmp/x && ./wd.sh sent1 Q1; ./wd.sh sent1 Q2')],
+       ['scratch', 'scratch'])
+    ck('state: an inline prefix is scratch for THAT command only',
+       [i['state'] for i in inv('WD_STATE=$T ./wd.sh next; ./wd.sh sent1 URG1')], ['scratch', 'live'])
+    ck('state: a plain (unexported) assignment changes nothing',
+       [i['state'] for i in inv('WD_STATE=/tmp/x; ./wd.sh sent1 Q1')], ['live'])
+    ck('state: --state-dir resolved against cd',
+       [i['state'] for i in inv('cd /w && python3 wd_wake.py --state-dir state --owe-clear D1')], ['live'])
+    ck('state: --state-dir elsewhere is scratch',
+       [(i['verb'], i['state']) for i in inv('cd /private/tmp/x && python3 wd_wake.py --state-dir state --owe-clear D1')],
+       [('owe done', 'scratch')])
+    ck('state: another watchdog instance is scratch',
+       [i['state'] for i in inv('/private/tmp/meta/watchdog/wd.sh sent1 Q1')], ['scratch'])
+    ck('state: cd changes where ./wd.sh is',
+       [i['state'] for i in inv('cd /private/tmp/meta/watchdog && ./wd.sh sent1 Q1', cwd='/w')], ['scratch'])
+    return fails
+
+
 def test_vocabulary():
     """Unknown is not an answer class: everything is answerable from my actions, project state or
     what the owner owes me, so an item the instrument could not settle is WORK OUTSTANDING, and a
@@ -1992,6 +2109,8 @@ def main():
         fails.extend(_guarded(test_repeats_and_peers))
         print('\n--- sends must reach the TARGET ---')
         fails.extend(_guarded(test_sends_to_target))
+        print('\n--- reading commands as the shell does ---')
+        fails.extend(_guarded(test_shell_reading))
         print('\n--- vocabulary: no unknown-type verdict ---')
         fails.extend(_guarded(test_vocabulary))
 
