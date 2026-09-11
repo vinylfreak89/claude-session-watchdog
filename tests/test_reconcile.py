@@ -341,6 +341,59 @@ def test_stage5():
         shutil.rmtree(d, ignore_errors=True)
 
 
+
+def test_tm_reader():
+    """Every assertion here is against REAL captured bytes in tests/fixtures/."""
+    fails = []
+    def ck(name, got, want):
+        ok = got == want
+        print('%-56s %s%s' % (name, 'PASS' if ok else 'FAIL',
+                              '' if ok else '  got=%r want=%r' % (got, want)))
+        if not ok:
+            fails.append(name)
+
+    hit = open(os.path.join(FIX, 'tm_read_state_hit.raw')).read()
+    comp = open(os.path.join(FIX, 'tm_read_complete.raw')).read()
+    miss = open(os.path.join(FIX, 'tm_read_miss.json')).read()
+
+    c, st = R.tm_read_split(comp)
+    ck('a complete read is recognised complete', st.get('truncated'), False)
+    ck('the JSON trailer is stripped from the content', c.endswith('}'), False)
+    ck('content length matches the reader own byte count', len(c.encode()), st.get('bytes'))
+    d, why = R.tm_state_at(comp)
+    ck('a non-JSON file is refused, not half-parsed', d, None)
+    ck('and it says why', why.startswith('content did not parse'), True)
+
+    c2, st2 = R.tm_read_split(hit)
+    ck('a truncated read is flagged by the trailer', st2.get('truncated'), True)
+    d2, why2 = R.tm_state_at(hit)
+    ck('a TRUNCATED state file is never parsed', d2, None)
+    ck('truncation is named as the reason', 'truncated' in why2, True)
+
+    c3, st3 = R.tm_read_split(miss)
+    ck('a miss is ok=false', st3.get('ok'), False)
+    d3, why3 = R.tm_state_at(miss)
+    ck('a miss returns no state', d3, None)
+    ck('a miss is "unreadable", never an empty state', why3.startswith('unreadable'), True)
+
+    # the trap that matters most: exit status is 0 even for a miss
+    ck('the miss fixture carries no exit code to trust', 'exit' in st3, False)
+
+    # a synthetic complete JSON read must parse cleanly -- the happy path still works
+    body = json.dumps({'owner_queue': [{'id': 'Q1'}], 'owner_decisions': {}})
+    fake = body + json.dumps({'ok': True, 'bytes': len(body.encode()), 'truncated': False})
+    d4, why4 = R.tm_state_at(fake)
+    ck('a complete JSON state parses', (d4 or {}).get('owner_queue'), [{'id': 'Q1'}])
+    ck('and reports ok', why4, 'ok')
+
+    # byte-count mismatch must refuse
+    bad = body + json.dumps({'ok': True, 'bytes': len(body.encode()) + 5, 'truncated': False})
+    d5, why5 = R.tm_state_at(bad)
+    ck('a byte-count mismatch refuses rather than parses', d5, None)
+    ck('and names the mismatch', 'reported' in why5, True)
+    return fails
+
+
 def main():
     d = tempfile.mkdtemp(prefix='recon-fixture-')
     fails = []
@@ -481,6 +534,8 @@ def main():
         fails.extend(test_stage4())
         print('\n--- stage 2: Time Machine (real captured bytes) ---')
         fails.extend(test_stage2())
+        print('\n--- tm reader (real captured bytes) ---')
+        fails.extend(test_tm_reader())
         print('\n--- stage 5: additive repair ---')
         fails.extend(test_stage5())
 

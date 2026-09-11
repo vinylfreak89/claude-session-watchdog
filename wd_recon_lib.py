@@ -651,3 +651,60 @@ def stage5_repair(state_dir, restores, apply=False):
         json.dump(d, open(tmp, 'w'), indent=1, sort_keys=True)
         os.replace(tmp, p)
     return {'added': added, 'skipped_duplicate': skipped, 'applied': bool(apply)}
+
+
+def tm_read_split(raw):
+    """`tm read` returns FILE BYTES with a JSON status trailer appended. Established from real
+    captured output (tests/fixtures/tm_read_state_hit.raw), not assumed:
+
+        {... the file ...}{"bytes": 300, "ok": true, "path": "...", "truncated": true, ...}
+
+    So neither `json.loads(out)` nor "the whole output is the file" is correct -- the first
+    throws, the second silently appends the trailer to the content. Returns (content, status).
+
+    Three things in that trailer decide whether the read may be used at all, and every one of
+    them is invisible to the exit status, which is 0 even for a miss:
+      ok=false     -> unreadable
+      truncated    -> the content is PARTIAL; parsing it as JSON yields garbage or throws
+      bytes        -> what was actually delivered
+    """
+    # NOT stripped: the file's own leading/trailing whitespace is content. Stripping cost two
+    # bytes against a real 1470-byte read (fixture tm_read_complete.raw) and would have broken
+    # any later hash comparison silently.
+    s = raw
+    if not s.strip():
+        return '', {'ok': False, 'error': 'empty output'}
+    for i in range(len(s) - 1, -1, -1):
+        if s[i] != '{':
+            continue
+        try:
+            status = json.loads(s[i:])
+        except Exception:
+            continue
+        if isinstance(status, dict) and ('ok' in status or 'error' in status):
+            return s[:i], status
+    try:
+        return '', json.loads(s)
+    except Exception:
+        return s, {'ok': None, 'error': 'no status trailer found'}
+
+
+def tm_state_at(raw):
+    """The state dict from one snapshot's state.json, or a NAMED refusal.
+
+    Never returns a partial parse and never reads a miss as an empty state: a store that looks
+    empty because the read was truncated is exactly how a reconciliation invents a drop."""
+    content, st = tm_read_split(raw)
+    if not st.get('ok'):
+        return None, 'unreadable: %s' % (st.get('error') or 'ok=false')[:120]
+    if st.get('truncated'):
+        return None, ('truncated at %s bytes -- re-read whole or extract; a partial state file '
+                      'must never be parsed' % st.get('bytes'))
+    want = st.get('bytes')
+    if isinstance(want, int) and len(content.encode()) != want:
+        return None, ('content is %d bytes but the reader reported %d -- refused rather than '
+                      'parsed' % (len(content.encode()), want))
+    try:
+        return json.loads(content), 'ok'
+    except Exception as e:
+        return None, 'content did not parse: %s' % e
