@@ -250,8 +250,16 @@ def init(state_dir, start, end):
     return L
 
 
-def outstanding(L):
-    """Everything still owed, as a list of short strings. Empty == reconciled."""
+def outstanding(L, include_restores=True):
+    """Everything still owed, as a list of short strings. Empty == reconciled.
+
+    `include_restores=False` omits the one item stage 5 exists to clear -- the dropped effects not
+    yet merged back. Stage 5 gates on THAT list, because "no writes to the live state until the
+    reconciliation is complete" gates on the INVESTIGATION being finished, not on the repair
+    having already happened. Gating the repair on its own outcome is a deadlock: nothing could
+    ever be merged, so nothing could ever be complete.
+
+    `--complete` gates on the full list, so the owner's 100 still means the effects are restored."""
     o = []
     pend = [k for k, v in sorted(L['hours'].items()) if v['status'] != 'done']
     if pend:
@@ -268,6 +276,18 @@ def outstanding(L):
     # confidence already exempts it and this line contradicted that, refusing --complete forever.
     # It is not silently dropped either: `tm_note` says so wherever the result is reported, because
     # "the drive was never read" and "the drive was read and held nothing" are different facts.
+    owed = L.get('owed')
+    if owed is None:
+        o.append('the restore worklist has never been derived -- stage 3 has not asked which '
+                 'dropped effects the state is still missing')
+    else:
+        done = {r.get('owed_key') for r in L.get('restored', [])
+                if r.get('validated_pass') == L.get('pass', 0)}
+        miss = [w for w in owed if w['key'] not in done and not w.get('superseded')]
+        if miss and include_restores:
+            o.append('%d dropped effect(s) not restored into the state -- stage 5 merges them '
+                     '(next %s %s: %s)'
+                     % (len(miss), miss[0]['verb'], miss[0]['id'] or '', miss[0]['why']))
     stale = [i for i, r in enumerate(L.get('restored', []))
              if r.get('validated_pass') != L.get('pass', 0)]
     if stale:
@@ -285,7 +305,7 @@ def outstanding(L):
     if owed:
         o.append('%d decision chain(s) with work outstanding (next %s: %s)'
                  % (len(owed), owed[0], chs[owed[0]]['outstanding'][0]))
-    c, parts = confidence(L)
+    c, parts = confidence(L, include_restores=include_restores)
     if c != 100:
         o.append('confidence %d/100 (%s)' % (c, '; '.join('%s %d%%' % (k, v) for k, v in parts)))
     return o
@@ -310,7 +330,7 @@ def tm_note(L):
     return 'Time Machine: never consulted -- the additional check was not run'
 
 
-def confidence(L):
+def confidence(L, include_restores=True):
     """COMPUTED, never typed. The owner: "Everything is answerable from transcripts because
     they are all your actions, project state or things I owe you." So confidence is how much of
     that record is accounted for, and it is the WEAKEST of the coverages -- one unexamined
@@ -319,10 +339,29 @@ def confidence(L):
     hrs = L['hours']
     cov.append(('hours', 100 * sum(1 for v in hrs.values() if v['status'] == 'done') // max(1, len(hrs))))
     a = L.get('coverage', {})
-    rs = L.get('restored', [])
-    if rs:
-        okn = sum(1 for r in rs if r.get('validated_pass') == L.get('pass', 0))
-        cov.append(('restores', 100 * okn // len(rs)))
+    # RESTORES -- the axis that makes 100 mean what the owner means by it. Owner, 2026-09-12:
+    # "100 % means the things you silently dropped, are no longer in the state and have not had
+    # their intended effect restored into the state. That is supposed to be the final outcome."
+    #
+    # The denominator is the DERIVED worklist -- every dropped action whose intended effect the
+    # state does not carry -- and never the list of restores already recorded. Scoring recorded
+    # restores against themselves is what let the instrument report 100 with `restored 0`: with
+    # no restores recorded there was no axis, so nothing owed and everything owed scored alike.
+    #
+    # Never derived is 0. Derived and EMPTY is 100. That is the measured-zero distinction this
+    # whole reconciliation kept failing: an absent measurement is not a finding of nothing.
+    owed = L.get('owed')
+    if include_restores:
+        # `include_restores=False` is stage 5 asking whether the INVESTIGATION is settled, so that
+        # it may perform the merge. Leaving this axis in there would gate the repair on its own
+        # outcome -- a deadlock, since only the merge can raise it.
+        if owed is None:
+            cov.append(('restores', 0))
+        else:
+            done = {r.get('owed_key') for r in L.get('restored', [])
+                    if r.get('validated_pass') == L.get('pass', 0)}
+            ok = sum(1 for w in owed if w['key'] in done)
+            cov.append(('restores', 100 * ok // len(owed) if owed else 100))
     # Time Machine is an ADDITIONAL check, never a requirement (owner, 2026-09-12: "time machine
     # is an additional check in case your scan happens to miss something but it is not necessary"),
     # so snapshot coverage cannot hold the reconciliation below 100. What the RECORD must answer --
@@ -521,6 +560,13 @@ def run_stage(n, L, S, a):
         undelivered = [s for s in tsends if not s.get('delivered')]
         htally = _c.Counter(h['cls'] for h in hashes)
         ptally = _c.Counter(p['cls'] for p in pushes)
+        # THE WORKLIST. Every dropped action whose intended effect the state does not carry --
+        # derived from the live state, never from the commands. This is what `restores` in the
+        # confidence is measured against, so it must be computed on every stage-3 run: a stale
+        # worklist would score a repair that a later change had already undone.
+        work, accounted = RL.restorations_owed(acts, RL.live_stores(S)['raw'])
+        L['owed'], L['accounted'] = work, accounted
+        _disp = _c.Counter(x['disposition'] for x in accounted)
         owed_readings = [{'key': RL.action_key(x), 'ts': x['ts'], 'verb': x['verb'], 'id': x.get('id'),
                           'needs': x['needs']} for x in acts
                          if x.get('state') == 'live' and (x.get('needs') or '').startswith('a reading')]
@@ -546,6 +592,13 @@ def run_stage(n, L, S, a):
         cov['deliveries'] = [len(tsends), len(tsends)]
         cov['hashes'] = [sum(1 for h in hashes if h['cls'] != 'not_a_commit_here'), len(hashes)]
         print('stage 3: %d actions replayed -- %s' % (len(rep), dict(tally)))
+        print('         RESTORE WORKLIST: %d dropped effect(s) the state does not carry' % len(work))
+        for w in work:
+            r = w['repair']
+            print('   OWED  %-11s %-22s %s %s <- %s'
+                  % (w['verb'], w['id'] or '', r['op'], r['store'], w['why']))
+        print('         %d dropped effect(s) accounted for without repair -- %s'
+              % (len(accounted), dict(_disp)))
         print('         %d live action(s) still OUTSTANDING (no evidence yet)'
               % sum(1 for x in acts if x.get('state') == 'live' and (x['outcome'] is None or x.get('needs'))))
         print('         %d action(s) owe a READING (--read-action <key> --as yes|no)' % len(owed_readings))
@@ -628,43 +681,77 @@ def run_stage(n, L, S, a):
                 print('   %s last seen %s, gone by %s' % (k, (dis.get('last_seen') or {}).get(k), v))
         return True
     if n == 4:
-        rs = L.get('restored') or []
-        if not rs:
-            print('stage 4: nothing restored yet, so nothing to check for supersession')
-            return False
+        # SUPERSESSION. A dropped effect is not restored if the owner has since said something
+        # that overtakes it -- restoring it then would push stale content back into his state.
+        # Run over the DERIVED worklist, not over hand-entered restores: the worklist is what
+        # stage 5 will merge, so it is the thing that has to survive this check.
+        owed = L.get('owed')
+        if owed is None:
+            raise SystemExit('run --stage 3 first: stage 4 checks the worklist it derives')
+        if not owed:
+            print('stage 4: the worklist is empty -- nothing to check for supersession')
+            L['stage4'] = {'ts': now_iso(), 'checked': 0, 'superseded': 0}
+            return True
         path, numbered, bad, recs, acts, owner, exc, peers, acct, my_text, sends = _world()
         later = [{'ts': o['ts'], 'text': o['text'], 'kind': 'owner'} for o in owner]
-        for i, r in enumerate(rs):
-            if r.get('validated_pass') == L.get('pass', 0):
-                continue
-            ev = RL.stage4_evidence({'cite': r.get('evidence'), 'ts': r.get('ts'),
-                                     'text': r['what']}, later)
-            r['supersession_evidence'] = ev
-            print('restore #%d: %d owner message(s) after it, %d touching it'
-                  % (i, ev['records_after'], len(ev['hits'])))
-            for h in ev['hits'][:3]:
+        nsup = 0
+        for w in owed:
+            ev = RL.stage4_evidence({'cite': w['key'], 'ts': w['ts'], 'text': w['text']}, later)
+            w['supersession_evidence'] = ev
+            w['checked_pass'] = L.get('pass', 0)
+            print('%-11s %-22s %d owner message(s) after it, %d touching it'
+                  % (w['verb'], w['id'] or '', ev['records_after'], len(ev['hits'])))
+            for h in ev['hits'][:2]:
                 print('     %s  %s' % (h['ts'][:19], h['excerpt'][:110].replace(chr(10), ' ')))
+            if ev['hits']:
+                nsup += 1
+        L['stage4'] = {'ts': now_iso(), 'checked': len(owed), 'touched': nsup}
+        print('stage 4: %d worklist item(s) checked, %d with owner messages touching them '
+              '(--supersede <key> to withhold one)' % (len(owed), nsup))
         return True
     if n == 5:
-        # The only stage that writes the state under reconciliation. Owner, 2026-09-12: nothing
-        # is written to the live state until the reconciliation is COMPLETE -- a repair applied
-        # mid-pass changes the very stores the remaining hours are being compared against.
-        if a.apply and not L.get('complete'):
-            raise SystemExit('stage 5 --apply REFUSED: the reconciliation is not complete, and '
-                             'the repair writes the live state. Finish it (reconcile --complete) '
-                             'first; a dry run is always allowed.')
-        rs = [r for r in (L.get('restored') or [])
-              if r.get('validated_pass') == L.get('pass', 0) and not r.get('superseded')]
-        if not rs:
-            print('stage 5: nothing validated-and-not-superseded to repair')
+        if a.apply:
+            # everything EXCEPT the merge itself must be settled before anything is written
+            rest = outstanding(L, include_restores=False)
+            if rest:
+                raise SystemExit('stage 5 --apply REFUSED: the reconciliation is not settled. '
+                                 'Nothing writes to the live state until it is:\n  - '
+                                 + '\n  - '.join(rest))
+        owed = L.get('owed')
+        if owed is None:
+            raise SystemExit('run --stage 3 first: stage 5 merges the worklist it derives')
+        if any(w.get('checked_pass') != L.get('pass', 0) for w in owed):
+            raise SystemExit('run --stage 4 first: every worklist item must be checked for '
+                             'supersession at this pass before it is merged into the state')
+        done = {r.get('owed_key') for r in L.get('restored', [])
+                if r.get('validated_pass') == L.get('pass', 0)}
+        todo = [w for w in owed if w['key'] not in done and not w.get('superseded')]
+        if not todo:
+            print('stage 5: nothing to merge -- the worklist is empty or already restored')
             return False
-        payload = [{'store': r.get('store', 'owner_queue'), 'id': r.get('id'),
-                    'text': r['what'], 'cite': r.get('evidence', ''),
-                    'sha256': r.get('sha256', ''), 'now': now_iso()} for r in rs]
+        payload = [dict(w['repair'], cite=w['key'], sha256=w.get('sha256', ''), now=now_iso())
+                   for w in todo]
         res = RL.stage5_repair(S, payload, apply=a.apply)
-        print('stage 5: %s -- added %d, skipped %d duplicate(s)'
-              % ('APPLIED' if a.apply else 'dry run', len(res['added']),
-                 len(res['skipped_duplicate'])))
+        print('stage 5: %s -- %d appended, %d amended, %d advanced, %d skipped'
+              % ('APPLIED' if a.apply else 'DRY RUN (nothing written)', len(res['added']),
+                 len(res['amended']), len(res['advanced']), len(res['skipped'])))
+        for st, ident, sha in res['added']:
+            print('   +ROW   %-18s %s' % (st, ident or ''))
+        for ident, fields in res['amended']:
+            print('   +FIELD %-18s %s' % (ident, ', '.join(fields)))
+        for st, was, to in res['advanced']:
+            print('   ->     %-18s %s -> %s' % (st, was or '(unset)', to))
+        for what, why in res['skipped']:
+            print('   skip   %-18s %s' % (what, why))
+        if a.apply:
+            # the merge is RECORDED against the worklist item it discharged, so the restore axis
+            # can tell a repaired effect from an unrepaired one by key rather than by count
+            for w in todo:
+                L.setdefault('restored', []).append(
+                    {'ts': now_iso(), 'owed_key': w['key'], 'what': w['text'],
+                     'verb': w['verb'], 'id': w['id'], 'repair': w['repair'],
+                     'evidence': w['key'], 'validated_pass': L.get('pass', 0),
+                     'superseded': None})
         return bool(a.apply)
     return False
 

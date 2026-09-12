@@ -329,54 +329,132 @@ def stage2_disappearances(series):
 # ---------------------------------------------------------------- stage 5
 
 def stage5_repair(state_dir, restores, apply=False):
-    """ADDITIVE repair. Owner: "Do not clear any queues."
+    """The MERGE. Owner, 2026-09-12: "That's why they are reconciliations. The result is a merge,
+    not an overwrite." And the standing rule it rests on: "Do not clear any queues."
 
-    Appends what survived stage 4 and touches nothing that is already there. Existing rows must
-    be byte-identical afterwards, and running it twice must not duplicate -- a repair that is
-    not idempotent turns a re-run into corruption."""
+    Three operations, and none of them can lose anything the owner has:
+
+      append   a row the store does not have
+      amend    fields onto a row that IS there but is missing them -- ONLY fields it lacks
+      advance  a monotonic mark forward -- never backward
+
+    The invariant is additive AT FIELD GRANULARITY: every key that existed before this call still
+    exists afterwards with the same value. That is what lets an amend complete a partial row --
+    a whole-row comparison would have called the completion tampering -- while still refusing any
+    edit that changes something the owner put there.
+
+    Idempotent: running it twice adds nothing the first run added."""
     p = os.path.join(state_dir, 'state.json')
     d = json.load(open(p))
     before = json.dumps(d, sort_keys=True)
-    added, skipped = [], []
-    for r in restores:
-        store = r['store']
-        if store == 'owner_queue':
-            rows = d.setdefault('owner_queue', [])
-            if any(x.get('restored_sha256') == r['sha256'] for x in rows):
-                skipped.append(r['sha256'][:12]); continue
-            rows.append({'id': r.get('id') or ('R%d' % (len(rows) + 1)),
-                         'text': r['text'], 'restored_from': r['cite'],
-                         'restored_sha256': r['sha256'], 'restored_ts': r.get('now')})
-        else:
-            rows = d.setdefault(store, {})
-            key = r.get('id') or ('R%d' % (len(rows) + 1))
-            if any(v.get('restored_sha256') == r['sha256'] for v in rows.values()):
-                skipped.append(r['sha256'][:12]); continue
-            rows[key] = {'text': r['text'], 'restored_from': r['cite'],
-                         'restored_sha256': r['sha256'], 'restored_ts': r.get('now')}
-        added.append(r['sha256'][:12])
-    # Nothing that existed at the START OF THIS CALL may have changed. Compare against a
-    # snapshot taken before mutation -- NOT against "rows without a restore marker", which
-    # misclassifies rows an earlier run restored and breaks the second run (found by the
-    # idempotency fixture, 2026-09-11).
     orig = json.loads(before)
-    oq = orig.get('owner_queue') or []
-    if json.dumps(d.get('owner_queue', [])[:len(oq)], sort_keys=True) != json.dumps(oq, sort_keys=True):
-        raise AssertionError('repair modified or reordered existing owner_queue rows -- refused')
-    for store in ('owner_decisions', 'open_questions'):
-        for k, v in (orig.get(store) or {}).items():
-            if json.dumps((d.get(store) or {}).get(k), sort_keys=True) != json.dumps(v, sort_keys=True):
-                raise AssertionError('repair modified existing %s/%s -- refused' % (store, k))
-    for k in orig:
-        if k in ('owner_queue', 'owner_decisions', 'open_questions'):
-            continue
-        if json.dumps(d.get(k), sort_keys=True) != json.dumps(orig[k], sort_keys=True):
-            raise AssertionError('repair touched unrelated key %r -- refused' % k)
+    added, amended, skipped, advanced = [], [], [], []
+
+    def _rows(store):
+        return d.setdefault(store, [] if store.startswith('owner_queue') else {})
+
+    for r in restores:
+        op, store, ident = r.get('op', 'append'), r['store'], r.get('id')
+        fields, sha = dict(r.get('fields') or {}), r.get('sha256', '')
+        stamp = {'restored_from': r.get('cite', ''), 'restored_sha256': sha,
+                 'restored_ts': r.get('now')}
+
+        if op == 'advance':
+            to = fields.get('to')
+            cur = d.get(store) or ''
+            if not to or cur >= to:
+                skipped.append((store, 'already at or past %r' % cur)); continue
+            d[store] = to
+            advanced.append((store, cur, to)); continue
+
+        if op == 'amend':
+            rows = _rows(store)
+            seq = rows if isinstance(rows, list) else list(rows.values())
+            row = next((x for x in seq if isinstance(x, dict) and x.get('id') == ident), None)
+            if row is None and isinstance(rows, dict):
+                row = rows.get(ident)
+            if row is None:
+                skipped.append((ident, 'no row to amend -- refused rather than created')); continue
+            put = {k: v for k, v in fields.items() if k not in row or row[k] in (None, '')}
+            if not put:
+                skipped.append((ident, 'the row already carries every field')); continue
+            row.update(put)
+            row.setdefault('restored_fields', sorted(put))
+            for k, v in stamp.items():
+                row.setdefault(k, v)
+            amended.append((ident, sorted(put))); continue
+
+        rows = _rows(store)
+        if isinstance(rows, list):
+            if any(x.get('restored_sha256') == sha for x in rows if isinstance(x, dict)):
+                skipped.append((sha[:12], 'already restored')); continue
+            row = {'id': ident or ('R%d' % (len(rows) + 1))}
+            row.update(fields); row.update(stamp)
+            rows.append(row)
+        else:
+            if any(isinstance(v, dict) and v.get('restored_sha256') == sha
+                   for v in rows.values()):
+                skipped.append((sha[:12], 'already restored')); continue
+            key = ident or ('R%d' % (len(rows) + 1))
+            if key in rows:
+                skipped.append((key, 'the store already has this id')); continue
+            row = dict(fields); row.update(stamp)
+            rows[key] = row
+        added.append((store, ident, sha[:12]))
+
+    _verify_additive(orig, d)
     if apply:
         tmp = p + '.tmp'
         json.dump(d, open(tmp, 'w'), indent=1, sort_keys=True)
         os.replace(tmp, p)
-    return {'added': added, 'skipped_duplicate': skipped, 'applied': bool(apply)}
+    return {'added': added, 'amended': amended, 'advanced': advanced,
+            'skipped': skipped, 'applied': bool(apply)}
+
+
+def _verify_additive(orig, now):
+    """Every key and every field the state had BEFORE the repair is still there, unchanged.
+
+    Compared against a snapshot taken before mutation -- NOT against "rows without a restore
+    marker", which misclassifies rows an earlier run restored and breaks the second run (found by
+    the idempotency fixture, 2026-09-11). Field granularity, so an amend that COMPLETES a row is
+    allowed while any edit of what the owner put there is refused."""
+    def same(a, b):
+        return json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
+
+    for k, was in orig.items():
+        got = now.get(k)
+        if isinstance(was, list):
+            if len(got or []) < len(was):
+                raise AssertionError('repair shortened %s -- refused' % k)
+            for i, row in enumerate(was):
+                new_row = (got or [])[i]
+                if isinstance(row, dict) and isinstance(new_row, dict):
+                    for f, v in row.items():
+                        if not same(new_row.get(f), v):
+                            raise AssertionError(
+                                'repair changed %s[%d].%s -- refused' % (k, i, f))
+                elif not same(new_row, row):
+                    raise AssertionError('repair changed or reordered %s[%d] -- refused' % (k, i))
+        elif isinstance(was, dict):
+            for key, row in was.items():
+                new_row = (got or {}).get(key)
+                if new_row is None:
+                    raise AssertionError('repair removed %s/%s -- refused' % (k, key))
+                if isinstance(row, dict) and isinstance(new_row, dict):
+                    for f, v in row.items():
+                        if not same(new_row.get(f), v):
+                            raise AssertionError(
+                                'repair changed %s/%s.%s -- refused' % (k, key, f))
+                elif not same(new_row, row):
+                    raise AssertionError('repair changed %s/%s -- refused' % (k, key))
+        elif not same(got, was):
+            # a monotonic mark may ADVANCE; nothing else may move, and nothing may go backwards
+            if k in MONOTONIC and isinstance(got, str) and isinstance(was, str) and got > was:
+                continue
+            raise AssertionError('repair changed %r -- refused' % k)
+
+
+MONOTONIC = ('last_relay_ts', 'last_send_ts')
 
 
 def tm_read_split(raw):
@@ -791,6 +869,13 @@ def _command_actions(invs, res, ts, cite, cmd=None):
                 a.update(id=None, id_from=None, unresolved=[ident])
             else:
                 a.update(id=ident, id_from='command' if ident else None)
+            # the REST of the arguments, resolved-only. A verb whose effect carries data beyond
+            # the id (`queue hold`'s condition) cannot be restored from the id alone, and an
+            # argument the shell built is not a value we may write into the owner's state.
+            rest, rexp = args[1:], (aexp[1:] if aexp else [])
+            a['rest'] = [x for i, x in enumerate(rest)
+                         if not (i < len(rexp) and rexp[i])]
+            a['rest_resolved'] = not any(rexp[:len(rest)])
         rows.append((a, inv))
     if res is None:
         return [_set(a, 'not_completed', 'no tool_result recorded -- the command did not complete')
@@ -1399,6 +1484,211 @@ def reconcile_to_fixed_point(acts, recs, state, log_text='', findings_text='', m
             return acts, n
         seen = now
     return acts, max_passes
+
+# ---------------------------------------------------------------- what the state OWES
+#
+# The owner, 2026-09-12: "100 % means the things you silently dropped, are no longer in the state
+# and have not had their intended effect restored into the state. That is supposed to be the final
+# outcome." And, on the SHAPE of that restoration: "Obviously holds are gone. You can't restore
+# that state. And some of this should still be in queue hold. That's why they are reconciliations.
+# The result is a MERGE, not an overwrite."
+#
+# So a dropped action's intended effect gets one of five dispositions, and only ONE is a worklist.
+# The other four repair nothing -- and that is the point: an effect that cannot be restored must be
+# NAMED and REASONED, never silently counted as fine, and never manufactured into the state to make
+# a number come out.
+PRESENT = 'present'        # the state carries it -- by whatever route, this command's or another's
+RESTORABLE = 'restorable'  # durable, absent, and the state can carry it again: the worklist
+MOOT = 'moot'              # its subject is gone, or the repair would be a removal
+EXPIRED = 'expired'        # inherently time-bounded, and its window closed
+ELSEWHERE = 'elsewhere'    # the effect does not live in state.json at all
+
+
+def _queue_row(state, ident):
+    """The queue row for an id, live queue first then the sent queue: (store, row)."""
+    for store in ('owner_queue', 'owner_queue_sent'):
+        for x in (state.get(store) or []):
+            if isinstance(x, dict) and x.get('id') == ident:
+                return store, x
+    return None, None
+
+
+def effect_disposition(a, state):
+    """How this action's intended effect stands in the state NOW: (disposition, why, repair).
+
+    `repair` is None unless RESTORABLE, and then it is the MERGE to perform: an `append` of a row
+    the store lacks, an `amend` adding named fields to a row that is there but incomplete, or an
+    `advance` of a monotonic mark. Never a replacement and never a removal -- the state under
+    repair is the owner's, and a reconciliation that overwrites is not reconciling.
+
+    The question is always about the STATE, never about the command. An effect another route
+    achieved is PRESENT however badly the command failed; an effect the state does not show is
+    absent however cleanly the command exited."""
+    v, ident, ts = a['verb'], a.get('id'), a['ts']
+    q = state.get('open_questions') or {}
+    rq = state.get('resolved_questions') or {}
+    decs = state.get('owner_decisions') or {}
+    queue = (state.get('owner_queue') or []) + (state.get('owner_queue_sent') or [])
+    text = (a.get('text') or '').strip()
+    rest = a.get('rest') or []
+
+    if v == 'queue add':
+        if text and any((x.get('text') or '').strip() == text for x in queue):
+            return PRESENT, 'a queue row carries this text', None
+        if not text or not a.get('text_resolved', True):
+            return MOOT, 'the dropped add carried no text this instrument may write back', None
+        return RESTORABLE, 'no queue row carries this text', {
+            'op': 'append', 'store': 'owner_queue', 'id': ident, 'fields': {'text': text}}
+
+    if v == 'owe add':
+        if ident in decs:
+            return PRESENT, 'the decision is in owner_decisions', None
+        if not text or not a.get('text_resolved', True):
+            return MOOT, 'the dropped add carried no text this instrument may write back', None
+        return RESTORABLE, 'the decision is not in owner_decisions', {
+            'op': 'append', 'store': 'owner_decisions', 'id': ident, 'fields': {'text': text}}
+
+    if v == 'ask':
+        if ident in q:
+            return PRESENT, 'the question is open', None
+        if ident in rq:
+            return PRESENT, 'the question was asked and is resolved', None
+        if not text or not a.get('text_resolved', True):
+            return MOOT, 'the dropped ask carried no text this instrument may write back', None
+        return RESTORABLE, 'the question is in neither store', {
+            'op': 'append', 'store': 'open_questions', 'id': ident, 'fields': {'text': text}}
+
+    if v == 'hold':
+        # A turn hold pauses ONE turn, and that turn ended days before this reconciliation --
+        # which is why `held_turns` is empty. Writing one back would hold a turn that is over.
+        return EXPIRED, 'a turn hold ends with its turn; the turn is long over', None
+
+    if v == 'queue hold':
+        store, row = _queue_row(state, ident)
+        if row is None:
+            return MOOT, 'no queue row with this id -- a hold has nothing to sit on', None
+        held = row.get('hold_until')
+        if not rest:
+            # a bare `queue hold <id>` RELEASES. Its effect is the ABSENCE of hold_until.
+            if not held:
+                return PRESENT, 'the row is not held', None
+            return MOOT, ('restoring a release means removing this row\'s hold, and this '
+                          'instrument never removes -- reported, not repaired'), None
+        if held:
+            return PRESENT, 'the row is held: %r' % str(held)[:60], None
+        if not a.get('rest_resolved', True):
+            return MOOT, 'the hold condition was built by the shell; not ours to write back', None
+        # hold_until is a CONDITION in free text, not a deadline: it is released when the condition
+        # is met, so it cannot lapse on a clock -- the state is simply missing it.
+        return RESTORABLE, 'the row is in the queue and is not held', {
+            'op': 'amend', 'store': store, 'id': ident,
+            'fields': {'hold_until': ' '.join(rest)}}
+
+    if v == 'sent1':
+        store, row = _queue_row(state, ident)
+        if row is None:
+            return MOOT, 'no queue row with this id', None
+        if row.get('sent') or row.get('sent_ts'):
+            return PRESENT, 'the row is marked sent', None
+        return RESTORABLE, 'the row is in the queue and is not marked sent', {
+            'op': 'amend', 'store': store, 'id': ident, 'fields': {'sent': ts}}
+
+    if v == 'resolved':
+        if ident in rq:
+            return PRESENT, 'the question is in resolved_questions', None
+        if ident in q:
+            return MOOT, ('the question is still open; resolving it moves it out of '
+                          'open_questions, and this instrument never removes -- reported'), None
+        return MOOT, 'the question is in neither store -- nothing to resolve', None
+
+    if v in ('owe done', 'owe ungate'):
+        # A CLOSE's effect is its subject being GONE. Where it is gone the effect is PRESENT
+        # however that happened. Where it is still there the repair is a removal, and the owner's
+        # standing rule is "Do not clear any queues".
+        if ident not in decs:
+            return PRESENT, 'the decision is not in owner_decisions', None
+        return MOOT, ('the decision is still there; restoring this close means removing it, '
+                      'and clearing is forbidden -- reported, not repaired'), None
+
+    if v == 'closed':
+        if ident not in q:
+            return PRESENT, 'the question is not open', None
+        return MOOT, 'the question is still open; a close is a removal -- reported', None
+
+    if v == 'nudged':
+        row = q.get(ident) or rq.get(ident)
+        if row is None:
+            return MOOT, 'no question with this id to have been nudged', None
+        if row.get('resends'):
+            return PRESENT, 'the question carries %s resend(s)' % row['resends'], None
+        return RESTORABLE, 'the question carries no resend', {
+            'op': 'amend', 'store': 'open_questions' if ident in q else 'resolved_questions',
+            'id': ident, 'fields': {'resends': 1}}
+
+    if v == 'relayed':
+        # Monotonic: the mark only ever advances, so a later relay carries an earlier one's effect
+        # and an advance can never move the state backwards.
+        cur = state.get('last_relay_ts') or ''
+        if ident and cur >= ident:
+            return PRESENT, 'last_relay_ts %s is at or past this mark' % cur, None
+        if not ident:
+            return MOOT, 'the dropped relay named no mark', None
+        return RESTORABLE, 'last_relay_ts %r is behind this mark' % cur, {
+            'op': 'advance', 'store': 'last_relay_ts', 'id': ident, 'fields': {'to': ident}}
+
+    if v == 'answered':
+        cur = state.get('last_send_ts') or ''
+        if cur >= ts:
+            return PRESENT, 'last_send_ts %s is at or past this action' % cur, None
+        return RESTORABLE, 'last_send_ts %r is behind this action' % cur, {
+            'op': 'advance', 'store': 'last_send_ts', 'id': None, 'fields': {'to': ts}}
+
+    return ELSEWHERE, 'this verb writes no state.json row', None
+
+
+def restorations_owed(acts, state):
+    """Every dropped action, with how its intended effect stands in the state now.
+
+    Returns (worklist, accounted). The worklist is the RESTORABLE ones -- the merges stage 5 will
+    perform. `accounted` is every other dropped action WITH the reason its effect is not restored,
+    so nothing is silently dropped a second time by the instrument built to find what was dropped.
+
+    An action the replay found LANDED is not considered: its effect being absent now means
+    something later undid it, which is the state's history rather than a drop."""
+    work, accounted = [], []
+    for a in acts:
+        if a.get('state', 'live') != 'live':
+            continue
+        if a.get('outcome') in (None, 'superseded'):
+            continue
+        disp, why, repair = effect_disposition(a, state)
+        if a.get('outcome') == 'landed':
+            # It took, and the state does not show it: something LATER removed it, which is the
+            # state's own history rather than a drop -- restoring it would undo a legitimate
+            # close. Reported so it is not silent, never repaired. Distinguishing the two needs
+            # the later action that removed it, which this instrument does not yet identify.
+            #
+            # Only a RESTORABLE effect can be "landed but absent". Where the disposition is
+            # EXPIRED, MOOT or ELSEWHERE that is a fact about the KIND of effect and holds
+            # whether or not the command took -- a turn hold that landed is still gone, and
+            # calling it landed_absent would report a structural fact as an anomaly.
+            if disp == RESTORABLE:
+                accounted.append({'key': action_key(a), 'ts': a['ts'], 'verb': a['verb'],
+                                  'id': a.get('id'), 'outcome': 'landed',
+                                  'disposition': 'landed_absent', 'why': why,
+                                  'text': (a.get('text') or '')[:200],
+                                  'sha256': a.get('sha256', '')})
+            continue
+        row = {'key': action_key(a), 'ts': a['ts'], 'verb': a['verb'], 'id': a.get('id'),
+               'outcome': a['outcome'], 'disposition': disp, 'why': why,
+               'text': (a.get('text') or '')[:200], 'sha256': a.get('sha256', '')}
+        if disp == RESTORABLE:
+            row['repair'] = repair
+            work.append(row)
+        else:
+            accounted.append(row)
+    return work, accounted
+
 
 def outstanding(acts):
     """Live actions whose outcome no evidence has established yet -- and the reconciliation is not

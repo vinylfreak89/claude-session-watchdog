@@ -393,8 +393,151 @@ def test_stage2():
     return fails
 
 
+def test_effect_dispositions():
+    """WHAT A DROPPED ACTION'S EFFECT IS WORTH NOW -- the owner's correction, 2026-09-12:
+
+      "Obviously holds are gone. You can't restore that state. And some of this should still be
+       in queue hold. That's why they are reconciliations. The result is a merge, not an
+       overwrite."
+
+    So a dropped action gets one of five dispositions and only RESTORABLE is a worklist. The other
+    four must be NAMED with a reason: an effect that cannot be restored is accounted for, never
+    silently counted as fine and never manufactured into the state to make a number come out.
+
+    Every case below is decided against the STATE, never against the command -- which is the whole
+    point. An effect another route achieved is PRESENT however badly its command failed."""
+    fails = []
+    def ck(name, got, want):
+        ok = got == want
+        print('%-56s %s%s' % (name, 'PASS' if ok else 'FAIL',
+                              '' if ok else '  got=%r want=%r' % (got, want)))
+        if not ok:
+            fails.append(name)
+
+    state = {
+        'owner_queue': [{'id': 'Q13', 'text': 'a row whose hold was dropped'},
+                        {'id': 'Q20', 'text': 'a held row', 'hold_until': 'until he rules'},
+                        {'id': 'Q42', 'text': 'a sent row', 'sent': '2026-09-11T09:47:30Z'}],
+        'owner_queue_sent': [],
+        'owner_decisions': {'D18': {'text': 'a live decision'}},
+        'open_questions': {'O-FALLBACK': {'text': 'an open question', 'resends': 22},
+                           'O-QUIET': {'text': 'never nudged'}},
+        'resolved_questions': {'O-DONE': {'text': 'a resolved question'}},
+        'held_turns': {},
+        'last_relay_ts': '2026-09-11T09:54:59Z',
+        'last_send_ts': '2026-09-11T09:47:30Z',
+    }
+
+    def dis(**a):
+        a.setdefault('ts', '2026-09-10T00:00:00Z')
+        a.setdefault('outcome', 'failed')
+        d, why, rep = R.effect_disposition(a, state)
+        return d, rep
+
+    # --- the half the owner corrected -------------------------------------------------------
+    d, rep = dis(verb='hold', id='turn-17', rest=['30m'])
+    ck('A TURN HOLD IS GONE AND IS NOT RESTORED', d, R.EXPIRED)
+    ck('and it is not in the worklist', rep, None)
+
+    d, rep = dis(verb='queue hold', id='Q13', rest=['until he rules on the box'],
+                 rest_resolved=True)
+    ck('A QUEUE HOLD ON A ROW STILL IN THE QUEUE IS RESTORED', d, R.RESTORABLE)
+    ck('and it is a MERGE onto that row, not a new row', (rep['op'], rep['store'], rep['id']),
+       ('amend', 'owner_queue', 'Q13'))
+    ck('carrying the condition the command gave it', rep['fields'],
+       {'hold_until': 'until he rules on the box'})
+
+    d, rep = dis(verb='queue hold', id='Q20', rest=['a different condition'], rest_resolved=True)
+    ck('a row that IS held already carries the effect', d, R.PRESENT)
+
+    d, rep = dis(verb='queue hold', id='O-FALLBACK', rest=['its condition'], rest_resolved=True)
+    ck('a hold aimed at something that is not a queue row is moot', d, R.MOOT)
+
+    d, rep = dis(verb='queue hold', id='Q20', rest=[])
+    ck('a bare `queue hold` is a RELEASE, and a removal is never restored', d, R.MOOT)
+
+    d, rep = dis(verb='queue hold', id='Q13', rest=['$COND'], rest_resolved=False)
+    ck('a condition the SHELL built is not ours to write into his state', d, R.MOOT)
+
+    # --- effects the state already carries, however the command went ------------------------
+    d, _ = dis(verb='owe done', id='D1')
+    ck('a close whose decision is gone HAS taken effect', d, R.PRESENT)
+    d, _ = dis(verb='owe done', id='D18')
+    ck('a close whose decision is still there is a removal -- reported', d, R.MOOT)
+    d, _ = dis(verb='nudged', id='O-FALLBACK')
+    ck('a nudge on a question carrying resends has taken effect', d, R.PRESENT)
+    d, rep = dis(verb='nudged', id='O-QUIET')
+    ck('a nudge on a question carrying none is restored', (d, rep['op']),
+       (R.RESTORABLE, 'amend'))
+    d, _ = dis(verb='nudged', id='O-GONE')
+    ck('a nudge on a question that does not exist is moot', d, R.MOOT)
+    d, _ = dis(verb='relayed', id='2026-09-10T00:00:00Z')
+    ck('a relay mark the state is already past has taken effect', d, R.PRESENT)
+    d, rep = dis(verb='relayed', id='2026-12-01T00:00:00Z')
+    ck('a relay mark ahead of the state ADVANCES it', (d, rep['op']), (R.RESTORABLE, 'advance'))
+    d, _ = dis(verb='answered', id=None, ts='2026-09-01T00:00:00Z')
+    ck('an answered mark behind last_send_ts has taken effect', d, R.PRESENT)
+
+    # --- the stores ------------------------------------------------------------------------
+    d, _ = dis(verb='queue add', text='a row whose hold was dropped', text_resolved=True)
+    ck('a queue add whose text is in the queue has taken effect', d, R.PRESENT)
+    d, rep = dis(verb='queue add', text='never made it', text_resolved=True)
+    ck('a queue add the queue does not carry is APPENDED', (d, rep['op']),
+       (R.RESTORABLE, 'append'))
+    d, _ = dis(verb='queue add', text='built by the shell', text_resolved=False)
+    ck('text the SHELL built is not ours to write into his state', d, R.MOOT)
+    d, _ = dis(verb='ask', id='O-DONE', text='x', text_resolved=True)
+    ck('an ask whose question was asked and resolved has taken effect', d, R.PRESENT)
+    d, rep = dis(verb='ask', id='O-NEW', text='a question that never landed', text_resolved=True)
+    ck('an ask in neither store is restored', (d, rep['op']), (R.RESTORABLE, 'append'))
+    d, _ = dis(verb='resolved', id='O-DONE')
+    ck('a resolve whose question is resolved has taken effect', d, R.PRESENT)
+    d, _ = dis(verb='resolved', id='O-FALLBACK')
+    ck('a resolve on a still-open question is a removal -- reported', d, R.MOOT)
+    d, _ = dis(verb='sent1', id='Q42')
+    ck('a sent mark on a row already marked sent has taken effect', d, R.PRESENT)
+    d, rep = dis(verb='sent1', id='Q13')
+    ck('a sent mark on an unmarked row is MERGED onto it', (d, rep['op']),
+       (R.RESTORABLE, 'amend'))
+    d, _ = dis(verb='outcome', id='CITE-b7a94d5')
+    ck('an outcome does not live in state.json at all', d, R.ELSEWHERE)
+
+    # --- the worklist itself ---------------------------------------------------------------
+    acts = [
+        {'ts': 'T1', 'verb': 'hold', 'id': 'turn-17', 'outcome': 'failed', 'cite': 'f:1#0'},
+        {'ts': 'T2', 'verb': 'queue hold', 'id': 'Q13', 'rest': ['until he rules'],
+         'rest_resolved': True, 'outcome': 'failed', 'cite': 'f:2#0'},
+        {'ts': 'T3', 'verb': 'owe done', 'id': 'D1', 'outcome': 'no_effect', 'cite': 'f:3#0'},
+        {'ts': 'T4', 'verb': 'queue add', 'text': 'a row whose hold was dropped',
+         'text_resolved': True, 'outcome': 'landed', 'cite': 'f:4#0'},
+        {'ts': 'T5', 'verb': 'queue add', 'text': 'landed once, gone now',
+         'text_resolved': True, 'outcome': 'landed', 'cite': 'f:5#0'},
+        {'ts': 'T6', 'verb': 'ask', 'id': 'O-X', 'text': 'x', 'text_resolved': True,
+         'outcome': 'failed', 'state': 'scratch', 'cite': 'f:6#0'},
+    ]
+    work, acct = R.restorations_owed(acts, state)
+    ck('only the restorable effect is in the worklist',
+       [(w['verb'], w['id']) for w in work], [('queue hold', 'Q13')])
+    ck('an action on a SCRATCH state is not reconciled at all',
+       any(x['id'] == 'O-X' for x in work + acct), False)
+    ck('every other dropped action is ACCOUNTED FOR, not dropped again',
+       sorted(x['verb'] for x in acct), ['hold', 'owe done', 'queue add'])
+    ck('each accounted action carries the reason its effect is not restored',
+       all(x['why'] for x in acct), True)
+    ck('a LANDED action whose effect is absent is reported, never restored',
+       [(x['verb'], x['disposition']) for x in acct if x['outcome'] == 'landed'],
+       [('queue add', 'landed_absent')])
+    return fails
+
+
 def test_stage5():
-    """Additive repair: existing rows byte-identical, and idempotent."""
+    """THE MERGE. Owner, 2026-09-12: "That's why they are reconciliations. The result is a merge,
+    not an overwrite" -- and the standing rule it rests on, "Do not clear any queues."
+
+    So the repair has three operations and none of them can lose anything the owner has: append a
+    row the store lacks, AMEND fields onto a row that is there but incomplete, and ADVANCE a
+    monotonic mark forward. The invariant is additive at FIELD granularity -- which is what lets an
+    amend complete a partial row without the verification calling that completion tampering."""
     fails = []
     def ck(name, got, want):
         ok = got == want
@@ -407,57 +550,106 @@ def test_stage5():
     try:
         st = os.path.join(d, 'state')
         os.makedirs(st)
-        original = {'owner_queue': [{'id': 'Q9', 'text': 'an existing row', 'sent': 'yes'}],
+        original = {'owner_queue': [{'id': 'Q9', 'text': 'an existing row', 'sent': 'yes'},
+                                    {'id': 'Q13', 'text': 'a row whose HOLD was dropped'}],
                     'owner_decisions': {'D9': {'text': 'an existing decision'}},
-                    'open_questions': {}, 'owner_decision_seq': 9, 'unrelated': [1, 2, 3]}
+                    'open_questions': {}, 'owner_decision_seq': 9, 'unrelated': [1, 2, 3],
+                    'last_relay_ts': '2026-09-09T00:00:00Z'}
         p = os.path.join(st, 'state.json')
         json.dump(original, open(p, 'w'))
         before = json.dumps(json.load(open(p)), sort_keys=True)
 
-        restores = [{'store': 'owner_queue', 'id': 'R1', 'text': 'a recovered owner item',
-                     'cite': 'f:10#0', 'sha256': 'a' * 64, 'now': 'T'},
-                    {'store': 'owner_decisions', 'id': 'D10', 'text': 'a recovered decision',
-                     'cite': 'f:11#0', 'sha256': 'b' * 64, 'now': 'T'}]
+        restores = [
+            {'op': 'append', 'store': 'owner_queue', 'id': 'R1',
+             'fields': {'text': 'a recovered owner item'},
+             'cite': 'f:10#0', 'sha256': 'a' * 64, 'now': 'T'},
+            {'op': 'append', 'store': 'owner_decisions', 'id': 'D10',
+             'fields': {'text': 'a recovered decision'},
+             'cite': 'f:11#0', 'sha256': 'b' * 64, 'now': 'T'},
+            # the owner's correction in one row: the item is still in the queue and its hold is
+            # gone, so the hold is MERGED back onto the row that is already there
+            {'op': 'amend', 'store': 'owner_queue', 'id': 'Q13',
+             'fields': {'hold_until': 'until he rules on the box'},
+             'cite': 'f:12#0', 'sha256': 'c' * 64, 'now': 'T'},
+            {'op': 'advance', 'store': 'last_relay_ts', 'id': '2026-09-10T00:00:00Z',
+             'fields': {'to': '2026-09-10T00:00:00Z'}, 'cite': 'f:13#0', 'sha256': 'd' * 64,
+             'now': 'T'},
+        ]
 
         res = R.stage5_repair(st, restores, apply=False)
-        ck('dry run does not write', json.dumps(json.load(open(p)), sort_keys=True), before)
-        ck('dry run reports what it would add', len(res['added']), 2)
+        ck('a dry run writes nothing', json.dumps(json.load(open(p)), sort_keys=True), before)
+        ck('a dry run reports what it would append', len(res['added']), 2)
+        ck('a dry run reports what it would amend', len(res['amended']), 1)
+        ck('a dry run reports what it would advance', len(res['advanced']), 1)
 
         R.stage5_repair(st, restores, apply=True)
         d2 = json.load(open(p))
-        ck('the existing queue row is untouched',
-           [x for x in d2['owner_queue'] if x['id'] == 'Q9'], original['owner_queue'])
+        q = {x['id']: x for x in d2['owner_queue']}
+        ck('the existing queue row is untouched', q['Q9'], original['owner_queue'][0])
         ck('the existing decision is untouched', d2['owner_decisions']['D9'],
            original['owner_decisions']['D9'])
         ck('unrelated keys are untouched', d2['unrelated'], [1, 2, 3])
-        ck('the recovered item is appended', len(d2['owner_queue']), 2)
+        ck('the recovered item is appended', len(d2['owner_queue']), 3)
         ck('the recovered decision is appended', 'D10' in d2['owner_decisions'], True)
-        ck('the restore carries its citation',
-           d2['owner_queue'][1]['restored_from'], 'f:10#0')
-        ck('the restore carries its hash', d2['owner_queue'][1]['restored_sha256'], 'a' * 64)
+        ck('THE HOLD IS MERGED ONTO THE ROW THAT IS ALREADY THERE',
+           q['Q13'].get('hold_until'), 'until he rules on the box')
+        ck('and the amended row keeps the text it had',
+           q['Q13']['text'], 'a row whose HOLD was dropped')
+        ck('and the amend is NOT a second row', len([x for x in d2['owner_queue']
+                                                    if x['id'] == 'Q13']), 1)
+        ck('and it says which fields it restored', q['Q13'].get('restored_fields'),
+           ['hold_until'])
+        ck('the monotonic mark advanced', d2['last_relay_ts'], '2026-09-10T00:00:00Z')
+        ck('the restore carries its citation', q['R1']['restored_from'], 'f:10#0')
+        ck('the restore carries its hash', q['R1']['restored_sha256'], 'a' * 64)
 
         again = R.stage5_repair(st, restores, apply=True)
         d3 = json.load(open(p))
-        ck('re-running adds nothing (idempotent)', len(d3['owner_queue']), 2)
-        ck('re-running reports the duplicates it skipped', len(again['skipped_duplicate']), 2)
+        ck('re-running appends nothing (idempotent)', len(d3['owner_queue']), 3)
+        ck('re-running amends nothing', len(again['amended']), 0)
+        ck('re-running advances nothing', len(again['advanced']), 0)
+        ck('re-running reports what it skipped', len(again['skipped']), 4)
 
-        # a repair that would modify an existing row must REFUSE
-        broke = False
-        try:
-            bad = json.load(open(p))
-            bad['owner_queue'][0]['text'] = 'mutated'
-            json.dump(bad, open(p, 'w'))
-            R.stage5_repair(st, [], apply=False)
-        except AssertionError:
-            broke = True
-        except Exception:
-            broke = False
-        print('%-56s %s' % ('(existing-row guard is checked against the input)',
-                            'n/a -- guard compares before/after within one call'))
+        # an amend may never OVERWRITE a field the row already carries: a reconciliation that
+        # replaces what the owner put there is not reconciling. It is skipped, not applied.
+        res = R.stage5_repair(st, [{'op': 'amend', 'store': 'owner_queue', 'id': 'Q9',
+                                    'fields': {'text': 'MUTATED'}, 'cite': 'f:9#0',
+                                    'sha256': 'e' * 64, 'now': 'T'}], apply=True)
+        ck('an amend never overwrites an existing field',
+           json.load(open(p))['owner_queue'][0]['text'], 'an existing row')
+        ck('and says it skipped it', len(res['amended']), 0)
+
+        # an amend whose row is absent CREATES NOTHING -- a merge has nothing to merge into
+        res = R.stage5_repair(st, [{'op': 'amend', 'store': 'owner_queue', 'id': 'NOSUCH',
+                                    'fields': {'hold_until': 'x'}, 'cite': 'f:8#0',
+                                    'sha256': 'f' * 64, 'now': 'T'}], apply=True)
+        ck('an amend with no row to amend creates nothing',
+           len(json.load(open(p))['owner_queue']), 3)
+
+        # a monotonic mark may never go BACKWARDS, however the worklist asks
+        R.stage5_repair(st, [{'op': 'advance', 'store': 'last_relay_ts', 'id': 'x',
+                              'fields': {'to': '2026-01-01T00:00:00Z'}, 'cite': 'f:7#0',
+                              'sha256': '0' * 64, 'now': 'T'}], apply=True)
+        ck('a monotonic mark never moves backwards',
+           json.load(open(p))['last_relay_ts'], '2026-09-10T00:00:00Z')
+
+        # CONTROL: the additive guard must FAIL on a removal, or it guarantees nothing
+        broke = []
+        for mut, why in ((lambda x: x['owner_queue'].pop(0), 'a removed queue row'),
+                         (lambda x: x['owner_decisions'].pop('D9'), 'a removed decision'),
+                         (lambda x: x['owner_queue'][0].__setitem__('text', 'M'),
+                          'a changed field')):
+            cur = json.load(open(p))
+            mut(cur)
+            try:
+                R._verify_additive(json.load(open(p)), cur)
+                broke.append(why)
+            except AssertionError:
+                pass
+        ck('CONTROL: the additive guard refuses every removal and edit', broke, [])
         return fails
     finally:
         shutil.rmtree(d, ignore_errors=True)
-
 
 
 def test_tm_reader():
@@ -775,73 +967,27 @@ def test_cli_all_stages():
         ck('and names its prerequisite',
            ('REFUSED' in out and any(w in out for w in ('wrapper', 'drive', 'roots', 'snapshots'))), True)
 
-        # stage 4 with nothing restored says so rather than passing silently
+        # Stages 4 and 5 run off the WORKLIST stage 3 derives -- every dropped action whose
+        # intended effect the state does not carry. Before stage 3 there is no worklist, and
+        # both must say so by name rather than reporting "nothing to do", which is the
+        # unmeasured-zero this reconciliation kept mistaking for a finding of nothing.
         rc, out = run('--stage', '4', '--proj', d)
-        ck('stage 4 with no restores says so', 'nothing restored yet' in out, True)
-
-        # stage 5 with nothing validated refuses to write
+        ck('stage 4 before stage 3 refuses and names it',
+           (rc != 0, 'stage 3 first' in out), (True, True))
         rc, out = run('--stage', '5')
-        ck('stage 5 with nothing validated writes nothing',
-           'nothing validated' in out, True)
+        ck('stage 5 before stage 3 refuses and names it',
+           (rc != 0, 'stage 3 first' in out), (True, True))
         before = json.load(open(os.path.join(st, 'state.json')))
         ck('and state.json is untouched', before.get('owner_queue'), [])
 
-        # --- the supersession FIXED POINT ------------------------------------------------
-        run('--restore', 'first recovered item, long enough to be real words',
-            '--evidence', 'fixture:1#0')
-        led = json.load(open(os.path.join(ld, 'reconcile.json')))
-        ck('a restore bumps the pass counter', led.get('pass'), 1)
-        ck('and lands unvalidated', led['restored'][0]['validated_pass'], None)
-
-        run('--validate', '0', '--evidence', 'scanned forward, nothing supersedes it')
-        led = json.load(open(os.path.join(ld, 'reconcile.json')))
-        ck('validating marks it at the current pass', led['restored'][0]['validated_pass'], 1)
+        # an underived worklist is NOT an empty one: confidence must read 0 on that axis and
+        # --complete must refuse. This is the defect that let the instrument report 100 with
+        # nothing restored -- the axis only existed once a restore had been recorded by hand.
         rc, out = run()
-        ck('no supersession check outstanding now', 'supersession check owed' in out, False)
-
-        # a SECOND restore must invalidate the first -- the recursion, enforced
-        run('--restore', 'second recovered item, also long enough to be real words',
-            '--evidence', 'fixture:2#0')
-        led = json.load(open(os.path.join(ld, 'reconcile.json')))
-        ck('a second restore bumps the pass', led.get('pass'), 2)
-        ck('the FIRST restore is invalidated again',
-           led['restored'][0]['validated_pass'], None)
-        ck('the second is unvalidated too', led['restored'][1]['validated_pass'], None)
-        rc, out = run()
-        ck('both are reported outstanding', '2 restore(s) unvalidated' in out, True)
-
-        # a superseded candidate is recorded as such and must NOT be repaired in
-        run('--validate', '0', '--evidence', 'he answered this later', '--superseded')
-        run('--validate', '1', '--evidence', 'nothing supersedes it')
-        led = json.load(open(os.path.join(ld, 'reconcile.json')))
-        ck('the superseded one is flagged', led['restored'][0]['superseded'], True)
-        ck('the surviving one is not', led['restored'][1]['superseded'], False)
-
-        # stage 5 is the ONLY stage that writes the state under reconciliation, so it may not
-        # run until the reconciliation is complete (owner, 2026-09-12). The dry run is allowed.
-        rc, out = run('--stage', '5', '--apply')
-        ck('stage 5 --apply REFUSES while the reconciliation is incomplete',
-           (rc != 0, 'not complete' in out), (True, True))
-        ck('and the live state is untouched by that refusal',
-           json.load(open(os.path.join(st, 'state.json'))).get('owner_queue'), [])
-        rc, out = run('--stage', '5')
-        ck('a stage 5 DRY RUN is still allowed while incomplete', 'dry run' in out, True)
-        _lp = os.path.join(ld, 'reconcile.json')
-        _led = json.load(open(_lp)); _led['complete'] = True
-        json.dump(_led, open(_lp, 'w'))
-
-        rc, out = run('--stage', '5', '--apply')
-        d2 = json.load(open(os.path.join(st, 'state.json')))
-        ck('stage 5 repairs only the survivor once complete', len(d2.get('owner_queue') or []), 1)
-        ck('the superseded item is NOT reinstated',
-           any('first recovered' in (x.get('text') or '') for x in d2['owner_queue']), False)
-        ck('the survivor is reinstated',
-           any('second recovered' in (x.get('text') or '') for x in d2['owner_queue']), True)
-
-        # re-running the repair is idempotent through the CLI too
-        run('--stage', '5', '--apply')
-        d3 = json.load(open(os.path.join(st, 'state.json')))
-        ck('re-running the repair adds nothing', len(d3['owner_queue']), 1)
+        ck('an underived worklist scores 0, not 100',
+           'restores 0' in out.replace('%', ''), True)
+        ck('and outstanding says the worklist was never derived',
+           'never been derived' in out, True)
 
         # stage 3 without a target REFUSES by name rather than replaying against any session
         rc, out = run('--stage', '3', '--proj', d, '--self-prefix', '80f99b89')
@@ -2394,6 +2540,14 @@ def pending_corpus():
     # hold -- the real line is `holding <ts>: <reason>`
     R_ += RS.bash(T0(5), './wd.sh hold %s "blocked on the owner" >/dev/null' % T0(4, 55), '')
 
+    # A DROPPED EFFECT THE STATE MUST GET BACK, and the owner's own case for it (2026-09-12):
+    # "some of this should still be in queue hold." The hold never ran -- the && link before it
+    # failed -- so Q8 sits in the queue unheld, and the row is still there to be merged onto.
+    # The turn hold above is the other half of his correction: it is gone and stays gone.
+    R_ += RS.bash(T0(5, 30),
+                  './wd.sh nudged K404 && ./wd.sh queue hold Q8 "until he rules on the box"',
+                  'no open question K404')
+
     # ask, nudged, resolved
     R_ += RS.bash(T0(6), './wd.sh ask K9 "is the bar part of the box?" >/dev/null', '')
     R_ += RS.send(T0(6, 30), 'nudge: is the bar part of the box?')
@@ -2780,6 +2934,52 @@ def test_reaches_a_hundred():
         ck('every hour is done without a tm part', all(h['status'] == 'done' for h in hrs.values()), True)
         ck('and no hour was given a tm part it never had',
            any('tm' in h['parts'] for h in hrs.values()), False)
+
+        # THE RESTORE GATE. Owner, 2026-09-12: "100 % means the things you silently dropped, are
+        # no longer in the state and have not had their intended effect restored into the state.
+        # That is supposed to be the final outcome." So with a dropped effect still missing from
+        # the state, 100 must be UNREACHABLE however completely the record has been read.
+        rc, out = run()
+        ck('a dropped effect the state lacks holds confidence below 100',
+           'conf 100' in out, False)
+        ck('and it is named as outstanding', 'not restored into the state' in out, True)
+        rc, out = run('--complete')
+        ck('--complete REFUSES while a dropped effect is unrestored', rc, 1)
+
+        # the worklist is derived from the STATE, and it is the hold that never ran
+        owedw = led()['owed']
+        ck('the worklist holds exactly the dropped effect',
+           [(w['verb'], w['id'], w['repair']['op']) for w in owedw],
+           [('queue hold', 'Q8', 'amend')])
+        ck('the TURN hold is accounted for as gone, not restored',
+           [x['disposition'] for x in led()['accounted'] if x['verb'] == 'hold'], ['expired'])
+
+        # stage 5 refuses until the supersession check has run at this pass
+        rc, out = run('--stage', '5', '--apply')
+        ck('stage 5 --apply refuses before the supersession check', (rc != 0, 'stage 4' in out),
+           (True, True))
+        rc, out = run('--stage', '4', '--proj', d, '--self-prefix', '80f99b89')
+        ck('stage 4 checks the worklist for supersession', 'worklist item(s) checked' in out, True)
+
+        # a DRY RUN never writes, however settled the reconciliation is
+        qbefore = json.load(open(os.path.join(st, 'state.json')))['owner_queue']
+        heldbefore = json.load(open(os.path.join(st, 'state.json'))).get('held_turns') or {}
+        rc, out = run('--stage', '5')
+        ck('a dry run says what it would merge', 'DRY RUN' in out, True)
+        ck('and writes nothing',
+           json.load(open(os.path.join(st, 'state.json')))['owner_queue'], qbefore)
+
+        rc, out = run('--stage', '5', '--apply')
+        ck('stage 5 merges the dropped effect', 'amended' in out, True)
+        q8 = [x for x in json.load(open(os.path.join(st, 'state.json')))['owner_queue']
+              if x['id'] == 'Q8']
+        ck('THE HOLD IS BACK ON THE ROW THAT WAS ALREADY THERE',
+           q8[0].get('hold_until'), 'until he rules on the box')
+        ck('and the row keeps the text it had',
+           q8[0]['text'], 'REVISED first -- rewritten in place')
+        ck('and it is one row, not two', len(q8), 1)
+        ck('and the merge added NO turn hold -- held_turns is untouched',
+           json.load(open(os.path.join(st, 'state.json'))).get('held_turns') or {}, heldbefore)
 
         rc, out = run()
         ck('confidence reaches 100 with Time Machine never consulted', 'conf 100' in out, True)
@@ -3576,6 +3776,7 @@ def main():
         print('\n--- CLI: stages 2-5 and the supersession fixed point ---')
         fails.extend(_guarded(test_cli_all_stages))
         print('\n--- stage 5: additive repair ---')
+        fails.extend(_guarded(test_effect_dispositions))
         fails.extend(_guarded(test_stage5))
         print('\n--- repeated replies and peer senders ---')
         fails.extend(_guarded(test_repeats_and_peers))
