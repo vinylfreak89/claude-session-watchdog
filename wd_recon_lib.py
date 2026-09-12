@@ -1618,17 +1618,25 @@ def effect_disposition(a, state, acts=(), chains=None):
         # those to open_questions would re-open 56 answered questions and nag the owner with
         # them -- a repair worse than the drop. What is owed is the effect the chain INTENDED,
         # which for a resolved question is its archived row.
+        # A question's row carries its RESEND COUNT, and the nudges that produced it were
+        # destroyed with it. Reconstructing the row without them leaves 29 nudges restorable on
+        # a second pass -- the fixed point would reach the same place, but the row is more
+        # faithful built whole, and a repair that needs a second pass to finish a single row is
+        # a repair that can be interrupted half-done.
+        nudges = sum(1 for x in acts if x.get('verb') == 'nudged' and x.get('id') == ident
+                     and x.get('outcome') == 'landed' and x.get('state', 'live') == 'live')
         done = later_landed(a, acts, ('resolved', 'closed'))
         if done:
             return RESTORABLE, 'asked and later resolved; neither store carries it', {
                 'op': 'append', 'store': 'resolved_questions', 'id': ident,
                 'fields': {'text': text, 'asked_ts': a['ts'], 'resolved_ts': done['ts'],
+                           'resends': nudges,
                            'resolved_reason': 'restored by reconciliation: the ask and its '
                                               'resolve both landed and the row is in neither '
                                               'store'}}
         return RESTORABLE, 'the question is open and is in neither store', {
             'op': 'append', 'store': 'open_questions', 'id': ident,
-            'fields': {'text': text, 'asked_ts': a['ts']}}
+            'fields': {'text': text, 'asked_ts': a['ts'], 'resends': nudges}}
 
     if v == 'hold':
         # A turn hold pauses ONE turn, and that turn ended days before this reconciliation --

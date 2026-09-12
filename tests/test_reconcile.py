@@ -523,6 +523,20 @@ def test_effect_dispositions():
         {'ts': 'T6', 'verb': 'ask', 'id': 'O-X', 'text': 'x', 'text_resolved': True,
          'outcome': 'failed', 'state': 'scratch', 'cite': 'f:6#0'},
     ]
+    # The row must come back WHOLE: a question's resend count was destroyed with it, and a row
+    # rebuilt without it leaves its nudges restorable on a second pass.
+    nud = [
+        {'ts': 'TN1', 'verb': 'ask', 'id': 'O-NUDGED', 'text': 'asked, nudged twice, resolved',
+         'text_resolved': True, 'outcome': 'landed', 'cite': 'f:n1#0'},
+        {'ts': 'TN2', 'verb': 'nudged', 'id': 'O-NUDGED', 'outcome': 'landed', 'cite': 'f:n2#0'},
+        {'ts': 'TN3', 'verb': 'nudged', 'id': 'O-NUDGED', 'outcome': 'landed', 'cite': 'f:n3#0'},
+        {'ts': 'TN4', 'verb': 'nudged', 'id': 'O-NUDGED', 'outcome': 'failed', 'cite': 'f:n4#0'},
+        {'ts': 'TN5', 'verb': 'resolved', 'id': 'O-NUDGED', 'outcome': 'landed', 'cite': 'f:n5#0'},
+    ]
+    nw, _ = R.restorations_owed(nud, state)
+    ck('a restored question carries the resends its nudges produced',
+       [w['repair']['fields'].get('resends') for w in nw if w['id'] == 'O-NUDGED'], [2])
+
     # An id raised twice: asked, resolved, asked again. resolved_questions holds ONE row per id,
     # so only the last cycle can be represented and the earlier one is recorded as such -- not
     # left to win by reaching the appending loop first, which is what happened on the real state.
