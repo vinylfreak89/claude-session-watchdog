@@ -294,10 +294,14 @@ def outstanding(L):
 def tm_note(L):
     """What Time Machine contributed, in one line. Never owed -- it is the additional check --
     but never silent either: a run that reached 100 without the drive says so."""
-    if L.get('stage2'):
+    s2 = L.get('stage2') or {}
+    if s2:
         pend = [k for k, v in L['snapshots'].items() if v.get('status') == 'pending']
-        return ('Time Machine: %d snapshot(s) in the window, %d unvisited (the additional check)'
-                % (len(L['snapshots']), len(pend)))
+        return ('Time Machine: %d backup(s), %d readable, %d unreadable, %d unvisited; %d dated '
+                'drop(s) (the additional check -- reported, never scored)'
+                % (len(L['snapshots']), len(s2.get('readable') or []),
+                   len(s2.get('unreadable') or []), len(pend),
+                   len(s2.get('disappearances') or {})))
     return 'Time Machine: never consulted -- the additional check was not run'
 
 
@@ -321,13 +325,19 @@ def confidence(L):
     # pendings has an answer somewhere. figure it out. until it gets to 100."
     # Whether the drive was never consulted or was read and found nothing is a real difference, and
     # it is recorded in stage2 rather than smuggled into a score that cannot express it.
-    OPTIONAL = ('snapshots', 'chains', 'deliveries', 'hashes')
+    OPTIONAL = ('chains', 'deliveries', 'hashes')
     for name, key in (('actions', 'actions'), ('state-keys', 'state_keys'),
                       ('snapshots', 'snapshots'), ('records', 'records'), ('chains', 'chains'),
                       ('deliveries', 'deliveries'), ('hashes', 'hashes')):
         seen, total = a.get(key, [0, 0])[0], a.get(key, [0, 0])[1]
         # a MEASURED zero is nothing owed; an unmeasured count is owed unless its source is optional
-        cov.append((name, 100 * seen // total if total else (100 if key in OPTIONAL else 0)))
+        v = 100 * seen // total if total else (100 if key in OPTIONAL else 0)
+        # SNAPSHOTS ARE REPORTED, NEVER SCORED. A thinned or unreadable backup is a property of
+        # the drive, not a gap in the reconciliation, and the owner's ruling is that Time Machine
+        # is the additional check: "it is not necessary". Scoring it capped a run whose record was
+        # wholly answered at 84 because four backups in the window no longer exist -- a number no
+        # amount of reading could ever raise. What it FOUND is in stage 2 and in `tm_note`.
+        cov.append((name, 100 if key == 'snapshots' else v))
     return (min(v for _, v in cov) if cov else 0), cov
 
 
