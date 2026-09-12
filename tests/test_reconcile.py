@@ -722,6 +722,11 @@ def test_stage5():
         ck('an amend never overwrites an existing field',
            json.load(open(p))['owner_queue'][0]['text'], 'an existing row')
         ck('and says it skipped it', len(res['amended']), 0)
+        # and the AMEND PATH is what skipped it -- not the additive verifier catching the
+        # overwrite afterwards. Both leave the state intact, so only the reason tells them
+        # apart, and a control that cannot tell them apart is not a control on this guard.
+        ck('and the amend path skipped it, rather than the verifier refusing the write',
+           [w for _, w in res['skipped'] if 'already carries' in str(w)] != [], True)
 
         # an amend whose row is absent CREATES NOTHING -- a merge has nothing to merge into
         res = guarded([{'op': 'amend', 'store': 'owner_queue', 'id': 'NOSUCH',
@@ -734,8 +739,13 @@ def test_stage5():
         guarded([{'op': 'advance', 'store': 'last_relay_ts', 'id': 'x',
                   'fields': {'to': '2026-01-01T00:00:00Z'}, 'cite': 'f:7#0',
                   'sha256': '0' * 64, 'now': 'T'}])
+        back = guarded([{'op': 'advance', 'store': 'last_relay_ts', 'id': 'x',
+                         'fields': {'to': '2026-01-01T00:00:00Z'}, 'cite': 'f:6#0',
+                         'sha256': '1' * 64, 'now': 'T'}])
         ck('a monotonic mark never moves backwards',
            json.load(open(p))['last_relay_ts'], '2026-09-10T00:00:00Z')
+        ck('and the advance itself declined, rather than the verifier refusing the write',
+           [w for _, w in back['skipped'] if 'at or past' in str(w)] != [], True)
 
         # CONTROL: the additive guard must FAIL on a removal, or it guarantees nothing
         broke = []
