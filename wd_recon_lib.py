@@ -1513,7 +1513,17 @@ def _queue_row(state, ident):
     return None, None
 
 
-def effect_disposition(a, state):
+def later_landed(a, acts, verbs, same_id=True):
+    """The first LATER action of mine that took and is one of `verbs`, for this id."""
+    for x in sorted([y for y in acts if y['ts'] > a['ts']], key=lambda y: y['ts']):
+        if x.get('outcome') != 'landed' or x.get('state', 'live') != 'live':
+            continue
+        if x['verb'] in verbs and (not same_id or x.get('id') == a.get('id')):
+            return x
+    return None
+
+
+def effect_disposition(a, state, acts=()):
     """How this action's intended effect stands in the state NOW: (disposition, why, repair).
 
     `repair` is None unless RESTORABLE, and then it is the MERGE to perform: an `append` of a row
@@ -1533,12 +1543,21 @@ def effect_disposition(a, state):
     rest = a.get('rest') or []
 
     if v == 'queue add':
+        if ident and any(x.get('id') == ident for x in queue):
+            return PRESENT, 'the queue row %s is there' % ident, None
         if text and any((x.get('text') or '').strip() == text for x in queue):
             return PRESENT, 'a queue row carries this text', None
         if not text or not a.get('text_resolved', True):
             return MOOT, 'the dropped add carried no text this instrument may write back', None
+        sent = later_landed(a, acts, ('queue clear',), same_id=False) or \
+            later_landed(a, acts, ('sent1',))
+        if sent:
+            return RESTORABLE, 'added and later sent; neither store carries it', {
+                'op': 'append', 'store': 'owner_queue_sent', 'id': ident,
+                'fields': {'text': text, 'ts': a['ts'], 'sent_ts': sent['ts']}}
         return RESTORABLE, 'no queue row carries this text', {
-            'op': 'append', 'store': 'owner_queue', 'id': ident, 'fields': {'text': text}}
+            'op': 'append', 'store': 'owner_queue', 'id': ident,
+            'fields': {'text': text, 'ts': a['ts']}}
 
     if v == 'owe add':
         if ident in decs:
@@ -1555,8 +1574,22 @@ def effect_disposition(a, state):
             return PRESENT, 'the question was asked and is resolved', None
         if not text or not a.get('text_resolved', True):
             return MOOT, 'the dropped ask carried no text this instrument may write back', None
-        return RESTORABLE, 'the question is in neither store', {
-            'op': 'append', 'store': 'open_questions', 'id': ident, 'fields': {'text': text}}
+        # WHERE it goes is decided by the rest of its chain, not by this action alone. Every one
+        # of the questions dropped from the real state was RESOLVED afterwards, and appending
+        # those to open_questions would re-open 56 answered questions and nag the owner with
+        # them -- a repair worse than the drop. What is owed is the effect the chain INTENDED,
+        # which for a resolved question is its archived row.
+        done = later_landed(a, acts, ('resolved', 'closed'))
+        if done:
+            return RESTORABLE, 'asked and later resolved; neither store carries it', {
+                'op': 'append', 'store': 'resolved_questions', 'id': ident,
+                'fields': {'text': text, 'asked_ts': a['ts'], 'resolved_ts': done['ts'],
+                           'resolved_reason': 'restored by reconciliation: the ask and its '
+                                              'resolve both landed and the row is in neither '
+                                              'store'}}
+        return RESTORABLE, 'the question is open and is in neither store', {
+            'op': 'append', 'store': 'open_questions', 'id': ident,
+            'fields': {'text': text, 'asked_ts': a['ts']}}
 
     if v == 'hold':
         # A turn hold pauses ONE turn, and that turn ended days before this reconciliation --
@@ -1646,6 +1679,54 @@ def effect_disposition(a, state):
     return ELSEWHERE, 'this verb writes no state.json row', None
 
 
+# Which stores ARCHIVE on close and which DELETE. Measured in the scripts, not assumed, because
+# the whole question of whether an absent row was dropped or closed turns on it:
+#
+#   `resolved`    wd_check.py:492  moves the question into resolved_questions -- "ARCHIVE, NEVER
+#                                  DESTROY", with its own control (tests/test_resolved_archives.py)
+#   `queue clear` wd_wake.py:674   moves the row into owner_queue_sent
+#   `owe done`    wd_wake.py:594   `owe.pop(...)` -- DELETES, keeping nothing
+#
+# So for a question or a queue row, being in NEITHER the live store nor its archive is proof that
+# nothing closed it: a close would have left it in the archive. For a decision it proves nothing,
+# because a close leaves no trace at all.
+ARCHIVES_ON_CLOSE = {'ask': 'a resolve ARCHIVES into resolved_questions',
+                     'queue add': 'a queue clear MOVES the row into owner_queue_sent'}
+
+
+def explained_by_later(a, acts):
+    """An effect that TOOK and is gone now: does a later action of mine account for it?
+
+    Returns the reason, or None if nothing explains it. This is what separates a state's own
+    history from a silent drop, and it has to be decided rather than assumed in either direction:
+    assuming a legitimate close hides the drop, and assuming a drop restores what was deliberately
+    closed. Both were live possibilities here until the scripts were read.
+
+    Only LANDED later actions count. One that failed removed nothing."""
+    v, ident, ts = a['verb'], a.get('id'), a['ts']
+    if v in ARCHIVES_ON_CLOSE:
+        # nothing can explain it: every close path for these keeps the row somewhere
+        return None
+    later = [x for x in acts if x['ts'] > ts and x.get('outcome') == 'landed'
+             and x.get('state', 'live') == 'live']
+    if v == 'owe add':
+        if any(x['verb'] in ('owe done', 'owe-clear') and x.get('id') == ident for x in later):
+            return 'a later `owe done` cleared it, and that path deletes rather than archives'
+        return None
+    if v == 'queue hold':
+        # a bare `queue hold <id>` RELEASES. That is the one thing that legitimately un-holds a row.
+        if any(x['verb'] == 'queue hold' and x.get('id') == ident and not (x.get('rest') or [])
+               for x in later):
+            return 'a later bare `queue hold %s` released it' % ident
+        if any(x['verb'] in ('queue clear', 'sent1') and (x.get('id') in (None, ident))
+               for x in later):
+            return 'a later send moved the row out of the live queue'
+        return None
+    if v == 'nudged':
+        return 'a resend count is not carried once its question moves'
+    return 'no rule yet says what may legitimately remove this effect'
+
+
 def restorations_owed(acts, state):
     """Every dropped action, with how its intended effect stands in the state now.
 
@@ -1661,8 +1742,12 @@ def restorations_owed(acts, state):
             continue
         if a.get('outcome') in (None, 'superseded'):
             continue
-        disp, why, repair = effect_disposition(a, state)
-        if a.get('outcome') == 'landed':
+        disp, why, repair = effect_disposition(a, state, acts)
+        if disp == PRESENT:
+            continue                      # the state carries it; nothing is owed either way
+        explained = (explained_by_later(a, acts) if a.get('outcome') == 'landed'
+                     else None)
+        if a.get('outcome') == 'landed' and explained and disp == RESTORABLE:
             # It took, and the state does not show it: something LATER removed it, which is the
             # state's own history rather than a drop -- restoring it would undo a legitimate
             # close. Reported so it is not silent, never repaired. Distinguishing the two needs
@@ -1675,7 +1760,7 @@ def restorations_owed(acts, state):
             if disp == RESTORABLE:
                 accounted.append({'key': action_key(a), 'ts': a['ts'], 'verb': a['verb'],
                                   'id': a.get('id'), 'outcome': 'landed',
-                                  'disposition': 'landed_absent', 'why': why,
+                                  'disposition': 'closed_later', 'why': explained,
                                   'text': (a.get('text') or '')[:200],
                                   'sha256': a.get('sha256', '')})
             continue

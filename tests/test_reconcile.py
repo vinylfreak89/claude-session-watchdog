@@ -510,23 +510,60 @@ def test_effect_dispositions():
         {'ts': 'T3', 'verb': 'owe done', 'id': 'D1', 'outcome': 'no_effect', 'cite': 'f:3#0'},
         {'ts': 'T4', 'verb': 'queue add', 'text': 'a row whose hold was dropped',
          'text_resolved': True, 'outcome': 'landed', 'cite': 'f:4#0'},
-        {'ts': 'T5', 'verb': 'queue add', 'text': 'landed once, gone now',
+        # a queue add that TOOK and whose row is in neither the queue nor its archive. The
+        # clear path MOVES rows into owner_queue_sent, so nothing legitimate removed this one:
+        # it was dropped, and it is restored.
+        {'ts': 'T5', 'verb': 'queue add', 'id': 'Q77', 'text': 'landed once, gone now',
          'text_resolved': True, 'outcome': 'landed', 'cite': 'f:5#0'},
+        # the SAME shape, explained: a later owe done deletes rather than archives, so the
+        # decision being gone is that close and not a drop
+        {'ts': 'T7', 'verb': 'owe add', 'id': 'D77', 'text': 'closed later',
+         'text_resolved': True, 'outcome': 'landed', 'cite': 'f:7#0'},
+        {'ts': 'T8', 'verb': 'owe done', 'id': 'D77', 'outcome': 'landed', 'cite': 'f:8#0'},
         {'ts': 'T6', 'verb': 'ask', 'id': 'O-X', 'text': 'x', 'text_resolved': True,
          'outcome': 'failed', 'state': 'scratch', 'cite': 'f:6#0'},
     ]
+    # THE CHAIN, not its first link. A question that was asked and LATER RESOLVED, whose row is
+    # in neither store, is owed its ARCHIVED form -- appending it to open_questions would re-open
+    # a question the owner already answered. On the real state every single dropped question was
+    # in exactly this position, so this is the difference between a repair and 56 false nags.
+    chain = acts + [
+        {'ts': 'T9', 'verb': 'ask', 'id': 'O-CHAIN', 'text': 'asked then answered',
+         'text_resolved': True, 'outcome': 'landed', 'cite': 'f:9#0'},
+        {'ts': 'TA', 'verb': 'resolved', 'id': 'O-CHAIN', 'outcome': 'landed', 'cite': 'f:a#0'},
+    ]
+    cw, _ = R.restorations_owed(chain, state)
+    ch = [w for w in cw if w['id'] == 'O-CHAIN']
+    ck('a dropped question that was RESOLVED is restored to the ARCHIVE',
+       [(w['repair']['store'], w['repair']['op']) for w in ch],
+       [('resolved_questions', 'append')])
+    ck('and it is NOT re-opened', [w for w in ch
+                                   if w['repair']['store'] == 'open_questions'], [])
+    ck('and it carries when it was resolved',
+       ch[0]['repair']['fields'].get('resolved_ts'), 'TA')
+    # the SAME ask with no resolve after it is owed as OPEN
+    cw2, _ = R.restorations_owed(chain[:-1], state)
+    ck('a dropped question never resolved is restored as OPEN',
+       [w['repair']['store'] for w in cw2 if w['id'] == 'O-CHAIN'], ['open_questions'])
+
     work, acct = R.restorations_owed(acts, state)
-    ck('only the restorable effect is in the worklist',
-       [(w['verb'], w['id']) for w in work], [('queue hold', 'Q13')])
+    ck('the worklist holds the dropped hold AND the dropped queue row',
+       sorted((w['verb'], w['id']) for w in work),
+       [('queue add', 'Q77'), ('queue hold', 'Q13')])
+    ck('an absence a LATER action explains is not restored',
+       [(x['verb'], x['disposition']) for x in acct if x['id'] == 'D77'],
+       [('owe add', 'closed_later')])
+    ck('and it says which later action explains it',
+       'owe done' in next(x['why'] for x in acct if x['id'] == 'D77'), True)
     ck('an action on a SCRATCH state is not reconciled at all',
        any(x['id'] == 'O-X' for x in work + acct), False)
     ck('every other dropped action is ACCOUNTED FOR, not dropped again',
-       sorted(x['verb'] for x in acct), ['hold', 'owe done', 'queue add'])
+       sorted(x['verb'] for x in acct), ['hold', 'owe add'])
     ck('each accounted action carries the reason its effect is not restored',
        all(x['why'] for x in acct), True)
-    ck('a LANDED action whose effect is absent is reported, never restored',
-       [(x['verb'], x['disposition']) for x in acct if x['outcome'] == 'landed'],
-       [('queue add', 'landed_absent')])
+    ck('a LANDED action whose absence is UNEXPLAINED is restored, not merely reported',
+       [(w['verb'], w['id']) for w in work if w['outcome'] == 'landed'],
+       [('queue add', 'Q77')])
     return fails
 
 
@@ -2948,11 +2985,17 @@ def test_reaches_a_hundred():
 
         # the worklist is derived from the STATE, and it is the hold that never ran
         owedw = led()['owed']
-        ck('the worklist holds exactly the dropped effect',
-           [(w['verb'], w['id'], w['repair']['op']) for w in owedw],
+        ck('the dropped HOLD is merged onto the row that is still there',
+           [(w['verb'], w['id'], w['repair']['op']) for w in owedw if w['verb'] == 'queue hold'],
            [('queue hold', 'Q8', 'amend')])
-        ck('the TURN hold is accounted for as gone, not restored',
-           [x['disposition'] for x in led()['accounted'] if x['verb'] == 'hold'], ['expired'])
+        # a question whose ask TOOK and which is in neither open_questions nor its archive was
+        # not closed -- `resolved` archives -- so it was dropped, and it is appended back
+        ck('and every dropped question is APPENDED back, never amended',
+           set(w['repair']['op'] for w in owedw if w['verb'] == 'ask'), {'append'})
+        ck('nothing in the worklist is a removal',
+           set(w['repair']['op'] for w in owedw), {'amend', 'append'})
+        ck('every TURN hold is accounted for as gone, not restored',
+           set(x['disposition'] for x in led()['accounted'] if x['verb'] == 'hold'), {'expired'})
 
         # stage 5 refuses until the supersession check has run at this pass
         rc, out = run('--stage', '5', '--apply')
