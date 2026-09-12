@@ -2397,6 +2397,9 @@ def pending_corpus():
     # sent + outcome -- NO console line exists for either; wake.log is the only trace
     R_ += RS.bash(T0(9), './wd.sh outcome F5 accepted "the control fired" >/dev/null', '')
     R_ += RS.bash(T0(9, 30), './wd.sh sent F5 m-9 >/dev/null', '')
+    # and one the log DOES cover and does not carry: it did not take effect. The two cases must
+    # not be conflated -- an uncovered instant is unknown, a covered one is an answer.
+    R_ += RS.bash(T0(9, 40), './wd.sh outcome F6 accepted "never written" >/dev/null', '')
 
     # THE RECURSION: two diverted closes of ONE id, and a single listing after both. The first
     # cleared it; the second found nothing left. The second's answer depends on the first's.
@@ -2406,7 +2409,12 @@ def pending_corpus():
     R_ += RS.bash(T0(11, 30), './wd.sh owe done D6 >/dev/null', '')
     R_ += RS.bash(T0(12), './wd.sh owe list', 'READY for the owner: 1\n  D3 does the box hold once acquired?')
 
-    # --- THREE SHAPES MEASURED ON THE REAL RECORD (2026-09-12), not invented ------------------
+    # --- SHAPES MEASURED ON THE REAL RECORD (2026-09-12), not invented -----------------------
+    # The question timeline below is COHERENT on purpose: every `OPEN QUESTIONS: n` equals the
+    # asks that landed minus the resolves that landed before it. That is not decoration -- it is
+    # the identity `resolve_by_count` verifies before it settles anything, and an incoherent
+    # corpus makes the whole rule refuse (it did, which is how this was caught).
+    #
     # 1. an ASK whose id project state no longer carries -- resolved questions are pruned -- but
     #    which a later `wd.sh open` report NAMES while it was open. That listing is the answer.
     # 2. a RESOLVED of that same id: the next listing after it no longer carries the id. Absence,
@@ -2418,43 +2426,58 @@ def pending_corpus():
     #    flag is the evidence, and the outcome is `failed` -- not pending, and not landed.
     R_ += RS.bash(T0(13), './wd.sh ask P4 "does the bar reach the switch?" >/dev/null', '')
     R_ += RS.bash(T0(13, 30), './wd.sh open',
-                  'OPEN QUESTIONS: 2\n   K9             1 turns ago\n      is the bar part of the box?\n'
-                  '   P4             0 turns ago\n      does the bar reach the switch?')
+                  'OPEN QUESTIONS: 1\n   P4             0 turns ago\n'
+                  '      does the bar reach the switch?')
+    # a TRUNCATED listing: its header is accurate -- a pipe cuts the rows, never the line the
+    # program printed first -- so completeness is what fails, and it must settle no ABSENCE.
+    R_ += RS.bash(T0(13, 50), './wd.sh open | head -1', 'OPEN QUESTIONS: 1')
     R_ += RS.peer_reply(T0(14), 'the bar reaches it; there is no interval between')
     R_ += RS.bash(T0(14, 10), './wd.sh resolved P4 >/dev/null', '')
-    # a TRUNCATED listing sits between the resolve and the complete one: its header claims two
-    # open questions and lists none, because the command was piped. It must settle nothing.
-    R_ += RS.bash(T0(14, 20), './wd.sh open | head -1', 'OPEN QUESTIONS: 2')
     R_ += RS.bash(T0(14, 40), './wd.sh open', 'OPEN QUESTIONS: 0\n   none')
-    R_ += RS.say(T0(15), 'The cold read and the re-review are both still running.')
-    R_ += RS.bash(T0(15, 10),
-                  './wd.sh hold %s "Codex is re-reviewing; nothing to answer yet" >/dev/null 2>&1' % T0(14, 55), '')
+
+    # an ask and a resolve NOTHING ever names again -- forced by the COUNT alone
+    R_ += RS.bash(T0(14, 43), './wd.sh ask P12 "never named again" >/dev/null', '')
+    R_ += RS.bash(T0(14, 44), './wd.sh open | head -1', 'OPEN QUESTIONS: 1')
+    R_ += RS.bash(T0(14, 46), './wd.sh resolved P12 >/dev/null', '')
+    R_ += RS.bash(T0(14, 47), './wd.sh open | head -1', 'OPEN QUESTIONS: 0')
+
     # a resolve whose CONFIRMATION line is the only trace -- one line carrying the question's
-    # whole life, and it is not the first match in a result that reports several
-    R_ += RS.bash(T0(14, 45), './wd.sh ask P9 "does the bar reach the clip?" >/dev/null', '')
-    R_ += RS.bash(T0(14, 50), './wd.sh resolved P9 >/dev/null', '')
+    # whole life -- and it is not the first match in a result that reports several
+    R_ += RS.bash(T0(14, 50), './wd.sh ask P9 "does the bar reach the clip?" >/dev/null', '')
+    R_ += RS.bash(T0(14, 51), './wd.sh nudged P9 >/dev/null 2>&1', '')
+    # the nudge report names four ids and the one we want is LAST: `search` returns only the
+    # first match in a result, which settled exactly one of twelve on the real record.
+    R_ += RS.bash(T0(14, 52), './wd.sh nudged --all',
+                  '\n'.join('nudged %s (%d resend(s)); due again' % (k, i + 1)
+                            for i, k in enumerate(['AAA', 'BBB', 'CCC', 'P9'])))
+    R_ += RS.bash(T0(14, 53), './wd.sh resolved P9 >/dev/null', '')
     R_ += RS.bash(T0(14, 55), './wd.sh status',
                   'resolved AAA (open since %s, 0 resend(s))\n'
-                  'resolved P9 (open since %s, 2 resend(s))' % (T0(13), T0(14, 45)))
-    # and a nudge whose report names TWELVE ids -- the one we want is not the first. `search`
-    # returns only the first match in a result, which settled exactly one of twelve.
-    # an ask whose ONLY later trace is a listing reformatted by a pipe: no header, no row
-    # shape, nothing a text pattern could recognise -- but the command says it is a listing
+                  'resolved P9 (open since %s, 2 resend(s))' % (T0(13), T0(14, 50)))
+
+    # a control probe whose every trace is thrown away by construction -- and whose outcome the
+    # shell states on the next line. Both invocations are reached only through `&&`.
+    R_ += RS.bash(T0(14, 57),
+                  './wd.sh ask ZZ "control" >/dev/null 2>&1 && ./wd.sh resolved ZZ >/dev/null 2>&1'
+                  ' && echo "ask/resolved OK"', 'ask/resolved OK')
+    R_ += RS.say(T0(15), 'The cold read and the re-review are both still running.')
+    R_ += RS.bash(T0(15, 10),
+                  './wd.sh hold %s "Codex is re-reviewing; nothing to answer yet" >/dev/null 2>&1'
+                  % T0(14, 58), '')
     # two adds in one command whose items were RE-TEXTED in place afterwards (measured on the
     # real record: a later direct edit of state.json rewrote the text and kept the queued time),
     # so the text is no longer a key and the queued time still is
     R_ += RS.bash(T0(15, 20), './wd.sh queue add "first of two" >/dev/null; '
                               './wd.sh queue add "second of two" >/dev/null', '')
+    R_ += RS.bash(T0(15, 40), './wd.sh owed',
+                  'OWED completed turns: 1\n   %s  [not answered or held]  The cold read and the '
+                  're-review' % T0(14, 58))
+    # an ask whose ONLY later trace is a listing reformatted by a pipe: no header, no row shape,
+    # nothing a text pattern could recognise -- but the command says it is a listing. It stays
+    # open to the end of the corpus, so no count ever contradicts it.
     R_ += RS.bash(T0(15, 50), './wd.sh ask P11 "does the box touch the switch?" >/dev/null', '')
     R_ += RS.bash(T0(15, 55), "./wd.sh open | awk -F'\\n' '{print}' | paste - -",
-                  'P9 | does the bar reach the clip?\nP11 | does the box touch the switch?')
-    R_ += RS.bash(T0(16), './wd.sh nudged P9 >/dev/null 2>&1', '')
-    R_ += RS.bash(T0(16, 30), './wd.sh nudged --all',
-                  '\n'.join('nudged %s (%d resend(s)); due again' % (k, i + 1)
-                            for i, k in enumerate(['AAA', 'BBB', 'CCC', 'P9'])))
-    R_ += RS.bash(T0(15, 40), './wd.sh owed',
-                  'OWED completed turns: 1\n   %s  [not answered or held]  The cold read and the re-review'
-                  % T0(14, 55))
+                  'P11 | does the box touch the switch?')
 
     state = {'owner_queue': [{'id': 'Q8', 'ts': T0(15, 21), 'text': 'REVISED first -- rewritten in place'},
                              {'id': 'Q9', 'ts': T0(15, 22), 'text': 'REVISED second -- rewritten in place'}],
@@ -2471,6 +2494,9 @@ def pending_corpus():
     wake_log = '\n'.join([
         '%s OUTCOME F5 accepted the control fired' % T0(9, 0, 2),
         '%s SENT F5 m-9' % T0(9, 30, 2),
+        # the log goes on writing well past F6's command, which is what makes its silence
+        # about F6 an answer rather than an absence of surface
+        '%s OUTCOME F8 accepted a later one entirely' % T0(11),
     ])
     findings = '| F5 (outcome) | 12 | %s |  | outcome | accepted |  | the control fired |' % T0(9, 0, 2)
     return R_, state, wake_log, findings
@@ -2515,6 +2541,13 @@ def test_every_pending_is_answered():
     ck('a diverted sent1 is answered by the sent record', by.get(('sent1', 'Q7')), ['landed'])
     ck('a diverted outcome is answered by wake.log (it prints NOTHING)', by.get(('outcome', 'F5')), ['landed'])
     ck('a diverted sent is answered by wake.log', by.get(('sent', 'F5')), ['landed'])
+    ck('an outcome the log COVERS and does not carry is failed, not pending',
+       by.get(('outcome', 'F6')), ['failed'])
+    ck('CONTROL: with no event after it, the log does not cover it and it stays UNKNOWN',
+       R.resolve_forward(
+           [{'ts': '2026-09-11T20:00:00Z', 'verb': 'outcome', 'id': 'F7', 'state': 'live',
+             'kind': 'mark', 'outcome': None, 'why': None}],
+           [], {}, '2026-09-11T19:00:00Z OUTCOME F1 accepted x')[0]['outcome'], None)
     ck('an ask project state no longer carries is answered by the listing that named it',
        by.get(('ask', 'P4')), ['landed'])
     ck('and its resolve by the next listing that no longer does',
@@ -2529,6 +2562,32 @@ def test_every_pending_is_answered():
     ck('and the resolve rests on the COMPLETE listing, not the truncated one',
        (next(a for a in settled if a['verb'] == 'resolved'
              and a.get('id') == 'P4')['evidence_ts']), T0H(14, 40))
+    ck('a probe whose every trace is discarded is graded by the SHELL',
+       (by.get(('ask', 'ZZ')), by.get(('resolved', 'ZZ'))), (['landed'], ['landed']))
+    ck('and only an echo reached through && is a marker',
+       (R.success_markers('a >/dev/null && echo OK'),
+        R.success_markers('a >/dev/null; echo OK'),
+        R.success_markers('a >/dev/null || echo BROKEN'),
+        R.success_markers('a >/dev/null && echo "$V"')),
+       ({0: 'OK'}, {}, {}, {}))
+    ck('an ask nothing ever names again is forced by the COUNT',
+       by.get(('ask', 'P12')), ['landed'])
+    ck('and so is its resolve', by.get(('resolved', 'P12')), ['landed'])
+    ck('and the answer says which count forced it',
+       'count at' in (next(a for a in settled if a['verb'] == 'ask'
+                           and a.get('id') == 'P12')['why'] or ''), True)
+
+    # the identity is a CHECK before it is a rule: break it and nothing may be settled by counting
+    broken = R.resolve_by_count(
+        [{'ts': '2026-09-11T01:00:00Z', 'verb': 'ask', 'id': 'X1', 'state': 'live',
+          'outcome': 'landed', 'why': None},
+         {'ts': '2026-09-11T03:00:00Z', 'verb': 'ask', 'id': 'X2', 'state': 'live',
+          'outcome': None, 'why': None}],
+        [('2026-09-11T02:00:00Z', 'OPEN QUESTIONS: 7'),      # says 7, one ask landed: impossible
+         ('2026-09-11T04:00:00Z', 'OPEN QUESTIONS: 8')])
+    ck('CONTROL: an identity that does not hold settles NOTHING',
+       [a['outcome'] for a in broken], ['landed', None])
+
     qa = [a for a in settled if a['verb'] == 'queue add' and a['ts'] == T0H(15, 20)]
     ck('two adds whose items were RE-TEXTED are answered by when they were queued',
        [a['outcome'] for a in qa], ['landed', 'landed'])
@@ -2549,10 +2608,10 @@ def test_every_pending_is_answered():
     ck('a nudge is found even when its report names eleven others first',
        by.get(('nudged', 'P9')), ['landed'])
     ck('a REFUSED hold is failed, not pending and not landed',
-       by.get(('hold', T0H(14, 55))), ['failed'])
+       by.get(('hold', T0H(14, 58))), ['failed'])
     ck('and it names the flag the report still carried',
        'not answered or held' in ((next(a for a in settled if a['verb'] == 'hold'
-                                        and a.get('id') == T0H(14, 55))['why']) or ''), True)
+                                        and a.get('id') == T0H(14, 58))['why']) or ''), True)
 
     # the recursion: one listing, two closes -- the second is not a second success
     d6 = sorted([a for a in settled if a['verb'] == 'owe done' and a.get('id') == 'D6'],

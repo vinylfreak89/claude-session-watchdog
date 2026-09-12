@@ -723,7 +723,7 @@ def my_actions(numbered, fname, live_state, cwd=None):
             invs = [x for x in invocations(cmd, live_state, here) if x['verb'] in STATE_VERBS]
             if invs:
                 acts.extend(_command_actions(invs, rm.get(b.get('id')), ts,
-                                             '%s:%d#%d' % (fname, lineno, j)))
+                                             '%s:%d#%d' % (fname, lineno, j), cmd))
     return acts
 
 
@@ -732,8 +732,37 @@ def _set(a, outcome, why):
     return a
 
 
-def _command_actions(invs, res, ts, cite):
+def success_markers(cmd):
+    """cmd_index -> the literal an `echo` prints when THIS command succeeds, reached only through
+    `&&`. The shell itself graded the command: if that literal is in the result, every invocation
+    on the chain before it exited zero, however thoroughly their own output was thrown away.
+
+    Measured on the real record (2026-09-12): `./wd.sh ask ZZTEST "control" >/dev/null 2>&1 &&
+    ./wd.sh resolved ZZTEST >/dev/null 2>&1 && echo "ask/resolved OK"` -- two actions whose every
+    other trace is absent by construction, and whose outcome the line after them states exactly.
+    """
+    try:
+        cmds = sh_commands(cmd)
+    except Exception:
+        return {}
+    out = {}
+    for i, c in enumerate(cmds):
+        for j in range(i + 1, len(cmds)):
+            if cmds[j].get('op_before') != '&&':
+                break
+            w = [x['w'] for x in cmds[j]['words']]
+            if w and w[0] == 'echo' and len(w) > 1 and not (cmds[j].get('redirs') or []):
+                lit = ' '.join(w[1:]).strip()
+                # only a literal is a marker: text the shell built cannot be matched in a result
+                if lit and not any(x.get('expands') for x in cmds[j]['words'][1:]):
+                    out[i] = lit
+                break
+    return out
+
+
+def _command_actions(invs, res, ts, cite, cmd=None):
     txt, err = res if res else ('', False)
+    markers = success_markers(cmd) if cmd else {}
     rows = []
     for inv in invs:
         v, args, aexp = inv['verb'], inv['args'], inv['arg_expands']
@@ -822,6 +851,15 @@ def _command_actions(invs, res, ts, cite):
             if (a['outcome'] is None and inv.get('is_last') and not inv['piped']
                     and inv['op_before'] not in ('&&', '||')):
                 _set(a, 'failed', 'the command exited non-zero and this invocation was its last command')
+    # 2c. THE SHELL GRADED IT. An `echo` reached only through `&&` prints its literal exactly when
+    #     every command before it on the chain exited zero, so that literal in the result is a
+    #     direct statement of this invocation's exit status -- stronger than any later trace,
+    #     and the only evidence for a command whose whole purpose was to be silent.
+    for a, inv in rows:
+        mark = markers.get(inv.get('cmd_index'))
+        if a['outcome'] is None and mark and mark in txt:
+            _set(a, 'landed', 'the command printed %r, which the shell reaches only if this '
+                 'invocation exited zero' % mark[:60])
     # 3. silence proves nothing unless the output reached the result
     for a, inv in rows:
         if a['outcome'] is not None:
@@ -1064,6 +1102,12 @@ def resolve_forward(acts, recs, state, log_text='', findings_text='', results=No
     sent_ids = {x.get('id'): x for x in (state.get('owner_queue_sent') or [])}
     held = state.get('held_turns') or {}
 
+    def logged(ts):
+        """Whether wake.log was WRITING at that instant -- an event strictly before and one
+        strictly after. Without both, silence in the log is absence of a surface, not absence of
+        an effect, and nothing may be read from it."""
+        return (any(e[0] < ts for e in events) and any(e[0] > ts for e in events))
+
     def settle(a, outcome, why, ev_ts, basis='presence'):
         a['outcome'], a['why'] = outcome, why
         a['evidence_ts'], a['basis'] = ev_ts, basis
@@ -1218,6 +1262,10 @@ def resolve_forward(acts, recs, state, log_text='', findings_text='', results=No
                             if m.group(1) == v), None)
                 if hit:
                     settle(a, 'landed', 'a later result records %s %s' % (v, hit[1]), hit[0])
+                elif logged(ts):
+                    settle(a, 'failed', 'wake.log was writing on either side of it and records no '
+                           '%s of %s -- the command did not take effect' % (v.upper(), ident), None,
+                           'absence')
         elif v == 'outcome' and ident:
             hit = next(((t, rest) for t, verb, rest in events
                         if t >= ts and verb == 'OUTCOME' and rest.split()[0] == ident), None)
@@ -1225,6 +1273,12 @@ def resolve_forward(acts, recs, state, log_text='', findings_text='', results=No
                 settle(a, 'landed', 'wake.log grades it: %s' % hit[1][:60], hit[0])
             elif ('| %s (outcome) |' % ident) in (findings_text or ''):
                 settle(a, 'landed', 'findings.md carries its outcome row', None)
+            elif logged(ts):
+                # `wd.sh outcome` writes an OUTCOME line every time: measured on the real record,
+                # 38 of 39 outcome commands in the window have one and the 39th is this. With the
+                # log writing on both sides of the instant, its silence is the answer.
+                settle(a, 'failed', 'wake.log was writing on either side of it and grades no '
+                       'outcome of %s -- the command did not take effect' % ident, None, 'absence')
         elif v == 'owe done' and ident:
             # The first owe listing AFTER it decides: the entry gone means the close landed, the
             # same entry still there means it did nothing. Both rest on a listing, so both carry
@@ -1254,6 +1308,72 @@ def resolve_forward(acts, recs, state, log_text='', findings_text='', results=No
     return acts
 
 
+def resolve_by_count(acts, results):
+    """The open-questions COUNT is a MEASUREMENT of the store's size at that instant, so the
+    reports and the actions must satisfy one identity:
+
+        count at T  ==  asks that landed before T  -  resolves that landed before T
+
+    Where every action before a report is already settled, that is a check with no free variable;
+    where some are not, the count says how many of them took effect. An unknown contributes 0 or
+    +-1, so a delta at its EXTREME forces every one of them, and a delta of zero with all unknowns
+    of one sign forces none. Nothing in between is claimed.
+
+    The identity is VERIFIED before it is used: if any report whose prefix is fully known
+    disagrees with it, this record does not satisfy the identity -- a `queue`-style id we failed
+    to read, an ask registered by something other than `wd.sh ask` -- and NOTHING is settled by
+    counting. Measured on the real record (2026-09-12): eight consecutive reports with a fully
+    known prefix, all eight exact.
+    """
+    reports = sorted((t, int(m.group(1))) for t, x in results for m in [QOPEN_HEAD.search(x)] if m)
+    live = [a for a in acts if a.get('state', 'live') == 'live' and a.get('id')
+            and a['verb'] in ('ask', 'resolved')]
+    if not reports or not live:
+        return acts
+    sign = {'ask': 1, 'resolved': -1}
+
+    def split(t):
+        before = [a for a in live if a['ts'] < t]
+        known = sum(sign[a['verb']] for a in before if a['outcome'] == 'landed')
+        return known, [a for a in before if a['outcome'] is None]
+
+    checked = 0
+    for t, n in reports:
+        known, unknown = split(t)
+        if unknown:
+            continue
+        if known != n:
+            return acts                     # the identity does not hold here: settle nothing by it
+        checked += 1
+    if not checked:
+        return acts                         # never verified, so never used
+
+    for t, n in reports:
+        known, unknown = split(t)
+        if not unknown:
+            continue
+        delta = n - known
+        signs = {sign[a['verb']] for a in unknown}
+        if len(signs) != 1:
+            continue                        # asks and resolves together: the sum cannot separate
+        s = signs.pop()
+        if delta == s * len(unknown):
+            for a in unknown:
+                a['outcome'], a['why'] = 'landed', (
+                    'the open-questions count at %s is %d, which every one of these %d had to take '
+                    'effect to reach' % (t[11:19], n, len(unknown)))
+                a['evidence_ts'], a['basis'] = t, 'presence'
+                a.pop('needs', None)
+        elif delta == 0:
+            for a in unknown:
+                a['outcome'], a['why'] = 'no_effect', (
+                    'the open-questions count at %s is %d, unchanged by these %d'
+                    % (t[11:19], n, len(unknown)))
+                a['evidence_ts'], a['basis'] = t, 'presence'
+                a.pop('needs', None)
+    return acts
+
+
 def reconcile_to_fixed_point(acts, recs, state, log_text='', findings_text='', max_passes=25):
     """The recursive loop, in the owner's words (2026-09-12): "you answer the earliest ones. every
     time you answer a new one you go back and check the previous ones you answered and see if the
@@ -1273,6 +1393,7 @@ def reconcile_to_fixed_point(acts, recs, state, log_text='', findings_text='', m
                 a['outcome'], a['why'] = None, None
         resolve_from_evidence(acts, recs, state)
         resolve_forward(acts, recs, state, log_text, findings_text, results, events, listings)
+        resolve_by_count(acts, results)
         now = [(a.get('cite'), a['verb'], a.get('id'), a['outcome'], a.get('evidence_ts')) for a in acts]
         if now == seen:
             return acts, n
