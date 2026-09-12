@@ -32,7 +32,13 @@ This file carries no TM knowledge; it reads the overlay and prints it.
 """
 import os, sys, json, argparse, subprocess, datetime, re
 
-PARTS = ('tm', 'diff', 'replay', 'verdict')
+PARTS = ('diff', 'replay', 'verdict')          # every hour owes these, from the record alone
+OPTIONAL_PARTS = ('tm',)                       # included ONLY where a snapshot for that hour exists
+# Owner, 2026-09-12: "it just may be an optional part. do not mark it as complete if it didn't
+# exist. just don't include it." An hour with no surviving backup is not an hour with a passed tm
+# part and not an hour held open by a missing one: the part is simply not among its parts. Time
+# Machine is an ADDITIONAL check (owner, same day: "time machine is an additional check in case
+# your scan happens to miss something but it is not necessary").
 HERE = os.path.dirname(os.path.abspath(__file__))
 OVERLAY = os.path.join(HERE, 'local', 'reconcile.md')
 
@@ -114,6 +120,80 @@ def rival_hooks(state_dir=None, ps_out=None):
 
 def path_of(state_dir):
     return os.path.join(state_dir, 'reconcile.json')
+
+
+TM_WRAPPER = '~/Documents/time-machine-explorer/scripts/tm'
+TM_UUID = '290ABBD4-32C6-4EAE-898E-99C6CAAF97E5'
+TM_STATE = ('/Volumes/.timemachine/%s/{s}.backup/{s}.backup/Data/Users/vinylfreak89/Documents/'
+            'claude-session-watchdog/state' % TM_UUID)
+
+
+def _local_zone():
+    """The zone Time Machine names its backups in -- the machine's own, read not assumed. TM names
+    are LOCAL time and the transcript is UTC, and resolve_from_snapshots refuses a row whose time
+    was defaulted rather than established."""
+    return datetime.datetime.now().astimezone().tzname() or 'local'
+
+
+def _snap_utc(name):
+    """`2026-09-11-052150` (local) -> an aware UTC ISO string. strptime gives a naive local time;
+    astimezone() applies this machine's rules FOR THAT DATE, so a zone with DST converts correctly
+    rather than by a fixed offset typed in here."""
+    naive = datetime.datetime.strptime(name, '%Y-%m-%d-%H%M%S')
+    return naive.astimezone(datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
+
+
+def _shift(iso, hours):
+    d = datetime.datetime.fromisoformat(iso.replace('Z', '+00:00')) + datetime.timedelta(hours=hours)
+    return d.isoformat().replace('+00:00', 'Z')
+
+
+def tm_snapshots():
+    """Every backup on the destination, by the overlay's GROUND TRUTH: the snapshot list, never the
+    .timemachine directory (which keeps an empty stub for every backup that ever existed). The disk
+    id is re-derived each time because it changes between attachments."""
+    mnt = subprocess.run(['mount'], capture_output=True, text=True).stdout
+    disk = None
+    for line in mnt.splitlines():
+        if '/Volumes/T7' in line and line.startswith('/dev/'):
+            disk = line.split()[0].replace('/dev/', '')
+    if not disk:
+        return None, 'the backup drive is not mounted (no /Volumes/T7 in `mount`)'
+    out = subprocess.run(['diskutil', 'apfs', 'listSnapshots', disk],
+                         capture_output=True, text=True).stdout
+    names = re.findall(r'com\.apple\.TimeMachine\.(\d{4}-\d{2}-\d{2}-\d{6})\.backup', out)
+    if not names:
+        return None, 'no snapshots listed on %s -- refused rather than read as "none survive"' % disk
+    return sorted(set(names)), 'ok'
+
+
+def tm_state_dir(name):
+    """The state DIRECTORY inside one backup -- what `tm ls` takes."""
+    return TM_STATE.format(s=name)
+
+
+def tm_state_path(name):
+    """The state FILE inside one backup -- what `tm read` takes. Kept distinct from the directory
+    because passing the directory to `read` is exactly the defect this stage shipped with: the
+    wrapper refused every backup with `cannot open for reading: .../state`, the reader reported it
+    honestly, and the stage read it as "0 of 24 readable"."""
+    return tm_state_dir(name) + '/state.json'
+
+
+def tm_state_size(tm, name):
+    """The size the LISTING reports for that backup's state.json -- the independent length a
+    trailer-less read is checked against. Returns (None, why) when the backup holds no state dir."""
+    out = subprocess.run([tm, 'ls', tm_state_dir(name)], capture_output=True, text=True).stdout
+    try:
+        d = json.loads(out)
+    except Exception:
+        return None, 'ls did not return JSON: %s' % out[:120]
+    if not d.get('ok'):
+        return None, (d.get('error') or 'ls failed')[:160]
+    for e in d.get('entries') or []:
+        if e.get('name') == 'state.json':
+            return e.get('size'), 'ok'
+    return None, 'the backup holds the state dir but no state.json'
 
 
 def ledger_dir(a):
@@ -220,13 +300,20 @@ def confidence(L):
     if rs:
         okn = sum(1 for r in rs if r.get('validated_pass') == L.get('pass', 0))
         cov.append(('restores', 100 * okn // len(rs)))
+    # Time Machine is an ADDITIONAL check, never a requirement (owner, 2026-09-12: "time machine
+    # is an additional check in case your scan happens to miss something but it is not necessary"),
+    # so snapshot coverage cannot hold the reconciliation below 100. What the RECORD must answer --
+    # every action of mine -- has no such exemption and never will: "every single one of those
+    # pendings has an answer somewhere. figure it out. until it gets to 100."
+    # Whether the drive was never consulted or was read and found nothing is a real difference, and
+    # it is recorded in stage2 rather than smuggled into a score that cannot express it.
+    OPTIONAL = ('snapshots', 'chains', 'deliveries', 'hashes')
     for name, key in (('actions', 'actions'), ('state-keys', 'state_keys'),
                       ('snapshots', 'snapshots'), ('records', 'records'), ('chains', 'chains'),
                       ('deliveries', 'deliveries'), ('hashes', 'hashes')):
         seen, total = a.get(key, [0, 0])[0], a.get(key, [0, 0])[1]
-        # a MEASURED zero is nothing owed; an unmeasured count is still owed
-        cov.append((name, 100 * seen // total if total else
-                    (100 if key in ('chains', 'deliveries', 'hashes') and key in a else 0)))
+        # a MEASURED zero is nothing owed; an unmeasured count is owed unless its source is optional
+        cov.append((name, 100 * seen // total if total else (100 if key in OPTIONAL else 0)))
     return (min(v for _, v in cov) if cov else 0), cov
 
 
@@ -413,9 +500,72 @@ def run_stage(n, L, S, a):
             print('   %-13s %s %-10s %s' % (f['verdict'], f['ts'][:19], f['verb'], f['why']))
         return True
     if n == 2:
-        raise SystemExit('stage 2 needs the Time Machine wrapper; drive it with --stage 2 once '
-                         'the overlay\'s tm path is confirmed by `tm status` (not wired to a '
-                         'live drive from here by design -- the reader is fixture-tested)')
+        # The Time Machine half. The overlay carries ONE thing -- how to reach the drive; what is
+        # read, what it is compared against and what counts as evidence live here (owner,
+        # 2026-09-11). Every backup in the window is read: no sampling, no binary search.
+        path, numbered, bad, recs, acts, owner, exc, peers, acct, my_text, sends = _world()
+        tm = os.path.expanduser(getattr(a, 'tm_wrapper', None) or TM_WRAPPER)
+        if not os.path.exists(tm):
+            raise SystemExit('stage 2 REFUSED: the tm wrapper named by the overlay is not at %s' % tm)
+        st_out = subprocess.run([tm, 'status'], capture_output=True, text=True).stdout
+        try:
+            status = json.loads(st_out)
+        except Exception:
+            raise SystemExit('stage 2 REFUSED: `tm status` did not return JSON: %s' % st_out[:200])
+        if not status.get('ok') or not all(r.get('readable') for r in status.get('roots') or []):
+            raise SystemExit('stage 2 REFUSED: the backup roots are not readable -- %s. The drive '
+                             'may be detached, or the broker may have lost Full Disk Access; '
+                             'neither is something to work around.' % st_out[:200])
+
+        snaps, why = tm_snapshots()
+        if snaps is None:
+            raise SystemExit('stage 2 REFUSED: %s' % why)
+        w0, w1 = L['window']['start'], L['window']['end']
+        # a backup OUTSIDE the window still brackets it: resolve_from_snapshots settles an action
+        # only between a readable snapshot before it and one after, so the neighbours are read too
+        keep = [s for s in snaps if _snap_utc(s) >= _shift(w0, -48) and _snap_utc(s) <= _shift(w1, 48)]
+        rows, seen = [], {}
+        for name in keep:
+            at = _snap_utc(name)
+            size, lserr = tm_state_size(tm, name)
+            if size is None:
+                seen[name] = ('thinned' if 'does not exist' in (lserr or '') else 'unreadable', lserr)
+                rows.append({'snapshot': name, 'at': at, 'readable': False, 'why': lserr})
+                continue
+            raw = subprocess.run([tm, 'read', tm_state_path(name)], capture_output=True, text=True).stdout
+            d, rwhy = RL.tm_state_at(raw, expect_bytes=size)
+            seen[name] = (('visited' if d is not None else 'unreadable'),
+                          'state.json %d bytes; %s' % (size, rwhy))
+            rows.append({'snapshot': name, 'at': at, 'readable': d is not None, 'state': d, 'why': rwhy})
+        series = RL.stage2_series([r['snapshot'] for r in rows],
+                                  lambda s: next(r for r in rows if r['snapshot'] == s).get('state'),
+                                  at_of=lambda s: next(r for r in rows if r['snapshot'] == s)['at'])
+        for name, (statusword, ev) in sorted(seen.items()):
+            L['snapshots'][name] = {'status': statusword, 'ts': now_iso(), 'evidence': ev}
+
+        pend_before = sum(1 for x in acts if x.get('state') == 'live' and x['outcome'] is None)
+        RL.resolve_from_snapshots(acts, series)
+        pend_after = sum(1 for x in acts if x.get('state') == 'live' and x['outcome'] is None)
+        dis = RL.stage2_disappearances(series)
+        readable = [r for r in rows if r['readable']]
+        L['stage2'] = {'ts': now_iso(), 'wrapper': tm, 'zone': _local_zone(),
+                       'snapshots_considered': len(keep), 'readable': len(readable),
+                       'unreadable': [r['snapshot'] for r in rows if not r['readable']],
+                       'settled_from_snapshots': pend_before - pend_after,
+                       'still_pending': pend_after,
+                       'disappearances': {str(k): v for k, v in (dis.get('first_absent') or {}).items()},
+                       'readable_at': [r['at'] for r in readable]}
+        cov['snapshots'] = [len(readable), max(1, len(keep))]
+        print('stage 2: %d backup(s) in and around the window, %d readable, %d unreadable'
+              % (len(keep), len(readable), len(keep) - len(readable)))
+        print('         snapshot times (UTC): %s' % ', '.join(r['at'][:19] for r in readable))
+        print('         %d pending action(s) settled from the snapshots; %d still pending'
+              % (pend_before - pend_after, pend_after))
+        if dis.get('first_absent'):
+            print('         DATED DROPS: %d' % len(dis['first_absent']))
+            for k, v in list((dis.get('first_absent') or {}).items())[:10]:
+                print('   %s last seen %s, gone by %s' % (k, (dis.get('last_seen') or {}).get(k), v))
+        return True
     if n == 4:
         rs = L.get('restored') or []
         if not rs:
@@ -462,13 +612,19 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--state-dir', required=True)
+    ap.add_argument('--tm-wrapper', dest='tm_wrapper',
+                    help='the tm wrapper the overlay names (default %s); a test points it '
+                         'somewhere absent to exercise the refusal, which otherwise depends '
+                         'on whether a drive happens to be attached' % TM_WRAPPER)
     ap.add_argument('--ledger-dir', dest='ledger_dir',
                     help='where the ledger and its lock live (default local/reconcile; never '
                          'the state dir -- a reconciliation must not write into its subject)')
     ap.add_argument('dates', nargs='*', help='<start> <end> (only with --init)')
     ap.add_argument('--init', action='store_true')
     ap.add_argument('--next', action='store_true')
-    ap.add_argument('--hour'); ap.add_argument('--part', choices=PARTS)
+    ap.add_argument('--hour'); ap.add_argument('--part', choices=PARTS + OPTIONAL_PARTS)   # an optional part is still
+    #                                                         RECORDABLE -- it is simply not
+    #                                                         owed by an hour that has none
     ap.add_argument('--snapshot'); ap.add_argument('--thinned')
     ap.add_argument('--action'); ap.add_argument('--landed', choices=('yes', 'no'))
     ap.add_argument('--restore')
@@ -586,10 +742,14 @@ def _main(a, S, LD):
                              % (a.hour, L['window']['start'], L['window']['end']))
         if not a.part or not a.evidence:
             raise SystemExit('--hour needs --part %s and --evidence "<what was measured>"'
-                             % '|'.join(PARTS))
+                             % '|'.join(PARTS + OPTIONAL_PARTS))
         h = L['hours'][a.hour]
+        if a.part in OPTIONAL_PARTS and a.part not in h['parts']:
+            # recording an optional part ADDS it: it exists for this hour because evidence for it
+            # exists, never because the grid said every hour must have one
+            h['parts'][a.part] = None
         h['parts'][a.part] = {'ts': now_iso(), 'evidence': a.evidence}
-        if all(h['parts'][p] for p in PARTS):
+        if all(h['parts'].get(p) for p in h['parts']):
             h['status'] = 'done'
         changed = True
         print('%s %s recorded; %s' % (a.hour, a.part,

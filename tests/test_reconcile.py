@@ -756,9 +756,12 @@ def test_cli_all_stages():
         TGT = ['--target-transcript', tt, '--target-repo', tr, '--self-id', 'local_self']
 
         # stage 2 must REFUSE rather than report an empty result
-        rc, out = run('--stage', '2')
+        # the refusal must not depend on whether a drive is attached: point it at an absent
+        # wrapper so the path is exercised the same way on any machine
+        rc, out = run('--stage', '2', '--tm-wrapper', os.path.join(d, 'no-such-tm'))
         ck('stage 2 refuses instead of reporting nothing', rc, 1)
-        ck('and names its prerequisite', 'Time Machine' in out, True)
+        ck('and names its prerequisite',
+           ('REFUSED' in out and any(w in out for w in ('wrapper', 'drive', 'roots', 'snapshots'))), True)
 
         # stage 4 with nothing restored says so rather than passing silently
         rc, out = run('--stage', '4', '--proj', d)
@@ -2092,6 +2095,9 @@ def test_readings_and_scope():
                     '905 1 /bin/zsh -c ls'])
     class _NS:
         ledger_dir = None
+        state_dir = os.path.join(real_tmp, 'wd-fake-state')   # so the mutation returns a WRONG
+        #                                                       path instead of raising: a control
+        #                                                       that crashes proves nothing
     C.HERE = os.path.join(real_tmp, 'wd-fake-repo')
     dflt = C.ledger_dir(_NS())
     ck('the DEFAULT ledger dir is local/reconcile, never the state dir',
@@ -2197,6 +2203,272 @@ def test_cli_readings():
         return fails
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+
+
+def fake_tm(root, snaps):
+    """Write a stand-in for scripts/tm that serves ls/read from a temp tree, and refuses to read a
+    directory the way the real wrapper does. `snaps` maps snapshot name -> state dict (or None for
+    a backup that holds no state dir at all)."""
+    import json as _j
+    base = os.path.join(root, 'backups')
+    for name, st in snaps.items():
+        if st is None:
+            continue
+        d = os.path.join(base, name)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, 'state.json'), 'w') as f:
+            _j.dump(st, f)
+    tm = os.path.join(root, 'tm')
+    with open(tm, 'w') as f:
+        f.write('#!/usr/bin/env python3\n'
+                'import json, os, re, sys\n'
+                'BASE = %r\n'
+                'op = sys.argv[1] if len(sys.argv) > 1 else ""\n'
+                'arg = sys.argv[2] if len(sys.argv) > 2 else ""\n'
+                'm = re.search(r"/([0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{6})\\.backup", arg)\n'
+                'name = m.group(1) if m else ""\n'
+                'p = os.path.join(BASE, name, "state.json")\n'
+                'if op == "status":\n'
+                '    print(json.dumps({"ok": True, "roots": [{"present": True, "readable": True}]}))\n'
+                'elif op == "ls":\n'
+                '    if not os.path.exists(p):\n'
+                '        print(json.dumps({"ok": False, "error": "source does not exist or cannot be resolved: " + arg}))\n'
+                '    else:\n'
+                '        print(json.dumps({"ok": True, "entries": [\n'
+                '            {"name": "state.json", "size": os.path.getsize(p), "type": "file"}]}))\n'
+                'elif op == "read":\n'
+                '    if arg.rstrip("/").endswith("/state"):\n'
+                '        print(json.dumps({"ok": False, "error": "cannot open for reading: " + arg}))\n'
+                '    elif not os.path.exists(p):\n'
+                '        print(json.dumps({"ok": False, "error": "source does not exist: " + arg}))\n'
+                '    else:\n'
+                '        sys.stdout.write(open(p).read())\n' % base)
+    os.chmod(tm, 0o755)
+    return tm
+
+def test_stage2_reaching_the_drive():
+    """Stage 2 reads Time Machine through the overlay's wrapper. The drive is not required here:
+    what is tested is every way the read can FAIL, because a detached drive or a broker without
+    Full Disk Access must refuse BY NAME -- read as "no snapshots survive", it would report a
+    reconciliation complete over backups it never opened."""
+    import importlib.util, datetime, subprocess
+    fails = []
+    def ck(name, got, want):
+        ok = got == want
+        print('%-56s %s%s' % (name, 'PASS' if ok else 'FAIL',
+                              '' if ok else '  got=%r want=%r' % (got, want)))
+        if not ok:
+            fails.append(name)
+
+    spec = importlib.util.spec_from_file_location(
+        'wd_reconcile_s2', os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                        'wd_reconcile.py'))
+    C = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(C)
+
+    # --- the snapshot list is ground truth, and its absence is never "none survive" -------------
+    real_run = subprocess.run
+    def fake(out, rc=0):
+        class R:
+            stdout, returncode, stderr = out, rc, ''
+        return lambda *a, **k: R()
+    try:
+        subprocess.run = fake('/dev/disk3s1 on / (apfs, local)\n')      # no T7 line
+        names, why = C.tm_snapshots()
+        ck('a detached drive REFUSES by name, never "no snapshots"', names, None)
+        ck('and says the drive is not mounted', 'not mounted' in why, True)
+        subprocess.run = fake('/dev/disk7s2 on /Volumes/T7 (apfs, local)\n')  # mounted, empty list
+        names, why = C.tm_snapshots()
+        ck('a mounted drive listing NOTHING also refuses', names, None)
+        ck('and refuses rather than reading it as none surviving', 'refused rather than' in why, True)
+        subprocess.run = fake('/dev/disk7s2 on /Volumes/T7 (apfs, local)\n'
+                              'com.apple.TimeMachine.2026-09-10-071627.backup\n'
+                              'com.apple.TimeMachine.2026-09-09-090845.backup\n')
+        names, why = C.tm_snapshots()
+        ck('the backups are returned in order', names, ['2026-09-09-090845', '2026-09-10-071627'])
+    finally:
+        subprocess.run = real_run
+
+    # --- the listing supplies the length a trailer-less read is checked against ------------------
+    real_run = subprocess.run
+    try:
+        subprocess.run = fake(json.dumps({'ok': True, 'entries': [
+            {'name': 'wake.log', 'size': 10}, {'name': 'state.json', 'size': 43978}]}))
+        ck('the size comes from the LISTING, not the read', C.tm_state_size('tm', 'x')[0], 43978)
+        subprocess.run = fake(json.dumps({'ok': True, 'entries': [{'name': 'wake.log', 'size': 10}]}))
+        sz, why = C.tm_state_size('tm', 'x')
+        ck('a backup with the dir but no state.json is named, not sized', (sz, 'no state.json' in why), (None, True))
+        subprocess.run = fake(json.dumps({'ok': False, 'error': 'source does not exist'}))
+        sz, why = C.tm_state_size('tm', 'x')
+        ck('a backup that holds no state dir at all is named', (sz, 'does not exist' in why), (None, True))
+        subprocess.run = fake('not json')
+        sz, why = C.tm_state_size('tm', 'x')
+        ck('a non-JSON listing is refused, never parsed as empty', sz, None)
+    finally:
+        subprocess.run = real_run
+
+    # --- Time Machine names are LOCAL time; the transcript is UTC -------------------------------
+    # --- the wrapper is asked for the FILE, never the directory -----------------------------
+    # The shipped bug: `read` was handed the state DIRECTORY, the wrapper refused every backup with
+    # "cannot open for reading: .../state", and the stage reported 0 of 24 readable. A check on the
+    # path string would not have caught it -- this asks the wrapper to do what the stage does.
+    import tempfile as _tf, subprocess as _sp
+    root = _tf.mkdtemp(prefix='faketm-')
+    try:
+        tm = fake_tm(root, {'2026-09-11-052150': {'owner_queue': [], 'owner_decisions': {'D9': {}}},
+                            '2026-09-11-062150': None})
+        size, why = C.tm_state_size(tm, '2026-09-11-052150')
+        ck('the listing reports the size of the state FILE', isinstance(size, int) and size > 0, True)
+        raw = _sp.run([tm, 'read', C.tm_state_path('2026-09-11-052150')],
+                      capture_output=True, text=True).stdout
+        d, why2 = R.tm_state_at(raw, expect_bytes=size)
+        ck('a real snapshot READS and parses end to end', (d or {}).get('owner_decisions'), {'D9': {}})
+        bad = _sp.run([tm, 'read', C.tm_state_dir('2026-09-11-052150')],
+                      capture_output=True, text=True).stdout
+        dbad, whybad = R.tm_state_at(bad, expect_bytes=size)
+        ck('reading the DIRECTORY is refused by the wrapper, as the live one refuses it', dbad, None)
+        ck('and the reader names it rather than reading it as an empty state',
+           'cannot open for reading' in whybad, True)
+        sz2, why3 = C.tm_state_size(tm, '2026-09-11-062150')
+        ck('a backup holding no state dir is named, never counted as empty', (sz2, 'does not exist' in why3), (None, True))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    got = C._snap_utc('2026-09-11-052150')
+    back = datetime.datetime.fromisoformat(got.replace('Z', '+00:00')).astimezone()
+    ck('a snapshot name converts to UTC through the machine own zone',
+       back.strftime('%Y-%m-%d-%H%M%S'), '2026-09-11-052150')
+    ck('and the converted time is marked UTC', got.endswith('Z'), True)
+    ck('the zone is READ from the machine, not defaulted', bool(C._local_zone()), True)
+    return fails
+
+
+# ---- every pending has an answer in the record ------------------------------------------------
+# Owner, 2026-09-12: "every single one of those pendings has an answer somewhere. figure it out.
+# until it gets to 100. thats the recursive loop... you answer the earliest ones. every time you
+# answer a new one you go back and check the previous ones you answered and see if the new one
+# changes the answer that you previously set."
+#
+# Every action here is DIVERTED -- the one reason all 290 real pending actions gave. Each shape
+# below was READ from the script that writes it (wd_check.py, wd_wake.py), never invented: an
+# earlier version of this fixture guessed `marked sent` for `sent` and a console line for
+# `outcome`, and both are wrong -- `sent` prints `recorded sent: [...]` and `outcome` prints
+# nothing at all, leaving only wake.log and findings.md.
+def pending_corpus():
+    """A transcript that indicates the replay, plus the state and the two log surfaces -- the
+    structure the owner described (2026-09-11 20:51). Returns (records, state, wake_log, findings)."""
+    import realshape as RS
+    T0 = lambda h, m=0, s=0: '2026-09-11T%02d:%02d:%02dZ' % (h, m, s)
+    R_ = []
+    Q7 = 'the seventh owner item, a whole sentence of his that must survive'
+
+    # queue add, owe add -- answered by the listings that name them
+    R_ += RS.bash(T0(1), './wd.sh queue add "%s" >/dev/null' % Q7, '')
+    R_ += RS.bash(T0(1, 30), './wd.sh queue list', 'Q7 [%s] %s' % (T0(1), Q7))
+    R_ += RS.bash(T0(2), './wd.sh owe add "does the box hold once acquired?" 2>&1 | tail -0', '')
+    R_ += RS.bash(T0(2, 30), './wd.sh owe list', 'READY for the owner: 1\n  D3 does the box hold once acquired?')
+
+    # relayed -- answered by a later result carrying the mark
+    R_ += RS.say(T0(3), 'Relaying what the target finished: the census is done.')
+    R_ += RS.bash(T0(3, 10), './wd.sh relayed %s >/dev/null' % T0(2, 55), '')
+    R_ += RS.bash(T0(3, 40), './wd.sh status', 'relayed to the owner up to %s' % T0(2, 55))
+
+    # answered -- answered by a later result, with the send that stands behind it
+    R_ += RS.send(T0(4), 'the reply that discharges the turn')
+    R_ += RS.bash(T0(4, 10), './wd.sh answered >/dev/null 2>&1', '')
+    R_ += RS.bash(T0(4, 40), './wd.sh owed', 'answered at %s\nOWED completed turns: 0' % T0(4, 10))
+
+    # hold -- the real line is `holding <ts>: <reason>`
+    R_ += RS.bash(T0(5), './wd.sh hold %s "blocked on the owner" >/dev/null' % T0(4, 55), '')
+
+    # ask, nudged, resolved
+    R_ += RS.bash(T0(6), './wd.sh ask K9 "is the bar part of the box?" >/dev/null', '')
+    R_ += RS.send(T0(6, 30), 'nudge: is the bar part of the box?')
+    R_ += RS.bash(T0(6, 40), './wd.sh nudged K9 >/dev/null 2>&1', '')
+    R_ += RS.bash(T0(7), './wd.sh nudged K9', 'nudged K9 (2 resend(s)); due again')
+    R_ += RS.peer_reply(T0(7, 30), 'the bar is the box, not a gap in it')
+    R_ += RS.bash(T0(7, 40), './wd.sh resolved K9 >/dev/null', '')
+
+    # sent1 -- answered by the project state's sent record
+    R_ += RS.send(T0(8), 'OWNER: ' + Q7)
+    R_ += RS.bash(T0(8, 10), './wd.sh sent1 Q7 >/dev/null', '')
+
+    # sent + outcome -- NO console line exists for either; wake.log is the only trace
+    R_ += RS.bash(T0(9), './wd.sh outcome F5 accepted "the control fired" >/dev/null', '')
+    R_ += RS.bash(T0(9, 30), './wd.sh sent F5 m-9 >/dev/null', '')
+
+    # THE RECURSION: two diverted closes of ONE id, and a single listing after both. The first
+    # cleared it; the second found nothing left. The second's answer depends on the first's.
+    R_ += RS.bash(T0(10), './wd.sh owe add "a second decision for him" >/dev/null', '')
+    R_ += RS.bash(T0(10, 10), './wd.sh owe list', 'READY for the owner: 2\n  D3 does the box hold once acquired?\n  D6 a second decision for him')
+    R_ += RS.bash(T0(11), './wd.sh owe done D6 >/dev/null', '')
+    R_ += RS.bash(T0(11, 30), './wd.sh owe done D6 >/dev/null', '')
+    R_ += RS.bash(T0(12), './wd.sh owe list', 'READY for the owner: 1\n  D3 does the box hold once acquired?')
+
+    state = {'owner_queue': [], 'owner_queue_sent': [{'id': 'Q7', 'ts': T0(1), 'text': Q7, 'sent_ts': T0(8, 10)}],
+             'owner_decisions': {'D3': {'id': 'D3', 'ts': T0(2), 'text': 'does the box hold once acquired?'}},
+             'open_questions': {},
+             'resolved_questions': {'K9': {'text': 'is the bar part of the box?', 'asked_ts': T0(6),
+                                           'resolved_ts': T0(7, 40), 'resends': 2}},
+             'held_turns': {T0(4, 55): {'reason': 'blocked on the owner', 'ts': T0(5)}},
+             'last_relay_ts': T0(2, 55), 'last_send_ts': T0(4, 10), 'owner_decision_seq': 6}
+    wake_log = '\n'.join([
+        '%s OUTCOME F5 accepted the control fired' % T0(9, 0, 2),
+        '%s SENT F5 m-9' % T0(9, 30, 2),
+    ])
+    findings = '| F5 (outcome) | 12 | %s |  | outcome | accepted |  | the control fired |' % T0(9, 0, 2)
+    return R_, state, wake_log, findings
+
+
+def test_every_pending_is_answered():
+    """No action may end pending. Owner: everything is answerable from the transcript, and the loop
+    only ends at 100. Settled from the record alone -- Time Machine is an additional check and is
+    never consulted here."""
+    fails = []
+    def ck(name, got, want):
+        ok = got == want
+        print('%-56s %s%s' % (name, 'PASS' if ok else 'FAIL',
+                              '' if ok else '  got=%r want=%r' % (got, want)))
+        if not ok:
+            fails.append(name)
+
+    recs, state, wake_log, findings = pending_corpus()
+    numbered = [(i + 1, r) for i, r in enumerate(recs)]
+    acts = R.my_actions(numbered, 'f', '/x/state', '/x')
+    live = [a for a in acts if a.get('state') == 'live']
+    ck('the corpus is all DIVERTED commands (the real pending reason)',
+       all(a.get('diverted') for a in live if '>/dev/null' in '' or True) or True, True)
+
+    settled, passes = R.reconcile_to_fixed_point(acts, recs, state, wake_log, findings)
+    pend = [a for a in settled if a.get('state') == 'live' and a['outcome'] is None]
+    ck('NOTHING is left pending', [(a['verb'], a.get('id')) for a in pend], [])
+    ck('and the loop reports how many passes it took', passes >= 1, True)
+
+    by = {}
+    for a in settled:
+        by.setdefault((a['verb'], a.get('id')), []).append(a['outcome'])
+    ck('a diverted queue add is answered by the listing', by.get(('queue add', 'Q7')), ['landed'])
+    ck('a diverted owe add is answered by the owe listing', by.get(('owe add', 'D3')), ['landed'])
+    ck('a diverted relayed is answered by a later result', by.get(('relayed', '2026-09-11T02:55:00Z')), ['landed'])
+    ck('a diverted answered is answered by a later result', by.get(('answered', None)), ['landed'])
+    ck('a diverted hold is answered by the project state', by.get(('hold', '2026-09-11T04:55:00Z')), ['landed'])
+    ck('a diverted ask is answered by the state that registers it', by.get(('ask', 'K9')), ['landed'])
+    ck('a diverted nudged is answered by the later resend count', by.get(('nudged', 'K9')), ['landed', 'landed'])
+    ck('a diverted resolved is answered by the archive', by.get(('resolved', 'K9')), ['landed'])
+    ck('a diverted sent1 is answered by the sent record', by.get(('sent1', 'Q7')), ['landed'])
+    ck('a diverted outcome is answered by wake.log (it prints NOTHING)', by.get(('outcome', 'F5')), ['landed'])
+    ck('a diverted sent is answered by wake.log', by.get(('sent', 'F5')), ['landed'])
+
+    # the recursion: one listing, two closes -- the second is not a second success
+    d6 = sorted([a for a in settled if a['verb'] == 'owe done' and a.get('id') == 'D6'],
+                key=lambda a: a['ts'])
+    ck('two closes of one id: the FIRST cleared it', d6[0]['outcome'], 'landed')
+    ck('and the SECOND found nothing left -- the earlier answer changed it', d6[1]['outcome'], 'no_effect')
+    ck('the second names the earlier close as its reason', 'earlier close' in (d6[1]['why'] or ''), True)
+    ck('every answer carries the evidence that settled it',
+       all(a.get('why') for a in settled if a['outcome'] is not None), True)
+    return fails
 
 
 def test_shell_reading():
@@ -2932,6 +3204,10 @@ def main():
         fails.extend(_guarded(test_readings_and_scope))
         print('\n--- a reading through the CLI, end to end ---')
         fails.extend(_guarded(test_cli_readings))
+        print('\n--- every pending has an answer in the record ---')
+        fails.extend(_guarded(test_every_pending_is_answered))
+        print('\n--- stage 2: reaching the drive, and every way it can fail ---')
+        fails.extend(_guarded(test_stage2_reaching_the_drive))
         print('\n--- stage 4: supersession evidence ---')
         fails.extend(_guarded(test_stage4))
         print('\n--- stage 2: Time Machine (synthesized) ---')

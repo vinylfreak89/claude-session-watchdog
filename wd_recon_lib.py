@@ -911,9 +911,211 @@ def resolve_from_evidence(acts, recs, state):
     return acts
 
 
+
+# ================================================================ every pending has an answer
+# Owner, 2026-09-12: "every single one of those pendings has an answer somewhere. figure it out.
+# until it gets to 100. thats the recursive loop." And 2026-09-11: "Everything is answerable from
+# transcripts because they are all your actions, project state or things I owe you."
+#
+# A diverted command hid its OWN output. It did not hide its EFFECT. The effect is later in the
+# record every time, on one of six surfaces, and each shape below was read from the scripts that
+# write it -- never assumed, which is the defect that made the Time Machine reader reject every
+# real read:
+#
+#   console      a later command's result: `relayed to the owner up to X`, `answered at X`,
+#                `holding <ts>: why`, `nudged K (n resend(s))`, `item Qn marked sent at X`,
+#                `recorded sent: [ids]`, a `Qn [at] text` or `  Dn text` listing row
+#   owed report  one row per UNHANDLED turn -- `  <ts>  [not relayed]  head`. A turn that stopped
+#                being listed was handled: an ABSENCE answer, and the only kind that a later
+#                record can overturn, which is why the loop re-checks them.
+#   state        owner_queue / owner_queue_sent / owner_decisions / open_questions /
+#                resolved_questions / held_turns / last_relay_ts / last_send_ts
+#   wake.log     `<ts> SENT F1 <message-id>`, `<ts> OUTCOME F5 accepted why`, `<ts> VETO F6 why`,
+#                `<ts> FINDING F2 class status`, `<ts> OWNER-QUEUE delivered <message-id>`
+#   findings.md  `| F5 (outcome) | wake | wake_ts | ct | outcome | accepted | | message |`
+#   target       what the target's transcript shows it received and sent
+RELAY_LINE = re.compile(r'relayed to the owner up to (\S+)')
+ANSWER_LINE = re.compile(r'answered at (\S+)')
+HOLD_LINE = re.compile(r'holding (\S+):')
+NUDGE_LINE = re.compile(r'nudged (\S+) \((\d+) resend')
+SENT1_LINE = re.compile(r'item (\S+) marked sent at (\S+)')
+RECORDED_LINE = re.compile(r"recorded (sent|veto): \[([^\]]*)\]")
+OWED_ROW = re.compile(r'^\s+(\S+)\s+\[([^\]]+)\]', re.M)
+OWED_HEAD = re.compile(r'OWED completed turns: (\d+)')
+LOG_LINE = re.compile(r'^(\S+) (SENT|OUTCOME|VETO|FINDING|OWNER-QUEUE|OWNER-RELAY) (.*)$', re.M)
+
+
+def result_texts(recs):
+    """(ts, text) for every tool result, in order -- the console surface."""
+    out = []
+    for r in recs:
+        ts = r.get('timestamp') or ''
+        c = (r.get('message') or {}).get('content')
+        if not isinstance(c, list):
+            continue
+        for b in c:
+            if isinstance(b, dict) and b.get('type') == 'tool_result':
+                out.append((ts, _block_text(b.get('content'))))
+    return sorted(out, key=lambda x: x[0])
+
+
+def log_events(log_text):
+    """(ts, verb, rest) for every wake.log line that records an action's effect."""
+    return [(m.group(1), m.group(2), m.group(3)) for m in LOG_LINE.finditer(log_text or '')]
+
+
+def _after(pairs, ts):
+    return [p for p in pairs if p[0] >= ts]
+
+
+def resolve_forward(acts, recs, state, log_text='', findings_text='', results=None, events=None):
+    """Settle every PENDING action from what the record shows LATER. Each answer carries the
+    evidence that made it and whether it rests on PRESENCE (a line naming it) or ABSENCE (a report
+    that stopped listing it). Only absence can be overturned by a later record, so only absence is
+    re-opened by the fixed point."""
+    results = result_texts(recs) if results is None else results
+    events = log_events(log_text) if events is None else events
+    qs = dict(state.get('open_questions') or {})
+    qs.update(state.get('resolved_questions') or {})
+    dlist = [(t, m.group(1), m.group(2)) for t, x in results for m in DLISTING.finditer(x)]
+    sent_ids = {x.get('id'): x for x in (state.get('owner_queue_sent') or [])}
+    held = state.get('held_turns') or {}
+
+    def settle(a, outcome, why, ev_ts, basis='presence'):
+        a['outcome'], a['why'] = outcome, why
+        a['evidence_ts'], a['basis'] = ev_ts, basis
+        a.pop('needs', None)
+
+    for a in sorted(acts, key=lambda x: x['ts']):           # EARLIEST first, per the owner
+        if a['outcome'] is not None or a.get('state', 'live') != 'live':
+            continue
+        v, ident, ts = a['verb'], a.get('id'), a['ts']
+        later = _after(results, ts)
+
+        if v == 'relayed' and ident:
+            hit = next(((t, m.group(1)) for t, x in later for m in [RELAY_LINE.search(x)]
+                        if m and m.group(1) >= ident), None)
+            if hit:
+                settle(a, 'landed', 'a later result reports the relay mark at %s' % hit[1], hit[0])
+            elif (state.get('last_relay_ts') or '') >= ident:
+                settle(a, 'landed', 'project state carries last_relay_ts at or past it', None)
+            else:
+                gone = next(((t, x) for t, x in later if OWED_HEAD.search(x)
+                             and ident not in [m.group(1) for m in OWED_ROW.finditer(x)]), None)
+                if gone:
+                    settle(a, 'landed', 'the next owed report no longer lists that turn', gone[0], 'absence')
+        elif v == 'answered':
+            hit = next(((t, m.group(1)) for t, x in later for m in [ANSWER_LINE.search(x)]
+                        if m and m.group(1) >= ts), None)
+            if hit:
+                settle(a, 'landed', 'a later result reports the send mark at %s' % hit[1], hit[0])
+            elif (state.get('last_send_ts') or '') >= ts:
+                settle(a, 'landed', 'project state carries last_send_ts at or past it', None)
+        elif v == 'hold' and ident:
+            if ident in held:
+                settle(a, 'landed', 'project state holds that turn', None)
+            else:
+                hit = next(((t, m.group(1)) for t, x in later for m in [HOLD_LINE.search(x)]
+                            if m and m.group(1) == ident), None)
+                if hit:
+                    settle(a, 'landed', 'a later result reports the hold', hit[0])
+        elif v == 'nudged' and ident:
+            hit = next(((t, m.group(2)) for t, x in later for m in [NUDGE_LINE.search(x)]
+                        if m and m.group(1) == ident), None)
+            if hit:
+                settle(a, 'landed', 'a later result shows %s at %s resend(s)' % (ident, hit[1]), hit[0])
+            elif (qs.get(ident) or {}).get('resends'):
+                settle(a, 'landed', 'project state records its resends', None)
+        elif v == 'ask' and ident:
+            if ident in qs:
+                settle(a, 'landed', 'project state registers the question', None)
+        elif v == 'resolved' and ident:
+            if ident in (state.get('resolved_questions') or {}):
+                settle(a, 'landed', 'project state archives it resolved', None)
+        elif v == 'sent1' and ident:
+            if sent_ids.get(ident, {}).get('sent_ts'):
+                settle(a, 'landed', 'project state records it sent', None)
+            else:
+                hit = next(((t, m.group(2)) for t, x in later for m in [SENT1_LINE.search(x)]
+                            if m and m.group(1) == ident), None)
+                if hit:
+                    settle(a, 'landed', 'a later result marks it sent at %s' % hit[1], hit[0])
+        elif v in ('sent', 'veto') and ident:
+            want = {i.strip() for i in str(ident).split(',') if i.strip()}
+            hit = next(((t, rest) for t, verb, rest in events
+                        if t >= ts and verb == v.upper() and rest.split()[0] in want), None)
+            if hit:
+                settle(a, 'landed', 'wake.log records %s %s' % (v.upper(), hit[1][:40]), hit[0])
+            else:
+                hit = next(((t, m.group(2)) for t, x in later for m in [RECORDED_LINE.search(x)]
+                            if m and m.group(1) == v), None)
+                if hit:
+                    settle(a, 'landed', 'a later result records %s %s' % (v, hit[1]), hit[0])
+        elif v == 'outcome' and ident:
+            hit = next(((t, rest) for t, verb, rest in events
+                        if t >= ts and verb == 'OUTCOME' and rest.split()[0] == ident), None)
+            if hit:
+                settle(a, 'landed', 'wake.log grades it: %s' % hit[1][:60], hit[0])
+            elif ('| %s (outcome) |' % ident) in (findings_text or ''):
+                settle(a, 'landed', 'findings.md carries its outcome row', None)
+        elif v == 'owe done' and ident:
+            # The first owe listing AFTER it decides: the entry gone means the close landed, the
+            # same entry still there means it did nothing. Both rest on a listing, so both carry
+            # its timestamp -- and the absence one is re-opened every pass, because a later mint
+            # of the same id changes what that absence meant.
+            rows = [(t, i, x) for t, i, x in dlist if t >= ts]
+            first = min((t for t, i, x in rows), default=None)
+            if first is not None:
+                names = {i for t, i, x in rows if t == first}
+                # an EARLIER close of the same id that already landed leaves nothing for this one
+                prior = [b for b in acts if b['verb'] == 'owe done' and b.get('id') == ident
+                         and b['ts'] < ts and b['outcome'] == 'landed'
+                         and not any(o['verb'] == 'owe add' and o.get('id') == ident
+                                     and b['ts'] < o['ts'] < ts for o in acts)]
+                if prior:
+                    settle(a, 'no_effect', 'an earlier close of %s had already cleared it' % ident,
+                           prior[0].get('evidence_ts'), 'absence')
+                elif ident in names:
+                    settle(a, 'no_effect', 'the next owe listing still shows %s' % ident, first)
+                else:
+                    settle(a, 'landed', 'the next owe listing no longer shows %s' % ident, first, 'absence')
+        elif v == 'queue clear' and ident:
+            hit = next(((t, rest) for t, verb, rest in events
+                        if t >= ts and verb == 'OWNER-QUEUE' and ident in rest), None)
+            if hit:
+                settle(a, 'landed', 'wake.log records the delivery', hit[0])
+    return acts
+
+
+def reconcile_to_fixed_point(acts, recs, state, log_text='', findings_text='', max_passes=25):
+    """The recursive loop, in the owner's words (2026-09-12): "you answer the earliest ones. every
+    time you answer a new one you go back and check the previous ones you answered and see if the
+    new one changes the answer that you previously set."
+
+    Every pass re-opens answers that rest on ABSENCE -- a report that stopped listing something --
+    because a later record can change what that absence meant: an id minted again, a turn listed
+    again. Answers resting on a line that NAMES the action cannot be overturned that way and are
+    kept. It ends when a whole pass changes nothing, and the pass count is reported so a run that
+    never settles is visible rather than silent."""
+    results, events = result_texts(recs), log_events(log_text)
+    seen = None
+    for n in range(1, max_passes + 1):
+        for a in acts:
+            if a.get('basis') == 'absence':
+                a['outcome'], a['why'] = None, None
+        resolve_from_evidence(acts, recs, state)
+        resolve_forward(acts, recs, state, log_text, findings_text, results, events)
+        now = [(a.get('cite'), a['verb'], a.get('id'), a['outcome'], a.get('evidence_ts')) for a in acts]
+        if now == seen:
+            return acts, n
+        seen = now
+    return acts, max_passes
+
 def outstanding(acts):
-    """Live actions whose outcome no evidence has established yet. The reconciliation OWES these:
-    each is a place Time Machine or a later record must be read, and none is a verdict."""
+    """Live actions whose outcome no evidence has established yet -- and the reconciliation is not
+    finished while any remain. Time Machine is an ADDITIONAL check, never the answer: the record
+    itself answers every one of these (owner, 2026-09-11: "Everything is answerable from
+    transcripts because they are all your actions, project state or things I owe you")."""
     return [a for a in acts if a.get('state') == 'live' and a['outcome'] is None]
 
 
