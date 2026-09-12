@@ -588,17 +588,33 @@ def main():
             assert oid not in owe, 'owner-decision id %s already in use' % oid
             owe[oid] = dict(id=oid, ts=W.now_iso(), text=a.owe_add, gated_on=a.gated_on or None)
             save_state(a.state_dir, state); print('recorded %s%s' % (oid, (' GATED behind: ' + a.gated_on) if a.gated_on else ' READY'))
+        # A CLOSE THAT MISSES MUST SAY SO. Both of these used to do nothing, print nothing and
+        # exit 0 when the id was not there -- so `owe done D1` on an absent decision was
+        # indistinguishable from one that worked. Measured by the reconciliation over
+        # 2026-09-09..11: 8 of the 13 silent no-ops in the whole window were exactly this, and
+        # four of them were the SAME id retried minutes apart, because nothing said it had not
+        # taken. The sibling paths already fail loudly -- `resolved` prints 'no open question X'
+        # and returns 1, `queue hold` prints 'no queued item X' -- and the decision store was
+        # the only one that failed in silence.
+        missed = None
         if a.owe_ungate:
-            if a.owe_ungate in owe: owe[a.owe_ungate]['gated_on'] = None; save_state(a.state_dir, state); print('%s is now READY' % a.owe_ungate)
+            if a.owe_ungate in owe:
+                owe[a.owe_ungate]['gated_on'] = None; save_state(a.state_dir, state)
+                print('%s is now READY' % a.owe_ungate)
+            else:
+                print('no owner decision %s' % a.owe_ungate); missed = 1
         if a.owe_clear:
-            if owe.pop(a.owe_clear, None) is not None: save_state(a.state_dir, state); print('%s answered and cleared' % a.owe_clear)
+            if owe.pop(a.owe_clear, None) is not None:
+                save_state(a.state_dir, state); print('%s answered and cleared' % a.owe_clear)
+            else:
+                print('no owner decision %s' % a.owe_clear); missed = 1
         ready = [d for d in owe.values() if not d.get('gated_on')]
         gated = [d for d in owe.values() if d.get('gated_on')]
         print('READY for the owner — he can answer these now: %d' % len(ready))
         for d in ready: print('  %s %s' % (d.get('id', '?'), W.short(d.get('text', ''), 220)))
         print('GATED — do not put these to him yet: %d' % len(gated))
         for d in gated: print('  %s %s\n      gated behind: %s' % (d.get('id', '?'), W.short(d.get('text', ''), 200), d['gated_on']))
-        return 0
+        return missed or 0
     if a.due:
         if not a.target: ap.error('--due needs --target')
         sess = W.find_session(a.target); st = W.read_state(sess)
