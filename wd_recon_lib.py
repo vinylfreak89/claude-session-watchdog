@@ -228,7 +228,14 @@ def stage4_evidence(candidate, records, key_terms=None):
     for r in after:
         txt = r.get('text') or ''
         overlap = sum(1 for t in terms if t in txt.lower())
-        if overlap >= max(2, len(terms) // 4) or (overlap and SUPERSEDE_HINT.search(txt)):
+        # `or (overlap and SUPERSEDE_HINT.search(txt))` stood here with SUPERSEDE_HINT defined
+        # NOWHERE. It could only evaluate when overlap was non-zero but under the threshold, which
+        # no fixture produced and no run reached until the worklist made stage 4 run at all -- so
+        # it had never executed once, and it raised NameError the first time it did. Removed
+        # rather than filled in: inventing a list of supersession words now would be a rule with
+        # no evidence behind it, in a function whose whole contract is that it GATHERS and a human
+        # decides. Term overlap is the measure.
+        if overlap >= max(2, len(terms) // 4):
             hits.append({'ts': r['ts'], 'overlap': overlap, 'kind': r.get('kind', '?'),
                          'excerpt': txt[:300]})
     return {'candidate': candidate.get('cite'), 'terms': sorted(terms)[:12],
@@ -1514,8 +1521,19 @@ def _queue_row(state, ident):
 
 
 def later_landed(a, acts, verbs, same_id=True):
-    """The first LATER action of mine that took and is one of `verbs`, for this id."""
-    for x in sorted([y for y in acts if y['ts'] > a['ts']], key=lambda y: y['ts']):
+    """The first LATER action of mine that took and is one of `verbs`, for this id.
+
+    LATER means later in the RECORD, not later by clock. Every invocation in one shell command
+    carries that record's single timestamp, so `ask ZZTEST "control" && resolved ZZTEST` gives
+    both actions the same ts -- and a strictly-greater comparison cannot see the second from the
+    first. That is exactly where these chains live: the pair is usually one command. Measured: it
+    routed a question that was asked and resolved in one line back into open_questions as though
+    it were still open. `acts` is in record order, so position is the ordering that works; the ts
+    comparison stays as the fallback for a caller that passes actions this list does not hold.'''"""
+    seq = list(acts)
+    at = next((i for i, y in enumerate(seq) if y is a), None)
+    rest = seq[at + 1:] if at is not None else [y for y in seq if y['ts'] > a['ts']]
+    for x in rest:
         if x.get('outcome') != 'landed' or x.get('state', 'live') != 'live':
             continue
         if x['verb'] in verbs and (not same_id or x.get('id') == a.get('id')):
@@ -1523,7 +1541,16 @@ def later_landed(a, acts, verbs, same_id=True):
     return None
 
 
-def effect_disposition(a, state, acts=()):
+def _chain_answer(ident, chains):
+    """When the owner answered this decision, from the replayed chains. Keys carry a #n suffix
+    when one id was raised more than once, so the id is matched on its stem."""
+    for k, c in (chains or {}).items():
+        if k.split('#')[0] == ident and (c or {}).get('answered'):
+            return c['answered']
+    return None
+
+
+def effect_disposition(a, state, acts=(), chains=None):
     """How this action's intended effect stands in the state NOW: (disposition, why, repair).
 
     `repair` is None unless RESTORABLE, and then it is the MERGE to perform: an `append` of a row
@@ -1562,6 +1589,14 @@ def effect_disposition(a, state, acts=()):
     if v == 'owe add':
         if ident in decs:
             return PRESENT, 'the decision is in owner_decisions', None
+        # A decision the owner ANSWERED has reached its intended end state, which is CLEARED --
+        # `owe done` deletes. Its close command failing does not change where the chain was
+        # going, and putting it back would present him with a decision he has already made.
+        # Measured on the real state: D15, D16 and D17 were all answered and all absent, and
+        # without this they would have been restored as live decisions for him to answer twice.
+        ans = _chain_answer(ident, chains)
+        if ans:
+            return MOOT, 'answered by the owner at %s; cleared is its intended end state' % ans[:19], None
         if not text or not a.get('text_resolved', True):
             return MOOT, 'the dropped add carried no text this instrument may write back', None
         return RESTORABLE, 'the decision is not in owner_decisions', {
@@ -1727,7 +1762,7 @@ def explained_by_later(a, acts):
     return 'no rule yet says what may legitimately remove this effect'
 
 
-def restorations_owed(acts, state):
+def restorations_owed(acts, state, chains=None):
     """Every dropped action, with how its intended effect stands in the state now.
 
     Returns (worklist, accounted). The worklist is the RESTORABLE ones -- the merges stage 5 will
@@ -1742,7 +1777,7 @@ def restorations_owed(acts, state):
             continue
         if a.get('outcome') in (None, 'superseded'):
             continue
-        disp, why, repair = effect_disposition(a, state, acts)
+        disp, why, repair = effect_disposition(a, state, acts, chains)
         if disp == PRESENT:
             continue                      # the state carries it; nothing is owed either way
         explained = (explained_by_later(a, acts) if a.get('outcome') == 'landed'

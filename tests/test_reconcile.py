@@ -523,6 +523,18 @@ def test_effect_dispositions():
         {'ts': 'T6', 'verb': 'ask', 'id': 'O-X', 'text': 'x', 'text_resolved': True,
          'outcome': 'failed', 'state': 'scratch', 'cite': 'f:6#0'},
     ]
+    # A chain inside ONE shell command: both actions carry that record's single timestamp, so
+    # following the chain by clock cannot see the second from the first. Measured on the real
+    # record: `ask ZZTEST "control" && resolved ZZTEST` was read as a question still open.
+    same_ts = [
+        {'ts': 'TZ', 'verb': 'ask', 'id': 'O-SAMETS', 'text': 'asked and resolved in one line',
+         'text_resolved': True, 'outcome': 'landed', 'cite': 'f:z#0'},
+        {'ts': 'TZ', 'verb': 'resolved', 'id': 'O-SAMETS', 'outcome': 'landed', 'cite': 'f:z#1'},
+    ]
+    sw, _ = R.restorations_owed(same_ts, state)
+    ck('a chain inside ONE command is followed, not read as still open',
+       [w['repair']['store'] for w in sw if w['id'] == 'O-SAMETS'], ['resolved_questions'])
+
     # THE CHAIN, not its first link. A question that was asked and LATER RESOLVED, whose row is
     # in neither store, is owed its ARCHIVED form -- appending it to open_questions would re-open
     # a question the owner already answered. On the real state every single dropped question was
@@ -545,6 +557,19 @@ def test_effect_dispositions():
     cw2, _ = R.restorations_owed(chain[:-1], state)
     ck('a dropped question never resolved is restored as OPEN',
        [w['repair']['store'] for w in cw2 if w['id'] == 'O-CHAIN'], ['open_questions'])
+
+    # A decision the owner ANSWERED is owed nothing: its intended end state is cleared, and
+    # `owe done` deletes. On the real state D15/D16/D17 were each answered and each absent, and
+    # without this they would have gone back as live decisions for him to answer a second time.
+    ans = [{'ts': 'TB', 'verb': 'owe add', 'id': 'D88', 'text': 'answered, never closed',
+            'text_resolved': True, 'outcome': 'landed', 'cite': 'f:b#0'}]
+    aw, aa = R.restorations_owed(ans, state, {'D88#1': {'answered': '2026-09-11T03:32:37Z'}})
+    ck('a decision the owner ANSWERED is not put back to him', aw, [])
+    ck('and the reason names when he answered it',
+       'answered by the owner' in aa[0]['why'], True)
+    ck('CONTROL: the same decision UNANSWERED is restored',
+       [w['repair']['store'] for w in R.restorations_owed(ans, state, {})[0]],
+       ['owner_decisions'])
 
     work, acct = R.restorations_owed(acts, state)
     ck('the worklist holds the dropped hold AND the dropped queue row',

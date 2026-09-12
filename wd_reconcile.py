@@ -564,7 +564,7 @@ def run_stage(n, L, S, a):
         # derived from the live state, never from the commands. This is what `restores` in the
         # confidence is measured against, so it must be computed on every stage-3 run: a stale
         # worklist would score a repair that a later change had already undone.
-        work, accounted = RL.restorations_owed(acts, RL.live_stores(S)['raw'])
+        work, accounted = RL.restorations_owed(acts, RL.live_stores(S)['raw'], ch)
         L['owed'], L['accounted'] = work, accounted
         _disp = _c.Counter(x['disposition'] for x in accounted)
         owed_readings = [{'key': RL.action_key(x), 'ts': x['ts'], 'verb': x['verb'], 'id': x.get('id'),
