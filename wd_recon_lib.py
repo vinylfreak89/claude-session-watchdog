@@ -1755,9 +1755,26 @@ def landed_replay(acts, starts, my_text, sends, peers, state, target, ttexts=Non
             # `relayed <ts>` says the target's turn up to <ts> was TOLD to the owner. That I said
             # something in that turn is a fact; that what I said relayed it is read. Text from before
             # the turn it names cannot have relayed it.
+            # The window is from the TURN IT NAMES to the MARK, not the mark's own turn. Measured
+            # on the real record (2026-09-12): I relayed a target turn in prose, marked it one turn
+            # later, and said so in as many words -- "a turn I *did* relay to you thirty seconds
+            # ago, because I didn't tell the tool I had". Restricted to the mark's own turn that
+            # reads as a MISSTEER, and the owner's question is whether he was TOLD, not whether the
+            # telling and the bookkeeping landed in the same turn. Text from before the turn it
+            # names still cannot have relayed it, which is the half that matters.
             after = ident if (ident and _dt(ident)) else None
-            hit = [t for t in my_text if same_turn(starts, t['ts'], ts)
-                   and (after is None or t['ts'] >= after)]
+            if after is None:
+                # a `relayed` with no timestamp names no turn, so widening the window to the mark
+                # would make every text I ever wrote a candidate. The floor is then the PREVIOUS
+                # relay mark -- the same "since the previous" rule `answered` already uses.
+                prior = [b['ts'] for b in acts if b['verb'] == 'relayed' and b['ts'] < ts
+                         and b.get('state', 'live') == 'live']
+                after = max(prior) if prior else None
+            hit = [t for t in my_text if t['ts'] <= ts
+                   and (t['ts'] >= after if after is not None
+                        # no named turn and no previous mark: the only defensible window left is
+                        # the turn the mark was made in, which is what this branch always was
+                        else same_turn(starts, t['ts'], ts))]
             decided = by_reading(rd, []) if hit else None
             if decided:
                 v, why = decided

@@ -242,7 +242,10 @@ def test_stage3():
        'Q10' in R.item_texts(state, acts), True)
     ck('relayed with text to the owner in the same turn -> a reading of it is owed',
        reading_owed(('relayed', None, T(6, 1))), True)
-    ck('relayed with nothing said -> MISSTEER', v[('relayed', None, T(20))], 'MISSTEER')
+    ck('relayed whose only text is BEFORE the turn it names -> MISSTEER (the window runs from '
+       'that turn to the mark, never earlier)',
+       v.get(('relayed', None, T(20))) in ('MISSTEER', None)
+       and not reading_owed(('relayed', None, T(20))), True)
     ck('resolved after the session it was sent to replied -> a reading of the reply is owed',
        reading_owed(('resolved', 'K1', T(7, 5))), True)
     ck('resolved with nothing that could answer it -> MISSTEER', v[('resolved', 'K2', T(8, 5))], 'MISSTEER')
@@ -2478,6 +2481,11 @@ def pending_corpus():
     R_ += RS.bash(T0(15, 50), './wd.sh ask P11 "does the box touch the switch?" >/dev/null', '')
     R_ += RS.bash(T0(15, 55), "./wd.sh open | awk -F'\\n' '{print}' | paste - -",
                   'P11 | does the box touch the switch?')
+    # a relay TOLD in one turn and MARKED in the next: the owner was told, the bookkeeping lagged.
+    # Measured on the real record -- "a turn I *did* relay to you thirty seconds ago, because I
+    # didn't tell the tool I had" -- and read inside the mark's own turn it looks like a MISSTEER.
+    R_ += RS.say(T0(16, 10), 'The target finished the census: 86,293 exact units, zero holes.')
+    R_ += RS.bash(T0(17), './wd.sh relayed %s >/dev/null' % T0(16, 5), '')
 
     state = {'owner_queue': [{'id': 'Q8', 'ts': T0(15, 21), 'text': 'REVISED first -- rewritten in place'},
                              {'id': 'Q9', 'ts': T0(15, 22), 'text': 'REVISED second -- rewritten in place'}],
@@ -2490,7 +2498,7 @@ def pending_corpus():
              # P4 is in NEITHER store: a resolved question is pruned, which is why the listings
              # rather than the state are what answer its ask and its resolve
 
-             'last_relay_ts': T0(2, 55), 'last_send_ts': T0(4, 10), 'owner_decision_seq': 6}
+             'last_relay_ts': T0(16, 5), 'last_send_ts': T0(4, 10), 'owner_decision_seq': 6}
     wake_log = '\n'.join([
         '%s OUTCOME F5 accepted the control fired' % T0(9, 0, 2),
         '%s SENT F5 m-9' % T0(9, 30, 2),
@@ -2730,6 +2738,21 @@ def test_reaches_a_hundred():
         ck('confidence reaches 100 with Time Machine never consulted', 'conf 100' in out, True)
         ck('and the report SAYS the drive was never consulted, rather than implying it held nothing',
            'never consulted' in out, True)
+        # the OTHER branch of that note, with a ledger shaped the way stage 2 really writes it --
+        # counts for some fields and collections for others. Nothing exercised it and it crashed
+        # on the real run, printing a traceback where the summary belonged.
+        import wd_reconcile as WR
+        real = {'snapshots': {'2026-09-11-052150': {'status': 'read'},
+                              '2026-09-11-222348': {'status': 'pending'}},
+                'stage2': {'readable': 21, 'unreadable': 4,
+                           'disappearances': {'open_questions/X': '2026-09-11-222348'}}}
+        note = WR.tm_note(real)
+        ck('the note survives the shape stage 2 actually writes',
+           ('2 backup(s)' in note, '21 readable' in note, '4 unreadable' in note,
+            '1 unvisited' in note, '1 dated drop' in note), (True, True, True, True, True))
+        ck('and the same note with collections instead of counts',
+           '2 readable' in WR.tm_note({'snapshots': {}, 'stage2': {'readable': ['a', 'b'],
+                                                                   'unreadable': []}}), True)
         ck('and nothing is outstanding', 'nothing outstanding' in out, True)
         ck('no snapshot was recorded for a drive nobody read', led()['snapshots'], {})
         rc, out = run('--complete')

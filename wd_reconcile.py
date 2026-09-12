@@ -296,12 +296,17 @@ def tm_note(L):
     but never silent either: a run that reached 100 without the drive says so."""
     s2 = L.get('stage2') or {}
     if s2:
-        pend = [k for k, v in L['snapshots'].items() if v.get('status') == 'pending']
+        # stage 2 records some of these as COUNTS and some as collections, and a note that assumes
+        # one shape crashes on the other -- which is how this printed a traceback where a summary
+        # belonged. `_n` takes either, and the test exercises a ledger shaped like the real one.
+        def _n(x):
+            return x if isinstance(x, int) else len(x or ())
+        pend = [k for k, v in (L.get('snapshots') or {}).items()
+                if isinstance(v, dict) and v.get('status') == 'pending']
         return ('Time Machine: %d backup(s), %d readable, %d unreadable, %d unvisited; %d dated '
                 'drop(s) (the additional check -- reported, never scored)'
-                % (len(L['snapshots']), len(s2.get('readable') or []),
-                   len(s2.get('unreadable') or []), len(pend),
-                   len(s2.get('disappearances') or {})))
+                % (_n(L.get('snapshots')), _n(s2.get('readable')), _n(s2.get('unreadable')),
+                   len(pend), _n(s2.get('disappearances'))))
     return 'Time Machine: never consulted -- the additional check was not run'
 
 
