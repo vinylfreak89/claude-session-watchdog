@@ -2452,6 +2452,7 @@ def pending_corpus():
     R_ += RS.bash(T0(14, 44), './wd.sh open | head -1', 'OPEN QUESTIONS: 1')
     R_ += RS.bash(T0(14, 46), './wd.sh resolved P12 >/dev/null', '')
     R_ += RS.bash(T0(14, 47), './wd.sh open | head -1', 'OPEN QUESTIONS: 0')
+    # from here P14 and then P9 are open, and the later reports say so
 
     # a resolve whose CONFIRMATION line is the only trace -- one line carrying the question's
     # whole life -- and it is not the first match in a result that reports several
@@ -2459,13 +2460,19 @@ def pending_corpus():
     R_ += RS.bash(T0(14, 51), './wd.sh nudged P9 >/dev/null 2>&1', '')
     # the nudge report names four ids and the one we want is LAST: `search` returns only the
     # first match in a result, which settled exactly one of twelve on the real record.
+    # P14 is nudged and its ONLY evidence is this report, in which it is LAST. P9 is in the same
+    # report, but P9 also has a resolve confirmation carrying its resends -- so P9 cannot show
+    # whether the rule reads past the first match, and P14 can.
+    R_ += RS.bash(T0(14, 51, 30), './wd.sh ask P14 "does the bar clip?" >/dev/null', '')
+    R_ += RS.bash(T0(14, 51, 40), './wd.sh nudged P14 >/dev/null 2>&1', '')
     R_ += RS.bash(T0(14, 52), './wd.sh nudged --all',
                   '\n'.join('nudged %s (%d resend(s)); due again' % (k, i + 1)
-                            for i, k in enumerate(['AAA', 'BBB', 'CCC', 'P9'])))
+                            for i, k in enumerate(['AAA', 'BBB', 'CCC', 'P9', 'P14'])))
     R_ += RS.bash(T0(14, 53), './wd.sh resolved P9 >/dev/null', '')
     R_ += RS.bash(T0(14, 55), './wd.sh status',
                   'resolved AAA (open since %s, 0 resend(s))\n'
                   'resolved P9 (open since %s, 2 resend(s))' % (T0(13), T0(14, 50)))
+    R_ += RS.bash(T0(14, 56), './wd.sh open | head -1', 'OPEN QUESTIONS: 1')
 
     # a control probe whose every trace is thrown away by construction -- and whose outcome the
     # shell states on the next line. Both invocations are reached only through `&&`.
@@ -2488,7 +2495,9 @@ def pending_corpus():
     # nothing a text pattern could recognise -- but the command says it is a listing. It stays
     # open to the end of the corpus, so no count ever contradicts it.
     R_ += RS.bash(T0(15, 50), './wd.sh ask P11 "does the box touch the switch?" >/dev/null', '')
-    R_ += RS.bash(T0(15, 55), "./wd.sh open | awk -F'\\n' '{print}' | paste - -",
+    R_ += RS.bash(T0(15, 55),
+                  'python3 -c "import json; d=json.load(open(\'state/state.json\'));'
+                  " [print(k,'|',v['text'][:60]) for k,v in (d.get('open_questions') or {}).items()]\"",
                   'P11 | does the box touch the switch?')
     # a relay TOLD in one turn and MARKED in the next: the owner was told, the bookkeeping lagged.
     # Measured on the real record -- "a turn I *did* relay to you thirty seconds ago, because I
@@ -2573,6 +2582,17 @@ def test_every_pending_is_answered():
        by.get(('ask', 'P4')), ['landed'])
     ck('and its resolve by the next listing that no longer does',
        by.get(('resolved', 'P4')), ['landed'])
+    # a resolve whose id NO listing ever carried must not settle from a complete listing that
+    # omits it: omission only means something once presence was established. The old check could
+    # not see this -- it rested on the truncated listing being refused, which is a different rule.
+    import realshape as _RS
+    never_open = [{'ts': '2026-09-11T05:00:00Z', 'cite': 'f:1', 'verb': 'resolved', 'id': 'NEVER',
+                   'state': 'live', 'kind': 'close', 'outcome': None, 'why': None}]
+    R.resolve_forward(never_open, _RS.bash('2026-09-11T06:00:00Z', './wd.sh open',
+                                           'OPEN QUESTIONS: 0\n   none'), {})
+    ck('a resolve of an id NO listing ever carried does not settle from its absence',
+       never_open[0]['outcome'], None)
+
     ck('a TRUNCATED listing settles nothing -- its header counts more than it lists',
        (R.question_report('OPEN QUESTIONS: 2'),
         R.question_report('OPEN QUESTIONS: 1\n   P4             0 turns ago'),
@@ -2599,15 +2619,29 @@ def test_every_pending_is_answered():
                            and a.get('id') == 'P12')['why'] or ''), True)
 
     # the identity is a CHECK before it is a rule: break it and nothing may be settled by counting
+    # the second report WOULD force X2 on its own (says 2, one ask landed, one unknown ask:
+    # delta +1). The first report is what refuses -- it says 7 where the settled actions say 1,
+    # with nothing unknown before it, so the identity does not hold on this record and NOTHING
+    # may be settled by counting. Without that refusal X2 settles, which is what makes this a
+    # control rather than a restatement.
     broken = R.resolve_by_count(
         [{'ts': '2026-09-11T01:00:00Z', 'verb': 'ask', 'id': 'X1', 'state': 'live',
           'outcome': 'landed', 'why': None},
          {'ts': '2026-09-11T03:00:00Z', 'verb': 'ask', 'id': 'X2', 'state': 'live',
           'outcome': None, 'why': None}],
         [('2026-09-11T02:00:00Z', 'OPEN QUESTIONS: 7'),      # says 7, one ask landed: impossible
-         ('2026-09-11T04:00:00Z', 'OPEN QUESTIONS: 8')])
+         ('2026-09-11T04:00:00Z', 'OPEN QUESTIONS: 2')])
     ck('CONTROL: an identity that does not hold settles NOTHING',
        [a['outcome'] for a in broken], ['landed', None])
+    sound = R.resolve_by_count(
+        [{'ts': '2026-09-11T01:00:00Z', 'verb': 'ask', 'id': 'X1', 'state': 'live',
+          'outcome': 'landed', 'why': None},
+         {'ts': '2026-09-11T03:00:00Z', 'verb': 'ask', 'id': 'X2', 'state': 'live',
+          'outcome': None, 'why': None}],
+        [('2026-09-11T02:00:00Z', 'OPEN QUESTIONS: 1'),      # holds: one ask landed
+         ('2026-09-11T04:00:00Z', 'OPEN QUESTIONS: 2')])
+    ck('and the SAME reports with a holding identity DO settle it -- so the refusal is the guard',
+       [a['outcome'] for a in sound], ['landed', 'landed'])
 
     qa = [a for a in settled if a['verb'] == 'queue add' and a['ts'] == T0H(15, 20)]
     ck('two adds whose items were RE-TEXTED are answered by when they were queued',
@@ -2626,8 +2660,8 @@ def test_every_pending_is_answered():
     ck('an ask whose only trace is its RESOLVE confirmation is answered by it',
        by.get(('ask', 'P9')), ['landed'])
     ck('and so is the resolve itself', by.get(('resolved', 'P9')), ['landed'])
-    ck('a nudge is found even when its report names eleven others first',
-       by.get(('nudged', 'P9')), ['landed'])
+    ck('a nudge is found even when its report names four others first',
+       by.get(('nudged', 'P14')), ['landed'])
     ck('a REFUSED hold is failed, not pending and not landed',
        by.get(('hold', T0H(14, 58))), ['failed'])
     ck('and it names the flag the report still carried',
