@@ -2486,6 +2486,10 @@ def pending_corpus():
     # didn't tell the tool I had" -- and read inside the mark's own turn it looks like a MISSTEER.
     R_ += RS.say(T0(16, 10), 'The target finished the census: 86,293 exact units, zero holes.')
     R_ += RS.bash(T0(17), './wd.sh relayed %s >/dev/null' % T0(16, 5), '')
+    # and the ordinary case, which the widening must not lose: the command runs FIRST and the
+    # prose that does the relaying comes after it, in the same turn
+    R_ += RS.bash(T0(18), './wd.sh relayed %s >/dev/null' % T0(17, 30), '')
+    R_ += RS.say(T0(18, 10), 'And it has closed the render question: the box is drawn on the picture.')
 
     state = {'owner_queue': [{'id': 'Q8', 'ts': T0(15, 21), 'text': 'REVISED first -- rewritten in place'},
                              {'id': 'Q9', 'ts': T0(15, 22), 'text': 'REVISED second -- rewritten in place'}],
@@ -2498,7 +2502,7 @@ def pending_corpus():
              # P4 is in NEITHER store: a resolved question is pruned, which is why the listings
              # rather than the state are what answer its ask and its resolve
 
-             'last_relay_ts': T0(16, 5), 'last_send_ts': T0(4, 10), 'owner_decision_seq': 6}
+             'last_relay_ts': T0(17, 30), 'last_send_ts': T0(4, 10), 'owner_decision_seq': 6}
     wake_log = '\n'.join([
         '%s OUTCOME F5 accepted the control fired' % T0(9, 0, 2),
         '%s SENT F5 m-9' % T0(9, 30, 2),

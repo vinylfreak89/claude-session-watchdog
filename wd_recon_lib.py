@@ -1770,7 +1770,12 @@ def landed_replay(acts, starts, my_text, sends, peers, state, target, ttexts=Non
                 prior = [b['ts'] for b in acts if b['verb'] == 'relayed' and b['ts'] < ts
                          and b.get('state', 'live') == 'live']
                 after = max(prior) if prior else None
-            hit = [t for t in my_text if t['ts'] <= ts
+            # ... and through the END of the mark's turn, not up to the mark itself. The command
+            # runs BEFORE the prose in a turn -- the tool call, then the message -- so a cap at
+            # the mark's own timestamp excludes the very text that did the relaying. Measured:
+            # capping there turned 72 relays into MISSTEERs in one run.
+            in_window = lambda t: (t['ts'] <= ts or same_turn(starts, t['ts'], ts))
+            hit = [t for t in my_text if in_window(t)
                    and (t['ts'] >= after if after is not None
                         # no named turn and no previous mark: the only defensible window left is
                         # the turn the mark was made in, which is what this branch always was
