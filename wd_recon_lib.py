@@ -993,6 +993,53 @@ def result_texts(recs):
     return sorted(out, key=lambda x: x[0])
 
 
+# A result is a listing of the open questions when its COMMAND says so: it either asked the
+# watchdog for them, or it named the store it read. Measured on the real record: the listing that
+# answers three of the last asks came from an inline `python3 -c` reading state.json's
+# open_questions, so a rule that recognised only `wd.sh open` could not see it -- and a rule that
+# recognised the OUTPUT's shape could not either, because the shape was invented by that command.
+LISTING_CMD = re.compile(r'wd\.sh\s+(?:open|next)\b|open_questions')
+
+
+def commanded_results(recs):
+    """(ts, command, result text) for every Bash call that produced one. result_texts() drops the
+    command, and the command is what says WHICH REPORT a result is -- a listing piped through awk
+    keeps none of its own formatting, so a pattern over the text can no longer recognise it while
+    the command still can."""
+    rm = result_map(recs)
+    out = []
+    for r in recs:
+        c = (r.get('message') or {}).get('content')
+        if not isinstance(c, list):
+            continue
+        for b in c:
+            if (isinstance(b, dict) and b.get('type') == 'tool_use' and b.get('name') == 'Bash'
+                    and b.get('id') in rm):
+                out.append((r.get('timestamp') or '', (b.get('input') or {}).get('command', ''),
+                            rm[b['id']][0]))
+    return sorted(out, key=lambda x: x[0])
+
+
+def listings_naming(recs, ident, cached=None):
+    """Timestamps of results produced by a command that ASKED for the open questions and whose
+    output names `ident`. Producer-anchored, so it does not care how the output was reformatted --
+    measured on the real record, where a listing reached the transcript as `ID | text` through an
+    ad-hoc pipe and no row pattern could have matched it. PRESENCE only: this establishes that the
+    question was open, never that one absent from such a result was closed."""
+    rx = re.compile(r'(?<![A-Za-z0-9_-])%s(?![A-Za-z0-9_-])' % re.escape(ident))
+    # `cached` is the listings alone, computed once: the fixed point re-opens absence-based
+    # answers every pass, so re-walking 28,000 records per pending id per pass is the difference
+    # between a stage that runs in seconds and one that runs in minutes.
+    rows = cached if cached is not None else [(t, txt) for t, cmd, txt in commanded_results(recs)
+                                              if LISTING_CMD.search(cmd)]
+    return [t for t, txt in rows if rx.search(txt)]
+
+
+def listing_results(recs):
+    """(ts, text) for every result whose command asked for the open questions."""
+    return [(t, txt) for t, cmd, txt in commanded_results(recs) if LISTING_CMD.search(cmd)]
+
+
 def log_events(log_text):
     """(ts, verb, rest) for every wake.log line that records an action's effect."""
     return [(m.group(1), m.group(2), m.group(3)) for m in LOG_LINE.finditer(log_text or '')]
@@ -1002,13 +1049,15 @@ def _after(pairs, ts):
     return [p for p in pairs if p[0] >= ts]
 
 
-def resolve_forward(acts, recs, state, log_text='', findings_text='', results=None, events=None):
+def resolve_forward(acts, recs, state, log_text='', findings_text='', results=None, events=None,
+                    listings=None):
     """Settle every PENDING action from what the record shows LATER. Each answer carries the
     evidence that made it and whether it rests on PRESENCE (a line naming it) or ABSENCE (a report
     that stopped listing it). Only absence can be overturned by a later record, so only absence is
     re-opened by the fixed point."""
     results = result_texts(recs) if results is None else results
     events = log_events(log_text) if events is None else events
+    listings = listing_results(recs) if listings is None else listings
     qs = dict(state.get('open_questions') or {})
     qs.update(state.get('resolved_questions') or {})
     dlist = [(t, m.group(1), m.group(2)) for t, x in results for m in DLISTING.finditer(x)]
@@ -1019,6 +1068,18 @@ def resolve_forward(acts, recs, state, log_text='', findings_text='', results=No
         a['outcome'], a['why'] = outcome, why
         a['evidence_ts'], a['basis'] = ev_ts, basis
         a.pop('needs', None)
+
+    # a queue item records WHEN it was queued, and that is the one field a later edit does not
+    # touch. Measured on the real record (2026-09-12): three adds whose items were re-texted in
+    # place hours later by a direct edit of state.json, so matching the text finds nothing while
+    # the queued time still identifies them exactly.
+    queued = sorted((i.get('ts') or '') for i in ((state.get('owner_queue') or [])
+                                                  + (state.get('owner_queue_sent') or []))
+                    if i.get('ts'))
+    live_ts = sorted({x['ts'] for x in acts if x.get('state', 'live') == 'live'})
+
+    def _next_ts(ts):
+        return next((t for t in live_ts if t > ts), None)
 
     for a in sorted(acts, key=lambda x: x['ts']):           # EARLIEST first, per the owner
         if a['outcome'] is not None or a.get('state', 'live') != 'live':
@@ -1104,6 +1165,10 @@ def resolve_forward(acts, recs, state, log_text='', findings_text='', results=No
                             if m.group(1) == ident), None)
                 if hit:
                     settle(a, 'landed', 'its resolve reports it open since %s' % hit[1], hit[0])
+                    continue
+                seen_in = [t for t in listings_naming(recs, ident, listings) if t >= ts]
+                if seen_in:
+                    settle(a, 'landed', 'a later open-questions listing names it', seen_in[0])
         elif v == 'resolved' and ident:
             if ident in (state.get('resolved_questions') or {}):
                 settle(a, 'landed', 'project state archives it resolved', None)
@@ -1123,6 +1188,17 @@ def resolve_forward(acts, recs, state, log_text='', findings_text='', results=No
                 if was_open and gone:
                     settle(a, 'landed', 'the next open-questions report no longer lists it',
                            gone[0], 'absence')
+        elif v == 'queue add' and not ident:
+            # the adds of one command share its timestamp, so the window must hold one item per
+            # add -- fewer items than adds means at least one did not take, and none is claimed.
+            same = [b for b in acts if b['verb'] == 'queue add' and b['cite'] == a['cite']
+                    and b.get('state', 'live') == 'live']
+            hi = _next_ts(ts)
+            win = [t for t in queued if t >= ts and (hi is None or t < hi)]
+            if len(win) >= len(same):
+                settle(a, 'landed', 'the queue holds %d item(s) queued between %s and %s, one per '
+                       'add in that command' % (len(win), ts[11:19], (hi or 'the end')[11:19]),
+                       win[0])
         elif v == 'sent1' and ident:
             if sent_ids.get(ident, {}).get('sent_ts'):
                 settle(a, 'landed', 'project state records it sent', None)
@@ -1189,13 +1265,14 @@ def reconcile_to_fixed_point(acts, recs, state, log_text='', findings_text='', m
     kept. It ends when a whole pass changes nothing, and the pass count is reported so a run that
     never settles is visible rather than silent."""
     results, events = result_texts(recs), log_events(log_text)
+    listings = listing_results(recs)
     seen = None
     for n in range(1, max_passes + 1):
         for a in acts:
             if a.get('basis') == 'absence':
                 a['outcome'], a['why'] = None, None
         resolve_from_evidence(acts, recs, state)
-        resolve_forward(acts, recs, state, log_text, findings_text, results, events)
+        resolve_forward(acts, recs, state, log_text, findings_text, results, events, listings)
         now = [(a.get('cite'), a['verb'], a.get('id'), a['outcome'], a.get('evidence_ts')) for a in acts]
         if now == seen:
             return acts, n

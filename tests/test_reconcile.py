@@ -2438,6 +2438,16 @@ def pending_corpus():
                   'resolved P9 (open since %s, 2 resend(s))' % (T0(13), T0(14, 45)))
     # and a nudge whose report names TWELVE ids -- the one we want is not the first. `search`
     # returns only the first match in a result, which settled exactly one of twelve.
+    # an ask whose ONLY later trace is a listing reformatted by a pipe: no header, no row
+    # shape, nothing a text pattern could recognise -- but the command says it is a listing
+    # two adds in one command whose items were RE-TEXTED in place afterwards (measured on the
+    # real record: a later direct edit of state.json rewrote the text and kept the queued time),
+    # so the text is no longer a key and the queued time still is
+    R_ += RS.bash(T0(15, 20), './wd.sh queue add "first of two" >/dev/null; '
+                              './wd.sh queue add "second of two" >/dev/null', '')
+    R_ += RS.bash(T0(15, 50), './wd.sh ask P11 "does the box touch the switch?" >/dev/null', '')
+    R_ += RS.bash(T0(15, 55), "./wd.sh open | awk -F'\\n' '{print}' | paste - -",
+                  'P9 | does the bar reach the clip?\nP11 | does the box touch the switch?')
     R_ += RS.bash(T0(16), './wd.sh nudged P9 >/dev/null 2>&1', '')
     R_ += RS.bash(T0(16, 30), './wd.sh nudged --all',
                   '\n'.join('nudged %s (%d resend(s)); due again' % (k, i + 1)
@@ -2446,7 +2456,9 @@ def pending_corpus():
                   'OWED completed turns: 1\n   %s  [not answered or held]  The cold read and the re-review'
                   % T0(14, 55))
 
-    state = {'owner_queue': [], 'owner_queue_sent': [{'id': 'Q7', 'ts': T0(1), 'text': Q7, 'sent_ts': T0(8, 10)}],
+    state = {'owner_queue': [{'id': 'Q8', 'ts': T0(15, 21), 'text': 'REVISED first -- rewritten in place'},
+                             {'id': 'Q9', 'ts': T0(15, 22), 'text': 'REVISED second -- rewritten in place'}],
+             'owner_queue_sent': [{'id': 'Q7', 'ts': T0(1), 'text': Q7, 'sent_ts': T0(8, 10)}],
              'owner_decisions': {'D3': {'id': 'D3', 'ts': T0(2), 'text': 'does the box hold once acquired?'}},
              'open_questions': {},
              'resolved_questions': {'K9': {'text': 'is the bar part of the box?', 'asked_ts': T0(6),
@@ -2517,6 +2529,20 @@ def test_every_pending_is_answered():
     ck('and the resolve rests on the COMPLETE listing, not the truncated one',
        (next(a for a in settled if a['verb'] == 'resolved'
              and a.get('id') == 'P4')['evidence_ts']), T0H(14, 40))
+    qa = [a for a in settled if a['verb'] == 'queue add' and a['ts'] == T0H(15, 20)]
+    ck('two adds whose items were RE-TEXTED are answered by when they were queued',
+       [a['outcome'] for a in qa], ['landed', 'landed'])
+    ck('and the answer names one item per add, never fewer',
+       all('one per add' in (a['why'] or '') for a in qa), True)
+    ck('an ask whose only later trace is a REFORMATTED listing is answered by what produced it',
+       by.get(('ask', 'P11')), ['landed'])
+    ck('and a listing is recognised by its COMMAND, so the pipe cannot hide it',
+       (bool(R.LISTING_CMD.search("./wd.sh open | awk '{print}'")),
+        bool(R.LISTING_CMD.search('python3 -c "print(d[\'open_questions\'])"')),
+        bool(R.LISTING_CMD.search('./wd.sh opened-by-mistake')),
+        bool(R.LISTING_CMD.search('./wd.sh owed'))), (True, True, False, False))
+    ck('and an id is matched whole, never as part of a longer one',
+       (R.listings_naming(recs, 'P1'), bool(R.listings_naming(recs, 'P11'))), ([], True))
     ck('an ask whose only trace is its RESOLVE confirmation is answered by it',
        by.get(('ask', 'P9')), ['landed'])
     ck('and so is the resolve itself', by.get(('resolved', 'P9')), ['landed'])
