@@ -479,6 +479,24 @@ def test_tm_reader():
     ck('a TRUNCATED state file is never parsed', d2, None)
     ck('truncation is named as the reason', 'truncated' in why2, True)
 
+    # --- the LIVE wrapper's complete-read shape: bare bytes, NO trailer ----------------------
+    # Measured 2026-09-12: `tm read` appends a status trailer only when it truncates. The reader
+    # was built from the truncated shape and refused every complete read of a real snapshot.
+    bare = body                                            # exactly what the wrapper returns
+    cb, stb = R.tm_read_split(bare)
+    ck('a trailer-less read is the COMPLETE shape, not a failure', stb.get('ok'), True)
+    ck('and it is marked as carrying no trailer', stb.get('trailer'), False)
+    ck('its content is the whole file, untouched', cb, body)
+    db, whyb = R.tm_state_at(bare, expect_bytes=len(body.encode()))
+    ck('a trailer-less read with the listing size parses', (db or {}).get('owner_queue'), [{'id': 'Q1'}])
+    ck('and says ok', whyb, 'ok')
+    d_no, why_no = R.tm_state_at(bare)
+    ck('a trailer-less read with NO expected size is refused', d_no, None)
+    ck('and names why -- never assumed complete', 'never assumed' in why_no, True)
+    d_sh, why_sh = R.tm_state_at(bare, expect_bytes=len(body.encode()) + 7)
+    ck('a trailer-less read whose length disagrees with the listing is refused', d_sh, None)
+    ck('and names the two lengths', 'refused rather than parsed' in why_sh, True)
+
     c3, st3 = R.tm_read_split(miss)
     ck('a miss is ok=false', st3.get('ok'), False)
     d3, why3 = R.tm_state_at(miss)
@@ -522,21 +540,28 @@ def test_cli_stages():
     try:
         _, st = build(d)
 
+        ld = os.path.join(d, 'ledger')
+
         def run(*args):
             r = subprocess.run([sys.executable, os.path.join(here, 'wd_reconcile.py'),
-                                '--state-dir', st, '--cwd', d] + list(args),
+                                '--state-dir', st, '--ledger-dir', ld, '--cwd', d] + list(args),
                                capture_output=True, text=True)
             return r.returncode, r.stdout + r.stderr
 
         rc, out = run('2026-09-09T10:00:00Z', '2026-09-11T10:00:00Z', '--init')
         ck('init builds the ledger', rc, 0)
-        led = json.load(open(os.path.join(st, 'reconcile.json')))
+        # owner, 2026-09-12: nothing is written to the live state until the reconciliation is
+        # complete. A reconciler that writes into its subject perturbs what it measures.
+        ck('the ledger is NOT written into the state dir',
+           os.path.exists(os.path.join(st, 'reconcile.json')), False)
+        ck('and the state dir is untouched by init', sorted(os.listdir(st)), ['state.json'])
+        led = json.load(open(os.path.join(ld, 'reconcile.json')))
         ck('every hour of the window is enumerated', len(led['hours']), 49)
         ck('confidence starts at zero', 'conf 0' in out, True)
 
         rc, out = run('--stage', '1', '--proj', d, '--self-prefix', '80f99b89')
         ck('stage 1 runs from the CLI', rc in (0, 1), True)
-        led = json.load(open(os.path.join(st, 'reconcile.json')))
+        led = json.load(open(os.path.join(ld, 'reconcile.json')))
         ck('stage 1 wrote its result to the ledger', 'stage1' in led, True)
         ck('it found exactly the genuine opens', led['stage1']['opens'], TRUTH['opens'])
         ck('it recorded every item with a citation',
@@ -713,9 +738,11 @@ def test_cli_all_stages():
     try:
         _, st = build(d)
 
+        ld = os.path.join(d, 'ledger')
+
         def run(*args):
             r = subprocess.run([sys.executable, os.path.join(here, 'wd_reconcile.py'),
-                                '--state-dir', st, '--cwd', d] + list(args),
+                                '--state-dir', st, '--ledger-dir', ld, '--cwd', d] + list(args),
                                capture_output=True, text=True)
             return r.returncode, r.stdout + r.stderr
 
@@ -747,12 +774,12 @@ def test_cli_all_stages():
         # --- the supersession FIXED POINT ------------------------------------------------
         run('--restore', 'first recovered item, long enough to be real words',
             '--evidence', 'fixture:1#0')
-        led = json.load(open(os.path.join(st, 'reconcile.json')))
+        led = json.load(open(os.path.join(ld, 'reconcile.json')))
         ck('a restore bumps the pass counter', led.get('pass'), 1)
         ck('and lands unvalidated', led['restored'][0]['validated_pass'], None)
 
         run('--validate', '0', '--evidence', 'scanned forward, nothing supersedes it')
-        led = json.load(open(os.path.join(st, 'reconcile.json')))
+        led = json.load(open(os.path.join(ld, 'reconcile.json')))
         ck('validating marks it at the current pass', led['restored'][0]['validated_pass'], 1)
         rc, out = run()
         ck('no supersession check outstanding now', 'supersession check owed' in out, False)
@@ -760,7 +787,7 @@ def test_cli_all_stages():
         # a SECOND restore must invalidate the first -- the recursion, enforced
         run('--restore', 'second recovered item, also long enough to be real words',
             '--evidence', 'fixture:2#0')
-        led = json.load(open(os.path.join(st, 'reconcile.json')))
+        led = json.load(open(os.path.join(ld, 'reconcile.json')))
         ck('a second restore bumps the pass', led.get('pass'), 2)
         ck('the FIRST restore is invalidated again',
            led['restored'][0]['validated_pass'], None)
@@ -771,13 +798,26 @@ def test_cli_all_stages():
         # a superseded candidate is recorded as such and must NOT be repaired in
         run('--validate', '0', '--evidence', 'he answered this later', '--superseded')
         run('--validate', '1', '--evidence', 'nothing supersedes it')
-        led = json.load(open(os.path.join(st, 'reconcile.json')))
+        led = json.load(open(os.path.join(ld, 'reconcile.json')))
         ck('the superseded one is flagged', led['restored'][0]['superseded'], True)
         ck('the surviving one is not', led['restored'][1]['superseded'], False)
 
+        # stage 5 is the ONLY stage that writes the state under reconciliation, so it may not
+        # run until the reconciliation is complete (owner, 2026-09-12). The dry run is allowed.
+        rc, out = run('--stage', '5', '--apply')
+        ck('stage 5 --apply REFUSES while the reconciliation is incomplete',
+           (rc != 0, 'not complete' in out), (True, True))
+        ck('and the live state is untouched by that refusal',
+           json.load(open(os.path.join(st, 'state.json'))).get('owner_queue'), [])
+        rc, out = run('--stage', '5')
+        ck('a stage 5 DRY RUN is still allowed while incomplete', 'dry run' in out, True)
+        _lp = os.path.join(ld, 'reconcile.json')
+        _led = json.load(open(_lp)); _led['complete'] = True
+        json.dump(_led, open(_lp, 'w'))
+
         rc, out = run('--stage', '5', '--apply')
         d2 = json.load(open(os.path.join(st, 'state.json')))
-        ck('stage 5 repairs only the survivor', len(d2.get('owner_queue') or []), 1)
+        ck('stage 5 repairs only the survivor once complete', len(d2.get('owner_queue') or []), 1)
         ck('the superseded item is NOT reinstated',
            any('first recovered' in (x.get('text') or '') for x in d2['owner_queue']), False)
         ck('the survivor is reinstated',
@@ -808,7 +848,7 @@ def test_cli_all_stages():
         ck('stage 3 reports delivery to the target', 'received in its transcript' in out, True)
         ck('stage 3 reports the target pushes', 'push(es) by the target' in out, True)
         ck('stage 3 reports decision chains', 'decision chain' in out, True)
-        led = json.load(open(os.path.join(st, 'reconcile.json')))
+        led = json.load(open(os.path.join(ld, 'reconcile.json')))
         ck('stage 3 records which target it replayed against',
            (led.get('stage3') or {}).get('target'), 'local_target')
         # adjudications: the two chain links only his words settle, recorded with evidence
@@ -819,12 +859,12 @@ def test_cli_all_stages():
            (rc != 0, 'no chain D77' in out), (True, True))
         rc, out = run('--adjudicate', 'D2', '--put', 'none', '--answer', 'none',
                       '--evidence', 'never named to him; nothing of his to read')
-        led = json.load(open(os.path.join(st, 'reconcile.json')))
+        led = json.load(open(os.path.join(ld, 'reconcile.json')))
         ck('an adjudication is recorded with its evidence',
            ((led.get('adjudications') or {}).get('D2') or {}).get('evidence'),
            'never named to him; nothing of his to read')
         rc, out = run('--stage', '3', '--proj', d, '--self-prefix', '80f99b89', '--target-id', 'local_target', *TGT)
-        led = json.load(open(os.path.join(st, 'reconcile.json')))
+        led = json.load(open(os.path.join(ld, 'reconcile.json')))
         ck('stage 3 applies the recorded adjudication',
            ((led['stage3']['chains'].get('D2') or {}).get('adjudication') or {}).get('put'), 'none')
         wdsh = open(os.path.join(here, 'wd.sh')).read()
@@ -1052,9 +1092,11 @@ def test_corner_cases():
         json.dump({'owner_queue': [], 'owner_decisions': {}, 'open_questions': {},
                    'owner_decision_seq': 0}, open(os.path.join(st, 'state.json'), 'w'))
 
+        ld = os.path.join(d, 'ledger')
+
         def run(*args):
             r = subprocess.run([sys.executable, os.path.join(here, 'wd_reconcile.py'),
-                                '--state-dir', st, '--cwd', d] + list(args),
+                                '--state-dir', st, '--ledger-dir', ld, '--cwd', d] + list(args),
                                capture_output=True, text=True)
             return r.returncode, r.stdout + r.stderr
 
@@ -1071,13 +1113,13 @@ def test_corner_cases():
 
         run('2026-09-11T00:00:00Z', '2026-09-11T06:00:00Z', '--init')
         rc, out = run('--stage', '1', '--proj', d)
-        led = json.load(open(os.path.join(st, 'reconcile.json')))
+        led = json.load(open(os.path.join(ld, 'reconcile.json')))
         ck('stage 1 runs on a corpus with NO owner text',
            ('stage1' in led, 'Traceback' in out), (True, False))
         n1 = (led.get('stage1') or {}).get('opens')
         ck('stage 1 counts every open in the corpus', n1, 3)
         rc, out = run('--stage', '1', '--proj', d)
-        led2 = json.load(open(os.path.join(st, 'reconcile.json')))
+        led2 = json.load(open(os.path.join(ld, 'reconcile.json')))
         ck('running stage 1 twice does not double its result',
            (led2.get('stage1') or {}).get('opens'), n1)
 
@@ -1127,22 +1169,24 @@ def test_robustness():
         json.dump({'owner_queue': [], 'owner_decisions': {}, 'open_questions': {},
                    'owner_decision_seq': 0}, open(os.path.join(st, 'state.json'), 'w'))
 
+        ld = os.path.join(d, 'ledger')
+
         def run(*args):
             r = subprocess.run([sys.executable, os.path.join(here, 'wd_reconcile.py'),
-                                '--state-dir', st, '--cwd', d] + list(args),
+                                '--state-dir', st, '--ledger-dir', ld, '--cwd', d] + list(args),
                                capture_output=True, text=True)
             return r.returncode, r.stdout + r.stderr
 
         run('2026-09-11T00:00:00Z', '2026-09-11T02:00:00Z', '--init')
 
         # a LIVE second reconcile must abort with no action
-        lock = os.path.join(st, 'reconcile.lock')
+        lock = os.path.join(ld, 'reconcile.lock')
         open(lock, 'w').write(str(os.getpid()))
-        before = open(os.path.join(st, 'reconcile.json')).read()
+        before = open(os.path.join(ld, 'reconcile.json')).read()
         rc, out = run('--restore', 'this must never be written while the lock is held',
                       '--evidence', 'x')
         ck('a second reconcile aborts on a live lock', 'ABORTED' in out, True)
-        ck('and changes nothing', open(os.path.join(st, 'reconcile.json')).read(), before)
+        ck('and changes nothing', open(os.path.join(ld, 'reconcile.json')).read(), before)
 
         # a read does NOT take the lock -- the minute nagger must never block the work
         open(lock, 'w').write(str(os.getpid()))
@@ -1165,20 +1209,27 @@ def test_robustness():
         ck('a leftover .tmp does not break the next run', rc in (0, 1), True)
         ck('and the real ledger is still read', 'RECONCILE 2026-09-11' in out, True)
 
-        # a read-only state dir must fail loudly, not silently skip the write
+        # A write that cannot happen must fail loudly, not silently skip. The ledger moved OUT of
+        # the state dir (2026-09-12), so the state dir's mode no longer affects it -- this follows
+        # the write it was built to guard, and every invocation names its own ledger dir so the
+        # suite can never write into the real local/reconcile.
         ro = os.path.join(d, 'ro')
+        rold = os.path.join(d, 'ro-ledger')
         os.makedirs(ro)
+        os.makedirs(rold)
         json.dump({'owner_queue': []}, open(os.path.join(ro, 'state.json'), 'w'))
         subprocess.run([sys.executable, os.path.join(here, 'wd_reconcile.py'),
-                        '--state-dir', ro, '2026-09-11T00:00:00Z', '2026-09-11T01:00:00Z',
+                        '--state-dir', ro, '--ledger-dir', rold,
+                        '2026-09-11T00:00:00Z', '2026-09-11T01:00:00Z',
                         '--init'], capture_output=True)
-        os.chmod(ro, stat.S_IRUSR | stat.S_IXUSR)
+        os.chmod(rold, stat.S_IRUSR | stat.S_IXUSR)
         r = subprocess.run([sys.executable, os.path.join(here, 'wd_reconcile.py'),
-                            '--state-dir', ro, '--restore', 'an item long enough to be real',
+                            '--state-dir', ro, '--ledger-dir', rold,
+                            '--restore', 'an item long enough to be real',
                             '--evidence', 'x'], capture_output=True, text=True)
-        ck('a read-only state dir fails loudly rather than silently',
+        ck('a read-only ledger dir fails loudly rather than silently',
            r.returncode != 0 or 'Permission' in (r.stdout + r.stderr), True)
-        os.chmod(ro, stat.S_IRWXU)
+        os.chmod(rold, stat.S_IRWXU)
 
         # hostile bytes in a transcript must not stop the scan
         p2 = os.path.join(d, '80f99b89-rob.jsonl')
@@ -2039,6 +2090,14 @@ def test_readings_and_scope():
                     '903 1 /usr/bin/python3 /w/wd_check.py owed',
                     '904 1 /usr/bin/python3 /w/wd_reconcile.py --state-dir %s --stage 3' % mine,
                     '905 1 /bin/zsh -c ls'])
+    class _NS:
+        ledger_dir = None
+    C.HERE = os.path.join(real_tmp, 'wd-fake-repo')
+    dflt = C.ledger_dir(_NS())
+    ck('the DEFAULT ledger dir is local/reconcile, never the state dir',
+       (dflt.endswith(os.path.join('local', 'reconcile')), dflt.startswith(C.HERE)), (True, True))
+    ck('and it is created so the first write cannot fail', os.path.isdir(dflt), True)
+
     got = sorted(pid for pid, _ in C.rival_hooks(mine, ps_out=ps))
     ck('rivals: the same state and the unnamed one; not another state, not a reconcile', got, ['902', '903'])
     ck('the /tmp spelling of the same state is still a rival',
@@ -2090,12 +2149,14 @@ def test_cli_readings():
         ck('the fixture holds a PENDING action with other needs',
            any(a['outcome'] is None and a.get('needs') for a in pre), True)
 
+        ld = os.path.join(d, 'ledger')
+
         def run(*args):
             r = subprocess.run([sys.executable, os.path.join(here, 'wd_reconcile.py'),
-                                '--state-dir', st, '--cwd', d] + list(args),
+                                '--state-dir', st, '--ledger-dir', ld, '--cwd', d] + list(args),
                                capture_output=True, text=True)
             return r.returncode, r.stdout + r.stderr
-        led = lambda: json.load(open(os.path.join(st, 'reconcile.json')))
+        led = lambda: json.load(open(os.path.join(ld, 'reconcile.json')))
         S3 = ['--stage', '3', '--proj', d, '--self-prefix', '80f99b89', '--target-id', 'local_target',
               '--target-transcript', tt, '--target-repo', tr, '--self-id', 'local_self']
         run(T(5), T(8), '--init')

@@ -116,6 +116,19 @@ def path_of(state_dir):
     return os.path.join(state_dir, 'reconcile.json')
 
 
+def ledger_dir(a):
+    """Where the ledger and its lock live -- NEVER the state directory by default.
+
+    Owner, 2026-09-12: "you should not be writing to the live state. absolutely not until the
+    reconciliation is complete", and "temporary scratch but durable temporary scratch". A
+    reconciler that writes into its own subject perturbs what it is measuring: every ledger write
+    becomes another state change a later pass has to explain. local/ is gitignored, sits beside
+    the overlay, and survives a session -- which /tmp and a session scratchpad do not."""
+    d = getattr(a, 'ledger_dir', None) or os.path.join(HERE, 'local', 'reconcile')
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
 def load(state_dir):
     p = path_of(state_dir)
     if not os.path.exists(p):
@@ -278,6 +291,15 @@ def run_stage(n, L, S, a):
         opens = [x for x in acts if x['kind'] == 'open' and x.get('state') == 'live']
         live = RL.live_stores(S)
         inv = acct['seen'] == acct['attributed'] + acct['excluded_total'] + acct.get('batch_deliveries', 0)
+        # The census is the durable evidence each hour's `replay` part is checked against. Kept in
+        # the ledger rather than printed: a number that exists only in a terminal cannot be
+        # re-read, and every figure this instrument produced before this was exactly that.
+        w0, w1 = L['window']['start'][:13], L['window']['end'][:13]
+        inwin = [x for x in acts if x.get('state') == 'live' and w0 <= x['ts'][:13] <= w1]
+        by_hour = {}
+        for x in inwin:
+            by_hour.setdefault(x['ts'][:13], {}).setdefault(x['outcome'] or 'pending', 0)
+            by_hour[x['ts'][:13]][x['outcome'] or 'pending'] += 1
         L['stage1'] = {'ts': now_iso(), 'transcript': os.path.basename(path),
                        'records': len(numbered), 'unparseable': bad, 'ts_formats': dict(fmts),
                        'actions': len(acts), 'opens': len(opens),
@@ -288,7 +310,12 @@ def run_stage(n, L, S, a):
                        'owner_accounting_holds': inv, 'excluded': exc, 'peer_replies': len(peers),
                        'items': [{'cite': o['cite'], 'ts': o['ts'], 'store': o['store'],
                                   'id': o['id'], 'sha256': o['sha256'], 'text': o['text'],
-                                  'outcome': o['outcome']} for o in opens]}
+                                  'outcome': o['outcome']} for o in opens],
+                       'by_hour': by_hour, 'in_window': len(inwin),
+                       'hours_with_actions': len(by_hour),
+                       'actions_all': [{'ts': x['ts'], 'verb': x['verb'], 'id': x.get('id'),
+                                        'outcome': x['outcome'], 'cite': x['cite'],
+                                        'needs': x.get('needs')} for x in inwin]}
         cov['state_keys'] = [len(live['all_keys']), len(live['all_keys'])]
         # an unparseable line is unreconciled content, so it holds record coverage below 100
         cov['records'] = [len(numbered), len(numbered) + bad]
@@ -297,6 +324,8 @@ def run_stage(n, L, S, a):
               '%d owner messages, %d state keys'
               % (len(numbered), bad, len(acts), len(opens), len(owner), len(live['all_keys'])))
         print('   outcomes: %s' % dict(_c.Counter(x['outcome'] or 'pending' for x in acts)))
+        print('   in the window: %d live actions across %d of %d hours (census stored in the ledger)'
+              % (len(inwin), len(by_hour), len(L['hours'])))
         print('   owner corpus accounting %s: %s' % ('HOLDS' if inv else 'BROKEN', acct))
         print('   excluded from the owner corpus, counted: %s' % exc)
         return True
@@ -406,6 +435,13 @@ def run_stage(n, L, S, a):
                 print('     %s  %s' % (h['ts'][:19], h['excerpt'][:110].replace(chr(10), ' ')))
         return True
     if n == 5:
+        # The only stage that writes the state under reconciliation. Owner, 2026-09-12: nothing
+        # is written to the live state until the reconciliation is COMPLETE -- a repair applied
+        # mid-pass changes the very stores the remaining hours are being compared against.
+        if a.apply and not L.get('complete'):
+            raise SystemExit('stage 5 --apply REFUSED: the reconciliation is not complete, and '
+                             'the repair writes the live state. Finish it (reconcile --complete) '
+                             'first; a dry run is always allowed.')
         rs = [r for r in (L.get('restored') or [])
               if r.get('validated_pass') == L.get('pass', 0) and not r.get('superseded')]
         if not rs:
@@ -426,6 +462,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--state-dir', required=True)
+    ap.add_argument('--ledger-dir', dest='ledger_dir',
+                    help='where the ledger and its lock live (default local/reconcile; never '
+                         'the state dir -- a reconciliation must not write into its subject)')
     ap.add_argument('dates', nargs='*', help='<start> <end> (only with --init)')
     ap.add_argument('--init', action='store_true')
     ap.add_argument('--next', action='store_true')
@@ -468,17 +507,17 @@ def main():
         return 0
 
     S = a.state_dir
+    LD = ledger_dir(a)          # the ledger's home; S stays the state UNDER reconciliation
     # A second RECONCILE is also a rival: two of them over one ledger interleave
     # read-modify-write and lose whichever finished first. The rival scan deliberately skips
     # reconcile processes (so it does not see itself), so exclusion between them is a lock.
-    os.makedirs(S, exist_ok=True)
     # Only a WRITING run takes the lock. The minute nagger calls this for status every 60 s;
     # if a read took the lock it would abort the very stage runs it exists to nag about.
     writes = bool(a.read_hash or a.read_action or a.adjudicate or a.stage or a.hour or a.snapshot or a.thinned or a.action or a.restore
                   or a.validate is not None or a.complete or a.init or a.repo)
     if not writes:
-        return _main(a, S)
-    lock = os.path.join(S, 'reconcile.lock')
+        return _main(a, S, LD)
+    lock = os.path.join(LD, 'reconcile.lock')
     try:
         fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         os.write(fd, str(os.getpid()).encode())
@@ -506,7 +545,7 @@ def main():
         os.write(fd, str(os.getpid()).encode())
         os.close(fd)
     try:
-        return _main(a, S)
+        return _main(a, S, LD)
     finally:
         try:
             if open(lock).read().strip() == str(os.getpid()):
@@ -515,22 +554,22 @@ def main():
             pass
 
 
-def _main(a, S):
+def _main(a, S, LD):
     if a.repo:
-        L0 = load(S)
+        L0 = load(LD)
         if L0 is not None:
             L0['repos'] = sorted(set((L0.get('repos') or []) + a.repo))
-            save(S, L0)
+            save(LD, L0)
             print('repos for commit verification: %s' % ', '.join(L0['repos']))
     if a.init:
         if len(a.dates) != 2:
             raise SystemExit('--init needs exactly two dates: reconcile <start> <end> --init')
-        L = init(S, a.dates[0], a.dates[1])
+        L = init(LD, a.dates[0], a.dates[1])
         print(status_line(L))
-        print('ledger: %s' % path_of(S))
+        print('ledger: %s' % path_of(LD))
         return 0
 
-    L = load(S)
+    L = load(LD)
     if L is None:
         print('no reconciliation open. start one:  wd.sh reconcile <start> <end> --init')
         return 1
@@ -653,18 +692,18 @@ def _main(a, S):
             for x in o:
                 print('   %s' % x)
             if changed:
-                save(S, L)
+                save(LD, L)
             return 1
         L['complete'] = True
         L['log'].append({'ts': now_iso(), 'what': 'complete'})
-        save(S, L)
+        save(LD, L)
         print(status_line(L))
         print('RECONCILED. The hook may stop.')
         return 0
 
     if changed:
         L['log'].append({'ts': now_iso(), 'what': ' '.join(sys.argv[1:])[:200]})
-        save(S, L)
+        save(LD, L)
 
     o = outstanding(L)
     print(status_line(L))

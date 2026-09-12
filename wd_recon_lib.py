@@ -380,8 +380,19 @@ def stage5_repair(state_dir, restores, apply=False):
 
 
 def tm_read_split(raw):
-    """`tm read` returns FILE BYTES with a JSON status trailer appended. Established from real
-    captured output (tests/fixtures/tm_read_state_hit.raw), not assumed:
+    """`tm read` returns FILE BYTES, and appends a JSON status trailer ONLY when it has
+    something to report -- measured against the live wrapper (version 1.1.0) on 2026-09-12:
+    a TRUNCATED read carries the trailer, a COMPLETE read is bare bytes and carries none.
+
+    The earlier version of this docstring cited tests/fixtures/tm_read_state_hit.raw as its
+    evidence. That path does not exist in this repository, and the shape it described -- a
+    trailer on every read -- is the TRUNCATED shape generalised to all reads. The cost was
+    exact: every complete, correct read of a real snapshot was refused as unreadable, and a
+    reconciliation that trusted it would have recorded three surviving snapshots as having no
+    state to read.
+
+        {... the file ...}{"bytes": 200, "ok": true, "truncated": true, ...}   truncated
+        {... the file ...}                                                     complete
 
         {... the file ...}{"bytes": 300, "ok": true, "path": "...", "truncated": true, ...}
 
@@ -410,22 +421,44 @@ def tm_read_split(raw):
         if isinstance(status, dict) and ('ok' in status or 'error' in status):
             return s[:i], status
     try:
-        return '', json.loads(s)
+        whole = json.loads(s)
     except Exception:
-        return s, {'ok': None, 'error': 'no status trailer found'}
+        whole = None
+    # A state.json is ITSELF valid JSON, so "the whole output parses" can never be the test for a
+    # status trailer -- it always succeeds and hands back the state as if it were the status, whose
+    # missing `ok` then reads as a failed read. A trailer is a trailer only if it looks like one.
+    if isinstance(whole, dict) and ('ok' in whole or 'error' in whole):
+        return '', whole
+    # No trailer: the live wrapper's COMPLETE-read shape. The content is whole bytes, but it
+    # carries no self-reported length, so completeness cannot be established from the output
+    # alone -- tm_state_at requires the caller to supply the expected size.
+    return s, {'ok': True, 'bytes': len(s.encode()), 'truncated': False, 'trailer': False}
 
 
-def tm_state_at(raw):
+def tm_state_at(raw, expect_bytes=None):
     """The state dict from one snapshot's state.json, or a NAMED refusal.
 
     Never returns a partial parse and never reads a miss as an empty state: a store that looks
-    empty because the read was truncated is exactly how a reconciliation invents a drop."""
+    empty because the read was truncated is exactly how a reconciliation invents a drop.
+
+    `expect_bytes` is the size the directory listing reports for that file. It is REQUIRED for a
+    trailer-less read (the live wrapper's complete-read shape), because such a read reports no
+    length of its own: without it, a short read and a whole one are the same bytes with nothing
+    to tell them apart. Supplying it keeps the invariant -- completeness is checked, never
+    assumed -- on the one shape that carries no evidence of its own."""
     content, st = tm_read_split(raw)
     if not st.get('ok'):
         return None, 'unreadable: %s' % (st.get('error') or 'ok=false')[:120]
     if st.get('truncated'):
         return None, ('truncated at %s bytes -- re-read whole or extract; a partial state file '
                       'must never be parsed' % st.get('bytes'))
+    if st.get('trailer') is False:
+        if not isinstance(expect_bytes, int):
+            return None, ('a trailer-less read carries no self-reported length; pass the size the '
+                          'listing reports so completeness is CHECKED, never assumed')
+        if len(content.encode()) != expect_bytes:
+            return None, ('read %d bytes but the listing reports %d -- refused rather than parsed'
+                          % (len(content.encode()), expect_bytes))
     want = st.get('bytes')
     if isinstance(want, int) and len(content.encode()) != want:
         return None, ('content is %d bytes but the reader reported %d -- refused rather than '
