@@ -523,6 +523,25 @@ def test_effect_dispositions():
         {'ts': 'T6', 'verb': 'ask', 'id': 'O-X', 'text': 'x', 'text_resolved': True,
          'outcome': 'failed', 'state': 'scratch', 'cite': 'f:6#0'},
     ]
+    # An id raised twice: asked, resolved, asked again. resolved_questions holds ONE row per id,
+    # so only the last cycle can be represented and the earlier one is recorded as such -- not
+    # left to win by reaching the appending loop first, which is what happened on the real state.
+    twice = [
+        {'ts': 'TC1', 'verb': 'ask', 'id': 'O-TWICE', 'text': 'first cycle',
+         'text_resolved': True, 'outcome': 'landed', 'cite': 'f:c1#0'},
+        {'ts': 'TC2', 'verb': 'resolved', 'id': 'O-TWICE', 'outcome': 'landed', 'cite': 'f:c2#0'},
+        {'ts': 'TC3', 'verb': 'ask', 'id': 'O-TWICE', 'text': 'second cycle',
+         'text_resolved': True, 'outcome': 'landed', 'cite': 'f:c3#0'},
+        {'ts': 'TC4', 'verb': 'resolved', 'id': 'O-TWICE', 'outcome': 'landed', 'cite': 'f:c4#0'},
+    ]
+    tw, ta = R.restorations_owed(twice, state)
+    ck('an id raised twice is restored ONCE', len([w for w in tw if w['id'] == 'O-TWICE']), 1)
+    ck('and it is the LAST cycle that is kept',
+       [w['repair']['fields']['text'] for w in tw if w['id'] == 'O-TWICE'], ['second cycle'])
+    ck('and the earlier cycle is recorded, not silently dropped',
+       [x['why'][:34] for x in ta if x['id'] == 'O-TWICE' and x['verb'] == 'ask'],
+       ['the same id was raised again at TC'])
+
     # A chain inside ONE shell command: both actions carry that record's single timestamp, so
     # following the chain by clock cannot see the second from the first. Measured on the real
     # record: `ask ZZTEST "control" && resolved ZZTEST` was read as a question still open.

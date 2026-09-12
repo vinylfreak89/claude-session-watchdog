@@ -444,8 +444,12 @@ def _verify_additive(orig, now):
                     raise AssertionError('repair changed or reordered %s[%d] -- refused' % (k, i))
         elif isinstance(was, dict):
             for key, row in was.items():
-                new_row = (got or {}).get(key)
-                if new_row is None:
+                # a MISSING key and a key whose VALUE is None are different facts, and reading
+                # the second as the first made the guard refuse a repair that had removed
+                # nothing: state.json carries `ledger/reconciled: null`.
+                MISSING = object()
+                new_row = (got or {}).get(key, MISSING)
+                if new_row is MISSING:
                     raise AssertionError('repair removed %s/%s -- refused' % (k, key))
                 if isinstance(row, dict) and isinstance(new_row, dict):
                     for f, v in row.items():
@@ -1807,7 +1811,26 @@ def restorations_owed(acts, state, chains=None):
             work.append(row)
         else:
             accounted.append(row)
-    return work, accounted
+
+    # An id may be raised more than once -- a question asked, resolved, and asked again. Its
+    # store is keyed by id and can hold ONE row, so the cycles cannot all be represented: the
+    # LAST is the state's final word and the earlier ones are recorded as what they are, rather
+    # than the first winning by accident because it reached the appending loop first.
+    keep, seen = [], {}
+    for w in work:
+        k = (w['repair']['store'], w['repair'].get('id'))
+        if k[1] is not None:
+            seen.setdefault(k, []).append(w)
+    for w in work:
+        k = (w['repair']['store'], w['repair'].get('id'))
+        if k[1] is None or len(seen.get(k, [])) == 1 or w is seen[k][-1]:
+            keep.append(w)
+        else:
+            accounted.append(dict(w, disposition=MOOT, repair=None,
+                                  why='the same id was raised again at %s; its store holds one '
+                                      'row per id and the later cycle is the final word'
+                                      % seen[k][-1]['ts'][:19]))
+    return keep, accounted
 
 
 def outstanding(acts):
