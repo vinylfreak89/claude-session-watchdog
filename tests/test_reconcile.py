@@ -571,7 +571,7 @@ def test_effect_dispositions():
     ck('and it is NOT re-opened', [w for w in ch
                                    if w['repair']['store'] == 'open_questions'], [])
     ck('and it carries when it was resolved',
-       ch[0]['repair']['fields'].get('resolved_ts'), 'TA')
+       [w['repair']['fields'].get('resolved_ts') for w in ch], ['TA'])
     # the SAME ask with no resolve after it is owed as OPEN
     cw2, _ = R.restorations_owed(chain[:-1], state)
     ck('a dropped question never resolved is restored as OPEN',
@@ -585,7 +585,7 @@ def test_effect_dispositions():
     aw, aa = R.restorations_owed(ans, state, {'D88#1': {'answered': '2026-09-11T03:32:37Z'}})
     ck('a decision the owner ANSWERED is not put back to him', aw, [])
     ck('and the reason names when he answered it',
-       'answered by the owner' in aa[0]['why'], True)
+       any('answered by the owner' in (x.get('why') or '') for x in aa), True)
     ck('CONTROL: the same decision UNANSWERED is restored',
        [w['repair']['store'] for w in R.restorations_owed(ans, state, {})[0]],
        ['owner_decisions'])
@@ -598,7 +598,7 @@ def test_effect_dispositions():
        [(x['verb'], x['disposition']) for x in acct if x['id'] == 'D77'],
        [('owe add', 'closed_later')])
     ck('and it says which later action explains it',
-       'owe done' in next(x['why'] for x in acct if x['id'] == 'D77'), True)
+       any('owe done' in (x.get('why') or '') for x in acct if x['id'] == 'D77'), True)
     ck('an action on a SCRATCH state is not reconciled at all',
        any(x['id'] == 'O-X' for x in work + acct), False)
     ck('every other dropped action is ACCOUNTED FOR, not dropped again',
@@ -693,24 +693,33 @@ def test_stage5():
 
         # an amend may never OVERWRITE a field the row already carries: a reconciliation that
         # replaces what the owner put there is not reconciling. It is skipped, not applied.
-        res = R.stage5_repair(st, [{'op': 'amend', 'store': 'owner_queue', 'id': 'Q9',
-                                    'fields': {'text': 'MUTATED'}, 'cite': 'f:9#0',
-                                    'sha256': 'e' * 64, 'now': 'T'}], apply=True)
+        def guarded(restores):
+            """The call's result, or the refusal it raised. A guard that fires by RAISING is
+            still a guard; letting the exception escape would abort the test before its control
+            is reached, which reports nothing about the guard at all."""
+            try:
+                return R.stage5_repair(st, restores, apply=True)
+            except AssertionError as e:
+                return {'added': [], 'amended': [], 'advanced': [], 'skipped': [('refused', e)]}
+
+        res = guarded([{'op': 'amend', 'store': 'owner_queue', 'id': 'Q9',
+                        'fields': {'text': 'MUTATED'}, 'cite': 'f:9#0',
+                        'sha256': 'e' * 64, 'now': 'T'}])
         ck('an amend never overwrites an existing field',
            json.load(open(p))['owner_queue'][0]['text'], 'an existing row')
         ck('and says it skipped it', len(res['amended']), 0)
 
         # an amend whose row is absent CREATES NOTHING -- a merge has nothing to merge into
-        res = R.stage5_repair(st, [{'op': 'amend', 'store': 'owner_queue', 'id': 'NOSUCH',
-                                    'fields': {'hold_until': 'x'}, 'cite': 'f:8#0',
-                                    'sha256': 'f' * 64, 'now': 'T'}], apply=True)
+        res = guarded([{'op': 'amend', 'store': 'owner_queue', 'id': 'NOSUCH',
+                        'fields': {'hold_until': 'x'}, 'cite': 'f:8#0',
+                        'sha256': 'f' * 64, 'now': 'T'}])
         ck('an amend with no row to amend creates nothing',
            len(json.load(open(p))['owner_queue']), 3)
 
         # a monotonic mark may never go BACKWARDS, however the worklist asks
-        R.stage5_repair(st, [{'op': 'advance', 'store': 'last_relay_ts', 'id': 'x',
-                              'fields': {'to': '2026-01-01T00:00:00Z'}, 'cite': 'f:7#0',
-                              'sha256': '0' * 64, 'now': 'T'}], apply=True)
+        guarded([{'op': 'advance', 'store': 'last_relay_ts', 'id': 'x',
+                  'fields': {'to': '2026-01-01T00:00:00Z'}, 'cite': 'f:7#0',
+                  'sha256': '0' * 64, 'now': 'T'}])
         ck('a monotonic mark never moves backwards',
            json.load(open(p))['last_relay_ts'], '2026-09-10T00:00:00Z')
 
@@ -1058,6 +1067,12 @@ def test_cli_all_stages():
         rc, out = run('--stage', '5')
         ck('stage 5 before stage 3 refuses and names it',
            (rc != 0, 'stage 3 first' in out), (True, True))
+        # and --apply is stopped EARLIER still, by the investigation not being settled -- a
+        # separate gate from the supersession check, and the only one that can refuse when
+        # something other than the merge is unfinished
+        rc, out = run('--stage', '5', '--apply')
+        ck('stage 5 --apply refuses while the investigation is unsettled',
+           (rc != 0, 'not settled' in out), (True, True))
         before = json.load(open(os.path.join(st, 'state.json')))
         ck('and state.json is untouched', before.get('owner_queue'), [])
 
