@@ -1797,9 +1797,16 @@ def landed_replay(acts, starts, my_text, sends, peers, state, target, ttexts=Non
                        and any(s.get('to') and s['to'] == p['from'] and s['ts'] <= p['ts']
                                and (since is None or s['ts'] >= since) for s in sends)]
             unchecked = [p for p in replies if 'verified' not in p]
+            # MY OWN finding is an answer too. A question I put to the target and then settled
+            # myself is resolved, and the record says so in as many words -- measured 2026-09-12:
+            # "It's satisfied -- I flagged it wrong by grepping for the phrase instead of the
+            # substance", which is what closed that question and is neither a reply, nor the
+            # target's words, nor his. Excluding it left the reading unanswerable from its own
+            # candidate list: a question can be closed by whoever found the answer.
             cands = ([('its reply', p['ts']) for p in replies if p.get('verified')]
                      + [('its words', x['ts']) for x in (ttexts or []) if inwin(x['ts'])]
-                     + [('his words', m['ts']) for m in (owner or []) if inwin(m['ts'])])
+                     + [('his words', m['ts']) for m in (owner or []) if inwin(m['ts'])]
+                     + [('my own finding', t['ts']) for t in my_text if inwin(t['ts'])])
             decided = by_reading(rd, unchecked) if cands else None
             if decided:
                 v, why = decided

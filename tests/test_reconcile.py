@@ -195,15 +195,20 @@ def test_stage3():
         act('close', 'sent1', 'Q11', T(9, 30)),     # its only text is the unexpanded "$*"
         act('close', 'sent1', 'Q10', T(10, 1), text=None),  # the send comes AFTER the mark
         act('mark', 'relayed', None, T(6, 1)),      # text to the owner in the same turn
-        act('mark', 'relayed', None, T(20)),        # nothing said in that turn
+        # names a turn at 19:00; every text of mine predates it, so nothing could have relayed it
+        act('mark', 'relayed', T(19), T(20)),
         act('close', 'resolved', 'K1', T(7, 5)),    # the target replied after K1 was asked
         act('close', 'resolved', 'K2', T(8, 5)),    # no reply from the target
+        act('open', 'ask', 'K3', T(9, 40), store='open_questions', text='was that gate ever lifted?'),
+        act('close', 'resolved', 'K3', T(9, 50)),   # nothing replied; MY OWN finding closed it
         act('mark', 'answered', None, T(5, 3)),     # a send in the same turn precedes it
         act('close', 'nudged', 'K2', T(8, 3)),      # a nudge with no send in its window
         act('close', 'sent1', 'Q12', T(22), outcome='failed'),   # its own result failed
     ]
     starts = [T(5), T(6), T(7), T(8), T(9), T(10), T(20), T(21), T(22)]
-    my_text = [{'ts': T(6), 'text': 'here is what the target said, relayed to you'}]
+    my_text = [{'ts': T(6), 'text': 'here is what the target said, relayed to you'},
+               {'ts': T(9, 45), 'text': "It's satisfied -- I flagged it wrong by grepping for the "
+                                        'phrase instead of the substance'}]
     # every send records where it went: a reply resolves a question only from a session the
     # question was SENT to, after it was asked (K1 is sent at 07:01; K2 is never sent)
     sends = [{'ts': T(5), 'msg': 'OWNER: ' + Q7, 'to': 'local_target'},
@@ -224,6 +229,7 @@ def test_stage3():
     rep = R.landed_replay(copy.deepcopy(acts), starts, my_text, sends, peers, state, 'local_target',
                           ttexts=[], owner=[])
     reading_owed = lambda k: k not in v and nd.get(k, '').startswith('a reading')
+    owed_note = lambda k: nd.get(k, '')
     key = lambda verb, ident, ts: R.action_key({'cite': 'f:%s' % ts, 'verb': verb, 'id': ident})
     ck('sent1 with a same-turn send carrying its text -> ok', v[('sent1', 'Q7', T(5, 1))], 'ok')
     ck('sent1 whose turn sent a DIFFERENT item -> a READING is owed, not a verdict',
@@ -240,12 +246,15 @@ def test_stage3():
     ck('read "yes": its reply answered K1 -> ok', v2.get(('resolved', 'K1', T(7, 5))), 'ok')
     ck('project state supplies text the record lacks (owner_queue_sent)',
        'Q10' in R.item_texts(state, acts), True)
+    ck('a question nothing answered but MY OWN finding owes a reading, not a MISSTEER',
+       (reading_owed(('resolved', 'K3', T(9, 50))),
+        'my own finding' in (owed_note(('resolved', 'K3', T(9, 50))) or '')), (True, True))
     ck('relayed with text to the owner in the same turn -> a reading of it is owed',
        reading_owed(('relayed', None, T(6, 1))), True)
     ck('relayed whose only text is BEFORE the turn it names -> MISSTEER (the window runs from '
        'that turn to the mark, never earlier)',
-       v.get(('relayed', None, T(20))) in ('MISSTEER', None)
-       and not reading_owed(('relayed', None, T(20))), True)
+       v.get(('relayed', T(19), T(20))) in ('MISSTEER', None)
+       and not reading_owed(('relayed', T(19), T(20))), True)
     ck('resolved after the session it was sent to replied -> a reading of the reply is owed',
        reading_owed(('resolved', 'K1', T(7, 5))), True)
     ck('resolved with nothing that could answer it -> MISSTEER', v[('resolved', 'K2', T(8, 5))], 'MISSTEER')
