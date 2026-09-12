@@ -938,9 +938,43 @@ RELAY_LINE = re.compile(r'relayed to the owner up to (\S+)')
 ANSWER_LINE = re.compile(r'answered at (\S+)')
 HOLD_LINE = re.compile(r'holding (\S+):')
 NUDGE_LINE = re.compile(r'nudged (\S+) \((\d+) resend')
+# `wd.sh resolved X` confirms with the question's whole life: it names the id AND when it was
+# opened, so ONE line settles both the resolve and the ask it closes.
+RESOLVED_LINE = re.compile(r'resolved (\S+) \(open since (\S+), (\d+) resend')
 SENT1_LINE = re.compile(r'item (\S+) marked sent at (\S+)')
 RECORDED_LINE = re.compile(r"recorded (sent|veto): \[([^\]]*)\]")
 OWED_ROW = re.compile(r'^\s+(\S+)\s+\[([^\]]+)\]', re.M)
+# The open-questions report (`wd.sh open` / `wd.sh next`). Anchored on its HEADER so an ordinary
+# line can never be read as a listing: an unanchored row pattern would let any indented token
+# stand in for a report that never ran, and an absence read off a report that does not exist is
+# the "missing is not a value" failure this instrument is built to avoid.
+QOPEN_HEAD = re.compile(r'^OPEN QUESTIONS: (\d+)$', re.M)
+QOPEN_ROW = re.compile(r'^   (\S+)\s+\d+ turns ago', re.M)
+QUNANS_HEAD = re.compile(r'^UNANSWERED requests: (\d+) \(due to nudge: (\d+)\)$', re.M)
+QUNANS_ROW = re.compile(r'^   (?:\*\* NUDGE (\S+)\s+asked \d+ turns ago|\(open, not due\) (\S+))', re.M)
+
+
+def question_rows(text):
+    """Every question id a result NAMES as open. PRESENCE only, so no header is required: a line
+    that names the id is evidence the question existed whatever else the output was piped through.
+    Measured: real listings reach the record with their header cut off by a pipe."""
+    return ({m.group(1) for m in QOPEN_ROW.finditer(text)}
+            | {m.group(1) or m.group(2) for m in QUNANS_ROW.finditer(text)})
+
+
+def question_report(text):
+    """The COMPLETE set of open question ids, or None when nothing complete was reported. Absence
+    is only readable from a listing that is whole, and the report says how long it should be --
+    so a header whose count does not match the rows present is a TRUNCATED listing and is refused.
+    Measured on the real record (2026-09-12): results carrying `OPEN QUESTIONS: 23` and not one
+    row, because the command was piped. Read as a report, that one line would have settled
+    twenty-three resolves as landed on evidence that says the opposite."""
+    for head, rows in ((QOPEN_HEAD, question_rows(text)),
+                       (QUNANS_HEAD, question_rows(text))):
+        m = head.search(text)
+        if m:
+            return rows if int(m.group(1)) == len(rows) else None
+    return None
 OWED_HEAD = re.compile(r'OWED completed turns: (\d+)')
 LOG_LINE = re.compile(r'^(\S+) (SENT|OUTCOME|VETO|FINDING|OWNER-QUEUE|OWNER-RELAY) (.*)$', re.M)
 
@@ -1015,29 +1049,86 @@ def resolve_forward(acts, recs, state, log_text='', findings_text='', results=No
             if ident in held:
                 settle(a, 'landed', 'project state holds that turn', None)
             else:
-                hit = next(((t, m.group(1)) for t, x in later for m in [HOLD_LINE.search(x)]
-                            if m and m.group(1) == ident), None)
+                hit = next(((t, m.group(1)) for t, x in later for m in HOLD_LINE.finditer(x)
+                            if m.group(1) == ident), None)
                 if hit:
                     settle(a, 'landed', 'a later result reports the hold', hit[0])
+                    continue
+                # The owed report names the turn AND says whether it counts as held. Measured on
+                # the real record: `wd.sh hold` refuses a reason that does not name the owner, the
+                # refusal went to /dev/null, and the next report still carried the flag. A report
+                # that names the turn is therefore an answer either way -- and a REFUSED hold is
+                # `failed`, which is an answer, not a pending action.
+                row = next(((t, m.group(2)) for t, x in later if OWED_HEAD.search(x)
+                            for m in OWED_ROW.finditer(x) if m.group(1) == ident), None)
+                if row:
+                    if 'not answered or held' in row[1]:
+                        settle(a, 'failed', 'the next owed report still flags that turn '
+                               '[not answered or held] -- the hold did not register', row[0])
+                    else:
+                        settle(a, 'landed', 'the next owed report no longer flags that turn '
+                               'as unheld', row[0])
+                else:
+                    gone = next(((t, x) for t, x in later if OWED_HEAD.search(x)
+                                 and ident not in [m.group(1) for m in OWED_ROW.finditer(x)]), None)
+                    if gone:
+                        settle(a, 'landed', 'the next owed report no longer lists that turn',
+                               gone[0], 'absence')
         elif v == 'nudged' and ident:
-            hit = next(((t, m.group(2)) for t, x in later for m in [NUDGE_LINE.search(x)]
-                        if m and m.group(1) == ident), None)
+            hit = next(((t, m.group(2)) for t, x in later for m in NUDGE_LINE.finditer(x)
+                        if m.group(1) == ident), None)
             if hit:
                 settle(a, 'landed', 'a later result shows %s at %s resend(s)' % (ident, hit[1]), hit[0])
             elif (qs.get(ident) or {}).get('resends'):
                 settle(a, 'landed', 'project state records its resends', None)
+            else:
+                # the resolve confirmation carries the question's whole life, resends included
+                hit = next(((t, m.group(3)) for t, x in later for m in RESOLVED_LINE.finditer(x)
+                            if m.group(1) == ident and int(m.group(3)) > 0), None)
+                if hit:
+                    settle(a, 'landed', 'its resolve reports %s resend(s)' % hit[1], hit[0])
         elif v == 'ask' and ident:
             if ident in qs:
                 settle(a, 'landed', 'project state registers the question', None)
+            else:
+                # a resolved question is PRUNED from state, so the store cannot answer an ask that
+                # was later closed. A report that listed it open while it was open can, and does.
+                hit = next(((t, s) for t, x in later for s in [question_rows(x)]
+                            if ident in s), None)
+                if hit:
+                    settle(a, 'landed', 'a later open-questions report lists it', hit[0])
+                    continue
+                # and one line of the resolve confirms the whole life of the question: it names
+                # the id AND when it was opened, so it establishes the ask that opened it.
+                hit = next(((t, m.group(2)) for t, x in later for m in RESOLVED_LINE.finditer(x)
+                            if m.group(1) == ident), None)
+                if hit:
+                    settle(a, 'landed', 'its resolve reports it open since %s' % hit[1], hit[0])
         elif v == 'resolved' and ident:
             if ident in (state.get('resolved_questions') or {}):
                 settle(a, 'landed', 'project state archives it resolved', None)
+                continue
+            hit = next(((t, m.group(2)) for t, x in later for m in RESOLVED_LINE.finditer(x)
+                        if m.group(1) == ident), None)
+            if hit:
+                settle(a, 'landed', 'a later result confirms the resolve (open since %s)' % hit[1],
+                       hit[0])
+            else:
+                # absence only means something once PRESENCE was established: a report that never
+                # carried the id says nothing by omitting it. So the id must have been listed open
+                # at or after its ask, and then be missing from a report after the resolve.
+                was_open = any(ident in question_rows(x) for t, x in results if t <= ts)
+                gone = next(((t, s) for t, x in later for s in [question_report(x)]
+                             if s is not None and ident not in s), None)
+                if was_open and gone:
+                    settle(a, 'landed', 'the next open-questions report no longer lists it',
+                           gone[0], 'absence')
         elif v == 'sent1' and ident:
             if sent_ids.get(ident, {}).get('sent_ts'):
                 settle(a, 'landed', 'project state records it sent', None)
             else:
-                hit = next(((t, m.group(2)) for t, x in later for m in [SENT1_LINE.search(x)]
-                            if m and m.group(1) == ident), None)
+                hit = next(((t, m.group(2)) for t, x in later for m in SENT1_LINE.finditer(x)
+                            if m.group(1) == ident), None)
                 if hit:
                     settle(a, 'landed', 'a later result marks it sent at %s' % hit[1], hit[0])
         elif v in ('sent', 'veto') and ident:
@@ -1047,8 +1138,8 @@ def resolve_forward(acts, recs, state, log_text='', findings_text='', results=No
             if hit:
                 settle(a, 'landed', 'wake.log records %s %s' % (v.upper(), hit[1][:40]), hit[0])
             else:
-                hit = next(((t, m.group(2)) for t, x in later for m in [RECORDED_LINE.search(x)]
-                            if m and m.group(1) == v), None)
+                hit = next(((t, m.group(2)) for t, x in later for m in RECORDED_LINE.finditer(x)
+                            if m.group(1) == v), None)
                 if hit:
                     settle(a, 'landed', 'a later result records %s %s' % (v, hit[1]), hit[0])
         elif v == 'outcome' and ident:

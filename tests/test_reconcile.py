@@ -2406,12 +2406,55 @@ def pending_corpus():
     R_ += RS.bash(T0(11, 30), './wd.sh owe done D6 >/dev/null', '')
     R_ += RS.bash(T0(12), './wd.sh owe list', 'READY for the owner: 1\n  D3 does the box hold once acquired?')
 
+    # --- THREE SHAPES MEASURED ON THE REAL RECORD (2026-09-12), not invented ------------------
+    # 1. an ASK whose id project state no longer carries -- resolved questions are pruned -- but
+    #    which a later `wd.sh open` report NAMES while it was open. That listing is the answer.
+    # 2. a RESOLVED of that same id: the next listing after it no longer carries the id. Absence,
+    #    and only meaningful because a listing DID carry it first -- a never-open id missing from
+    #    a list says nothing.
+    # 3. a HOLD that was REFUSED. `wd.sh hold` rejects a reason that does not name the owner (the
+    #    guard added 2026-09-10 after four turns were held for "with Codex"), the refusal went to
+    #    /dev/null, and the next owed report still flags the turn `[not answered or held]`. That
+    #    flag is the evidence, and the outcome is `failed` -- not pending, and not landed.
+    R_ += RS.bash(T0(13), './wd.sh ask P4 "does the bar reach the switch?" >/dev/null', '')
+    R_ += RS.bash(T0(13, 30), './wd.sh open',
+                  'OPEN QUESTIONS: 2\n   K9             1 turns ago\n      is the bar part of the box?\n'
+                  '   P4             0 turns ago\n      does the bar reach the switch?')
+    R_ += RS.peer_reply(T0(14), 'the bar reaches it; there is no interval between')
+    R_ += RS.bash(T0(14, 10), './wd.sh resolved P4 >/dev/null', '')
+    # a TRUNCATED listing sits between the resolve and the complete one: its header claims two
+    # open questions and lists none, because the command was piped. It must settle nothing.
+    R_ += RS.bash(T0(14, 20), './wd.sh open | head -1', 'OPEN QUESTIONS: 2')
+    R_ += RS.bash(T0(14, 40), './wd.sh open', 'OPEN QUESTIONS: 0\n   none')
+    R_ += RS.say(T0(15), 'The cold read and the re-review are both still running.')
+    R_ += RS.bash(T0(15, 10),
+                  './wd.sh hold %s "Codex is re-reviewing; nothing to answer yet" >/dev/null 2>&1' % T0(14, 55), '')
+    # a resolve whose CONFIRMATION line is the only trace -- one line carrying the question's
+    # whole life, and it is not the first match in a result that reports several
+    R_ += RS.bash(T0(14, 45), './wd.sh ask P9 "does the bar reach the clip?" >/dev/null', '')
+    R_ += RS.bash(T0(14, 50), './wd.sh resolved P9 >/dev/null', '')
+    R_ += RS.bash(T0(14, 55), './wd.sh status',
+                  'resolved AAA (open since %s, 0 resend(s))\n'
+                  'resolved P9 (open since %s, 2 resend(s))' % (T0(13), T0(14, 45)))
+    # and a nudge whose report names TWELVE ids -- the one we want is not the first. `search`
+    # returns only the first match in a result, which settled exactly one of twelve.
+    R_ += RS.bash(T0(16), './wd.sh nudged P9 >/dev/null 2>&1', '')
+    R_ += RS.bash(T0(16, 30), './wd.sh nudged --all',
+                  '\n'.join('nudged %s (%d resend(s)); due again' % (k, i + 1)
+                            for i, k in enumerate(['AAA', 'BBB', 'CCC', 'P9'])))
+    R_ += RS.bash(T0(15, 40), './wd.sh owed',
+                  'OWED completed turns: 1\n   %s  [not answered or held]  The cold read and the re-review'
+                  % T0(14, 55))
+
     state = {'owner_queue': [], 'owner_queue_sent': [{'id': 'Q7', 'ts': T0(1), 'text': Q7, 'sent_ts': T0(8, 10)}],
              'owner_decisions': {'D3': {'id': 'D3', 'ts': T0(2), 'text': 'does the box hold once acquired?'}},
              'open_questions': {},
              'resolved_questions': {'K9': {'text': 'is the bar part of the box?', 'asked_ts': T0(6),
                                            'resolved_ts': T0(7, 40), 'resends': 2}},
              'held_turns': {T0(4, 55): {'reason': 'blocked on the owner', 'ts': T0(5)}},
+             # P4 is in NEITHER store: a resolved question is pruned, which is why the listings
+             # rather than the state are what answer its ask and its resolve
+
              'last_relay_ts': T0(2, 55), 'last_send_ts': T0(4, 10), 'owner_decision_seq': 6}
     wake_log = '\n'.join([
         '%s OUTCOME F5 accepted the control fired' % T0(9, 0, 2),
@@ -2433,6 +2476,7 @@ def test_every_pending_is_answered():
         if not ok:
             fails.append(name)
 
+    T0H = lambda h, m=0, s=0: '2026-09-11T%02d:%02d:%02dZ' % (h, m, s)
     recs, state, wake_log, findings = pending_corpus()
     numbered = [(i + 1, r) for i, r in enumerate(recs)]
     acts = R.my_actions(numbered, 'f', '/x/state', '/x')
@@ -2459,6 +2503,30 @@ def test_every_pending_is_answered():
     ck('a diverted sent1 is answered by the sent record', by.get(('sent1', 'Q7')), ['landed'])
     ck('a diverted outcome is answered by wake.log (it prints NOTHING)', by.get(('outcome', 'F5')), ['landed'])
     ck('a diverted sent is answered by wake.log', by.get(('sent', 'F5')), ['landed'])
+    ck('an ask project state no longer carries is answered by the listing that named it',
+       by.get(('ask', 'P4')), ['landed'])
+    ck('and its resolve by the next listing that no longer does',
+       by.get(('resolved', 'P4')), ['landed'])
+    ck('a TRUNCATED listing settles nothing -- its header counts more than it lists',
+       (R.question_report('OPEN QUESTIONS: 2'),
+        R.question_report('OPEN QUESTIONS: 1\n   P4             0 turns ago'),
+        sorted(R.question_report('OPEN QUESTIONS: 0\n   none') or [])),
+       (None, {'P4'}, []))
+    ck('but a row still NAMES its question with the header piped away',
+       R.question_rows('   P4             0 turns ago'), {'P4'})
+    ck('and the resolve rests on the COMPLETE listing, not the truncated one',
+       (next(a for a in settled if a['verb'] == 'resolved'
+             and a.get('id') == 'P4')['evidence_ts']), T0H(14, 40))
+    ck('an ask whose only trace is its RESOLVE confirmation is answered by it',
+       by.get(('ask', 'P9')), ['landed'])
+    ck('and so is the resolve itself', by.get(('resolved', 'P9')), ['landed'])
+    ck('a nudge is found even when its report names eleven others first',
+       by.get(('nudged', 'P9')), ['landed'])
+    ck('a REFUSED hold is failed, not pending and not landed',
+       by.get(('hold', T0H(14, 55))), ['failed'])
+    ck('and it names the flag the report still carried',
+       'not answered or held' in ((next(a for a in settled if a['verb'] == 'hold'
+                                        and a.get('id') == T0H(14, 55))['why']) or ''), True)
 
     # the recursion: one listing, two closes -- the second is not a second success
     d6 = sorted([a for a in settled if a['verb'] == 'owe done' and a.get('id') == 'D6'],
