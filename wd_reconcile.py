@@ -262,8 +262,12 @@ def outstanding(L):
     unver = [k for k, v in sorted(L['actions'].items()) if v.get('landed') not in ('yes', 'no')]
     if unver:
         o.append('%d actions unverified (next %s)' % (len(unver), unver[0]))
-    if not L['snapshots']:
-        o.append('no Time Machine snapshots enumerated yet')
+    # Time Machine is an ADDITIONAL check and never a requirement (owner, 2026-09-12: "time
+    # machine is an additional check in case your scan happens to miss something but it is not
+    # necessary"), so a drive that was never consulted cannot hold the reconciliation open -- the
+    # confidence already exempts it and this line contradicted that, refusing --complete forever.
+    # It is not silently dropped either: `tm_note` says so wherever the result is reported, because
+    # "the drive was never read" and "the drive was read and held nothing" are different facts.
     stale = [i for i, r in enumerate(L.get('restored', []))
              if r.get('validated_pass') != L.get('pass', 0)]
     if stale:
@@ -285,6 +289,16 @@ def outstanding(L):
     if c != 100:
         o.append('confidence %d/100 (%s)' % (c, '; '.join('%s %d%%' % (k, v) for k, v in parts)))
     return o
+
+
+def tm_note(L):
+    """What Time Machine contributed, in one line. Never owed -- it is the additional check --
+    but never silent either: a run that reached 100 without the drive says so."""
+    if L.get('stage2'):
+        pend = [k for k, v in L['snapshots'].items() if v.get('status') == 'pending']
+        return ('Time Machine: %d snapshot(s) in the window, %d unvisited (the additional check)'
+                % (len(L['snapshots']), len(pend)))
+    return 'Time Machine: never consulted -- the additional check was not run'
 
 
 def confidence(L):
@@ -358,12 +372,38 @@ def run_stage(n, L, S, a):
     import collections as _c
     cov = L.setdefault('coverage', {})
 
+    _meta = {}
+
+    def _surface(name):
+        """One evidence surface, and whether it was THERE. An absent store read as an empty one
+        would make everything it could have answered look unanswerable, and the run would report
+        those actions as pending rather than as unread. Absent is recorded, never silently ''."""
+        p = os.path.join(S, name)
+        if not os.path.exists(p):
+            return '', False
+        try:
+            return open(p).read(), True
+        except Exception:
+            return '', False
+
     def _world():
         path = RL.transcript_for(a.self_prefix, a.proj)
         numbered, bad = RL.read_records(path)
         recs = [r for _, r in numbered]
-        acts = RL.resolve_from_evidence(RL.my_actions(numbered, os.path.basename(path), S, getattr(a, 'cwd', None)),
-                                        recs, RL.live_stores(S)['raw'])
+        log_text, have_log = _surface('wake.log')
+        find_text, have_find = _surface('findings.md')
+        # The RECURSION, wired where every stage sees it. The owner, 2026-09-12: "every single one
+        # of those pendings has an answer somewhere. figure it out. until it gets to 100. thats the
+        # recursive loop... you answer the earliest ones. every time you answer a new one you go
+        # back and check the previous ones you answered and see if the new one changes the answer."
+        # It was written, tested, and NOT CALLED: the CLI ran the one-shot presence settler alone,
+        # which is why the real window left 290 actions pending with one reason between them. The
+        # fixed point runs resolve_from_evidence itself, so replacing that call loses nothing.
+        acts, passes = RL.reconcile_to_fixed_point(
+            RL.my_actions(numbered, os.path.basename(path), S, getattr(a, 'cwd', None)),
+            recs, RL.live_stores(S)['raw'], log_text, find_text)
+        _meta['passes'] = passes
+        _meta['surfaces'] = {'wake.log': have_log, 'findings.md': have_find}
         owner, exc, peers, acct = RL.owner_messages(recs)
         my_text, sends = RL.artifacts(recs)
         return path, numbered, bad, recs, acts, owner, exc, peers, acct, my_text, sends
@@ -398,6 +438,7 @@ def run_stage(n, L, S, a):
                        'items': [{'cite': o['cite'], 'ts': o['ts'], 'store': o['store'],
                                   'id': o['id'], 'sha256': o['sha256'], 'text': o['text'],
                                   'outcome': o['outcome']} for o in opens],
+                       'passes': _meta.get('passes'), 'surfaces': _meta.get('surfaces'),
                        'by_hour': by_hour, 'in_window': len(inwin),
                        'hours_with_actions': len(by_hour),
                        'actions_all': [{'ts': x['ts'], 'verb': x['verb'], 'id': x.get('id'),
@@ -410,7 +451,12 @@ def run_stage(n, L, S, a):
         print('stage 1: %d records (%d unparseable), %d actions of mine, %d opens, '
               '%d owner messages, %d state keys'
               % (len(numbered), bad, len(acts), len(opens), len(owner), len(live['all_keys'])))
-        print('   outcomes: %s' % dict(_c.Counter(x['outcome'] or 'pending' for x in acts)))
+        print('   outcomes: %s (settled in %d passes)'
+              % (dict(_c.Counter(x['outcome'] or 'pending' for x in acts)), _meta.get('passes') or 0))
+        _unread = [n for n, h in sorted((_meta.get('surfaces') or {}).items()) if not h]
+        if _unread:
+            print('   NOT READ: %s -- absent, so nothing they would have answered is settled'
+                  % ', '.join(_unread))
         print('   in the window: %d live actions across %d of %d hours (census stored in the ledger)'
               % (len(inwin), len(by_hour), len(L['hours'])))
         print('   owner corpus accounting %s: %s' % ('HOLDS' if inv else 'BROKEN', acct))
@@ -858,6 +904,7 @@ def _main(a, S, LD):
         L['log'].append({'ts': now_iso(), 'what': 'complete'})
         save(LD, L)
         print(status_line(L))
+        print('   %s' % tm_note(L))
         print('RECONCILED. The hook may stop.')
         return 0
 
@@ -867,6 +914,7 @@ def _main(a, S, LD):
 
     o = outstanding(L)
     print(status_line(L))
+    print('   %s' % tm_note(L))
     if not o:
         print('nothing outstanding -- run: wd.sh reconcile --complete')
         return 0

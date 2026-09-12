@@ -2471,6 +2471,122 @@ def test_every_pending_is_answered():
     return fails
 
 
+def test_reaches_a_hundred():
+    """The termination condition, proven rather than asserted. Owner, 2026-09-11 19:32: "You may
+    only end it when you have reached 100 % confidence state is fully reconciled."
+
+    A reconciliation whose actions are ALL answered from the record, whose hours are all recorded,
+    and which never touched Time Machine must reach 100 and accept --complete. If anything in the
+    coverage cannot be satisfied from the record alone, this test is where that shows up -- which
+    is the point: the number has to be reachable, or the loop can never end."""
+    import subprocess
+    fails = []
+    def ck(name, got, want):
+        ok = got == want
+        print('%-56s %s%s' % (name, 'PASS' if ok else 'FAIL',
+                              '' if ok else '  got=%r want=%r' % (got, want)))
+        if not ok:
+            fails.append(name)
+
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    d = tempfile.mkdtemp(prefix='recon-100-')
+    try:
+        recs, state, wake_log, findings = pending_corpus()
+        st = os.path.join(d, 'state')
+        ld = os.path.join(d, 'ledger')
+        os.makedirs(st)
+        os.makedirs(ld)
+        json.dump(state, open(os.path.join(st, 'state.json'), 'w'))
+        open(os.path.join(st, 'wake.log'), 'w').write(wake_log)
+        open(os.path.join(st, 'findings.md'), 'w').write(findings)
+        import realshape as RS
+        RS.write(os.path.join(d, '80f99b89-hundred.jsonl'), recs)
+
+        def run(*args):
+            r = subprocess.run([sys.executable, os.path.join(here, 'wd_reconcile.py'),
+                                '--state-dir', st, '--ledger-dir', ld, '--cwd', d] + list(args),
+                               capture_output=True, text=True)
+            return r.returncode, r.stdout + r.stderr
+        led = lambda: json.load(open(os.path.join(ld, 'reconcile.json')))
+
+        run('2026-09-11T01:00:00Z', '2026-09-11T12:00:00Z', '--init')
+        rc, out = run('--stage', '1', '--proj', d, '--self-prefix', '80f99b89')
+        ck('stage 1 finds the corpus', 'actions of mine' in out, True)
+        s1 = led()['stage1']
+        ck('and every action in the window is stored with its hour',
+           (s1['in_window'] > 0, s1['hours_with_actions'] > 0), (True, True))
+        ck('NOTHING is pending after stage 1 -- the record answered them all',
+           s1['by_outcome'].get('pending', 0), 0)
+
+        # stage 3: a send has landed only if the TARGET received it, so the replay is part of
+        # reaching 100 and cannot be skipped -- `actions` coverage is what it fills.
+        tt = os.path.join(d, 'target.jsonl')
+        RS.write(tt, RS.target_receives('2026-09-11T02:00:00Z', 'local_self', 'hello from the watchdog'))
+        tr = os.path.join(d, 'target_repo')
+        make_target_repo(tr)
+        S3 = ['--stage', '3', '--proj', d, '--self-prefix', '80f99b89',
+              '--target-id', 'local_target', '--target-transcript', tt,
+              '--target-repo', tr, '--self-id', 'local_self']
+        rc, out = run(*S3)
+
+        # A MEANING question is not answerable from a match, so the replay OWES a reading and the
+        # action stays uncovered until one is given. That is the designed last mile to 100, and it
+        # is exercised here rather than assumed: first that the gap is real and named ...
+        owed = [x['key'] for x in led()['stage3']['action_readings_owed']]
+        seen, total = led()['coverage']['actions']
+        ck('an action owing a reading is NOT counted as covered', seen < total, True)
+        ck('and the run names exactly which ones', len(owed), total - seen)
+        ck('a reading of an action nobody owes is refused',
+           run('--read-action', 'no/such/action', '--as', 'yes', '--evidence', 'x')[0], 1)
+
+        # ... then that answering it closes it. The corpus's relay did carry the turn it names.
+        for k in owed:
+            run('--read-action', k, '--as', 'yes',
+                '--evidence', 'the text in that turn carries the turn it names')
+        # .get, not [] -- when a mutation makes the run owe NO readings this check must REPORT
+        # that, not die of a missing key and take the rest of the test's checks with it
+        ck('every reading is recorded', sorted(led().get('action_readings') or {}), sorted(owed))
+        run(*S3)
+        ck('with the readings given, every live action is replayed',
+           led()['coverage']['actions'][0], led()['coverage']['actions'][1])
+
+        # and the same for the decision chains: whether he was asked and whether he answered is
+        # read from his words, so each chain owes an adjudication. Here he never appears, so the
+        # truthful reading is that none was put to him and none answered -- which is an ANSWER,
+        # not a gap, and a chain that has one is no longer outstanding.
+        chains = sorted(led()['stage3']['chains'])
+        ck('every chain owes an adjudication before it is settled',
+           led()['coverage']['chains'], [0, len(chains)])
+        for k in chains:
+            run('--adjudicate', k, '--put', 'none', '--answer', 'none',
+                '--evidence', 'no message of his in the window names it')
+        run(*S3)
+        ck('adjudicated, no chain has work outstanding',
+           led()['coverage']['chains'], [len(chains), len(chains)])
+
+        # the hours: each owes diff, replay and verdict -- and NOT tm, because no snapshot exists
+        for hour in sorted(led()['hours']):
+            for part in ('diff', 'replay', 'verdict'):
+                run('--hour', hour, '--part', part, '--evidence', 'settled from the record')
+        hrs = led()['hours']
+        ck('every hour is done without a tm part', all(h['status'] == 'done' for h in hrs.values()), True)
+        ck('and no hour was given a tm part it never had',
+           any('tm' in h['parts'] for h in hrs.values()), False)
+
+        rc, out = run()
+        ck('confidence reaches 100 with Time Machine never consulted', 'conf 100' in out, True)
+        ck('and the report SAYS the drive was never consulted, rather than implying it held nothing',
+           'never consulted' in out, True)
+        ck('and nothing is outstanding', 'nothing outstanding' in out, True)
+        ck('no snapshot was recorded for a drive nobody read', led()['snapshots'], {})
+        rc, out = run('--complete')
+        ck('--complete is accepted', rc, 0)
+        ck('and the ledger says so', led().get('complete'), True)
+        return fails
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_shell_reading():
     """The command is read the way the SHELL reads it. Every case is a form from the real record
     that a regex over raw text got wrong."""
@@ -3204,6 +3320,8 @@ def main():
         fails.extend(_guarded(test_readings_and_scope))
         print('\n--- a reading through the CLI, end to end ---')
         fails.extend(_guarded(test_cli_readings))
+        print('\n--- the loop can actually END: a fully answered run reaches 100 ---')
+        fails.extend(_guarded(test_reaches_a_hundred))
         print('\n--- every pending has an answer in the record ---')
         fails.extend(_guarded(test_every_pending_is_answered))
         print('\n--- stage 2: reaching the drive, and every way it can fail ---')
