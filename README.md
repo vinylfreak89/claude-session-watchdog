@@ -11,7 +11,10 @@ never asserts anything it did not check. The message text is produced by the scr
 session running the loop may only veto a line, never write one. The original brief is `docs/BRIEF.md`.
 
 Send marks (`sent`, `sent1`, `answered`) require the UUID of an actual target
-transcript delivery with structural sender provenance. Queue acceptance and its
+transcript delivery with structural sender provenance. The owner explicitly retains
+`answered --owner-ack "<his words>"` as a separate acknowledgement exception; empty
+words are refused. Its [provenance hardening](docs/proposals/owner-ack-provenance.md)
+is a proposal only. Queue acceptance and its
 baseline must be recorded before delivery; `owed` closes the item only after fresh,
 target-attributed action passes that requirement. Hold and closed retain their
 owner-authorized roles with audited reasons and turn bindings. Existing tracking

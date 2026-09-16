@@ -1,25 +1,19 @@
 #!/usr/bin/python3
 """Run the real reconciliation CLI against completed, synthetic repair ledgers."""
-import contextlib
-import io
 import sys
 import unittest
-from unittest.mock import patch
-from send_contract_support import ContractCase, K, ts
+from send_contract_support import ContractCase, C, K, ts
 import wd_reconcile as R
 
 class ReconcileSendGuard(ContractCase):
     def rcli(self, *args):
+        from reconcile_cli_support import run_reconcile
         ledger = self.root / 'ledger'
-        ledger.mkdir(exist_ok=True)
-        output = io.StringIO()
-        with patch.object(sys, 'argv', [R.__file__, '--state-dir', str(self.state_dir), '--ledger-dir', str(ledger)] + list(args)), patch.object(R, 'rival_hooks', return_value=[]), contextlib.redirect_stdout(output):
-            try:
-                rc = R.main()
-            except SystemExit as exc:
-                rc = exc.code if isinstance(exc.code, int) else 1
-                output.write(str(exc))
-        return rc, output.getvalue()
+        result = run_reconcile([sys.executable, R.__file__, '--state-dir', str(self.state_dir),
+                                '--ledger-dir', str(ledger), '--cwd', str(self.root),
+                                '--proj', str(self.root), '--self-prefix', 'archive-control'] + list(args),
+                               capture_output=True, text=True)
+        return result.returncode, result.stdout + result.stderr
 
     def prepare(self, repair):
         rc, out = self.rcli('--init', ts(0), ts(60))
@@ -56,5 +50,76 @@ class ReconcileSendGuard(ContractCase):
         self.assertEqual(rc, 0, out)
         self.assertEqual(self.state()['owner_queue'][0]['hold_until'], 'Synthetic dependency')
         self.assertIn('APPLIED', out)
+
+class ResolvedArchiveGuard(ReconcileSendGuard):
+    def archive_worklist(self):
+        import realshape as RS
+        import wd_recon_lib as RL
+        self.clock = 5
+        rc, asked = self.cli(C, 'ask', 'K1', 'Synthetic question')
+        self.assertEqual(rc, 0, asked)
+        self.clock = 10
+        rc, resolved = self.cli(C, 'resolved', 'K1')
+        self.assertEqual(rc, 0, resolved)
+        source = self.root / 'archive-control.jsonl'
+        RS.write(str(source), RS.bash(ts(5), './wd.sh ask K1 "Synthetic question"', asked)
+                 + RS.bash(ts(10), './wd.sh resolved K1', resolved))
+        state = self.state(); state.pop('resolved_questions')
+        K.save_state(str(self.state_dir), state)
+        numbered, bad = RL.read_records(str(source))
+        self.assertEqual(bad, 0)
+        actions = RL.my_actions(numbered, source.name, str(self.state_dir), str(self.root))
+        _, _, repair = RL.effect_disposition(actions[0], state, actions)
+        self.assertEqual(repair['store'], 'resolved_questions')
+        self.prepare(repair)
+        ledger = R.load(str(self.root / 'ledger'))
+        ledger['owed'][0].update(key=RL.action_key(actions[0]), verb='ask', id='K1', text='Synthetic question')
+        R.save(str(self.root / 'ledger'), ledger)
+        return source
+
+    def test_recorded_resolution_restores_only_missing_archive(self):
+        self.archive_worklist()
+        rc, out = self.rcli('--stage', '5', '--apply')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('APPLIED', out)
+        self.assertEqual(self.state()['resolved_questions']['K1']['text'], 'Synthetic question')
+        self.assertFalse(self.state().get('open_questions'))
+
+    def test_forged_archived_text_is_refused(self):
+        self.archive_worklist()
+        ledger = R.load(str(self.root / 'ledger'))
+        ledger['owed'][0]['repair']['fields']['text'] = 'Not the recorded question'
+        R.save(str(self.root / 'ledger'), ledger)
+        before = self.state()
+        rc, out = self.rcli('--stage', '5', '--apply')
+        self.assertNotEqual(rc, 0, out)
+        self.assertEqual(self.state(), before)
+
+    def test_archive_cannot_close_currently_open_question(self):
+        self.archive_worklist()
+        state = self.state(); state['open_questions'] = {'K1': {'text': 'Asked again'}}
+        K.save_state(str(self.state_dir), state)
+        rc, out = self.rcli('--stage', '5', '--apply')
+        self.assertNotEqual(rc, 0, out)
+        self.assertEqual(self.state(), state)
+
+    def test_missing_source_cannot_restore_archive(self):
+        source = self.archive_worklist(); source.unlink()
+        before = self.state()
+        rc, out = self.rcli('--stage', '5', '--apply')
+        self.assertNotEqual(rc, 0, out)
+        self.assertEqual(self.state(), before)
+
+    def test_old_resolution_cannot_hide_a_later_lost_ask(self):
+        import json
+        import realshape as RS
+        source = self.archive_worklist()
+        with source.open('a') as stream:
+            for record in RS.bash(ts(15), './wd.sh ask K1 "New question"', 'open question K1 registered at ct 2'):
+                stream.write(json.dumps(record) + '\n')
+        before = self.state()
+        rc, out = self.rcli('--stage', '5', '--apply')
+        self.assertNotEqual(rc, 0, out)
+        self.assertEqual(self.state(), before)
 
 if __name__ == '__main__': unittest.main(verbosity=2)

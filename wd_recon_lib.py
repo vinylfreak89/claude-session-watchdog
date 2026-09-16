@@ -335,13 +335,13 @@ def stage2_disappearances(series):
 
 # ---------------------------------------------------------------- stage 5
 
-def stage5_repair(state_dir, restores, apply=False):
+def stage5_repair(state_dir, restores, apply=False, archive_source=None):
     import wd_state as S
     with S.transaction(state_dir):
-        return _stage5_repair(state_dir, restores, apply)
+        return _stage5_repair(state_dir, restores, apply, archive_source)
 
 
-def _stage5_repair(state_dir, restores, apply=False):
+def _stage5_repair(state_dir, restores, apply=False, archive_source=None):
     """The MERGE. Owner, 2026-09-12: "That's why they are reconciliations. The result is a merge,
     not an overwrite." And the standing rule it rests on: "Do not clear any queues."
 
@@ -357,6 +357,46 @@ def _stage5_repair(state_dir, restores, apply=False):
     edit that changes something the owner put there.
 
     Idempotent: running it twice adds nothing the first run added."""
+    p = os.path.join(state_dir, 'state.json')
+    with open(p) as source:
+        d = json.load(source)
+    archive_repairs = [r for r in restores if r.get('store') == 'resolved_questions']
+    if archive_repairs:
+        # Historical question archives are distinct from live send/action debts.
+        # Re-derive them from the source record, never a persisted repair claim.
+        if not archive_source:
+            raise SystemExit('REFUSED: restoring resolved questions requires their source transcript')
+        try:
+            path, cwd = archive_source
+            numbered, bad = read_records(path)
+            if bad or len(ts_formats([r for _, r in numbered])) > 1:
+                raise ValueError('incomplete or ambiguously ordered source transcript')
+            def surface(name):
+                name = os.path.join(state_dir, name)
+                if not os.path.exists(name): return ''
+                with open(name) as stream: return stream.read()
+            acts, _ = reconcile_to_fixed_point(
+                my_actions(numbered, os.path.basename(path), state_dir, cwd),
+                [r for _, r in numbered], d, surface('wake.log'), surface('findings.md'))
+            for repair in archive_repairs:
+                ident = repair.get('id')
+                if ident in (d.get('open_questions') or {}):
+                    raise ValueError('question is currently open: %s' % ident)
+                matches = [a for a in acts if action_key(a) == repair.get('cite')
+                           and a.get('verb') == 'ask' and a.get('id') == ident
+                           and a.get('state') == 'live' and a.get('outcome') == 'landed']
+                if len(matches) != 1:
+                    raise ValueError('no unique recorded ask for %s' % ident)
+                after = acts[acts.index(matches[0]) + 1:]
+                if any(a.get('verb') == 'ask' and a.get('id') == ident and a.get('state') == 'live'
+                       for a in after):
+                    raise ValueError('a later ask reuses this question id: %s' % ident)
+                disposition, _, expected = effect_disposition(matches[0], d, acts)
+                if (disposition != RESTORABLE or expected is None or
+                        any(repair.get(k) != expected.get(k) for k in ('op', 'store', 'id', 'fields'))):
+                    raise ValueError('archive differs from the recorded question and resolution: %s' % ident)
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            raise SystemExit('REFUSED: unresolved archive provenance: %s' % exc)
     # Restoring an obligation is additive; restoring a discharge is not. Validate
     # the entire persisted worklist before writing, including pre-upgrade worklists.
     for repair in restores:
@@ -366,12 +406,12 @@ def _stage5_repair(state_dir, restores, apply=False):
             allowed = store == 'last_relay_ts'
         elif store == 'owner_queue':
             allowed = op in ('append', 'amend') and set(fields) <= {'text', 'ts', 'hold_until'}
+        elif store == 'resolved_questions':
+            allowed = op == 'append'  # exact record-derived payload validated above
         else:
             allowed = op in ('append', 'amend') and store in ('open_questions', 'owner_decisions')
         if not allowed:
             raise SystemExit('REFUSED: reconciliation cannot restore delivery, acceptance or closure state (%s %s)' % (op, store))
-    p = os.path.join(state_dir, 'state.json')
-    d = json.load(open(p))
     before = json.dumps(d, sort_keys=True)
     orig = json.loads(before)
     added, amended, skipped, advanced = [], [], [], []

@@ -1,5 +1,9 @@
 # Send and acceptance repair
 
+Current status: the owner-ack route is restored; provenance hardening is a proposal.
+The whole suite passes under Python 3.9 and 3.14 with no exclusions; see the final
+validation section. Earlier red results below are the historical repair record.
+
 The command handlers, not helper return values, are the control boundary. All
 fixtures use synthetic transcripts and temporary state; no live session is sent
 anything. No override or force mode is introduced. Owner-authorized dispositions retain their own audited path.
@@ -313,3 +317,80 @@ handler control injects a stderr warning while performing the capped scans; it
 was observed red (`FAILED (errors=1)`) before the fixture fix. All seven lifecycle
 handler controls now pass under both Python 3.9 and 3.14. No JSON failure is ignored
 and no scanner result is substituted by the fixture.
+
+## Reconciliation: remove the known-red exception
+
+The six CLI groups did not initialize their temporary ledgers because the live
+process census was unavailable in the sandbox. The CLI actually printed:
+
+```
+RECONCILE ABORTED -- another hook is running; no action taken:
+   pid ?  cannot enumerate processes: [Errno 1] Operation not permitted: 'ps'
+```
+
+The later `FileNotFoundError` was a consequence of that abort. The fixtures now
+supply their own process census through a temporary `ps` executable in the child
+process's PATH. They still run the real CLI, process-exclusion guard, filesystem
+writes and reconciliation stages. Four subprocess controls establish that an
+empty census initializes the ledger, a same-state rival aborts, an unrelated
+state does not block it, and a failed census cannot masquerade as empty. The last
+control failed before fixing production's unchecked `ps` return code:
+`FAILED (failures=1)`. All four now pass; the production guard was not disabled.
+
+Once those six groups executed, the existing `test_reaches_a_hundred` exposed a
+real defect in the repair: the blanket closure-store refusal also rejected
+restoring a lost historical resolved-question archive. Its output was:
+
+```
+REFUSED: reconciliation cannot restore delivery, acceptance or closure state (append resolved_questions)
+RESULT: 7 FAILED: a dry run says what it would merge, stage 5 merges the dropped effect, THE HOLD IS BACK ON THE ROW THAT WAS ALREADY THERE, confidence reaches 100 with Time Machine never consulted, and nothing is outstanding, --complete is accepted, and the ledger says so
+```
+
+That requirement is not obsolete. Missing historical question archives may now
+be appended only after fresh source replay reconstructs the exact ask and
+resolution. A currently open question, a later ask reusing the ID, changed
+archive fields, an incomplete record or a missing source refuses the entire
+merge. This does not permit send watermarks, receipts or acceptance closures to
+be restored. The state transaction covers verification and merge together.
+
+Stage 3 records its source transcript and working directory so stage 5 replays
+the same corpus. A legacy ledger lacking that source must supply its existing
+explicit corpus selector or rerun stage 3; stage 5 cannot silently substitute a
+default corpus. The initial source-replay attempt failed with
+`REFUSED: unresolved archive provenance: no unique recorded ask for P4` because
+stage 5 had not retained the stage-3 corpus; persisting and using that source
+fixed it. The existing end-to-end control now reaches 100 and accepts completion.
+
+The archive controls run real subprocess CLI commands. The positive archive
+control failed before the repair; a subsequent adversarial control for a later
+lost ask also failed before adding the generation check. Eleven send/archive
+controls now pass. An initial fixture call reversed two helper arguments and
+reported `AttributeError: 'list' object has no attribute 'get'`; its arguments
+were corrected before recording the red production baseline.
+
+**No reconciliation case or requirement was deleted or marked expected-failing.**
+The six original groups retain their assertions. `tests/run_all.py` discovers and
+runs every `test_*.py` script using its own interpreter, prints each exit status,
+and returns failure if any script fails. It has no known-failure exclusion list.
+
+## Whole-suite validation after the owner rulings
+
+Both commands exited **0**, with all original scripts and the new process-gate
+script included. The runner reported its denominator before starting and printed
+an exit status for every script:
+
+```
+/usr/bin/python3 tests/run_all.py
+INTERPRETER: /Applications/Xcode.app/Contents/Developer/usr/bin/python3 (3.9.6)
+DISCOVERED: 29 test scripts; exclusions: 0
+RESULT: 29/29 scripts passed; 0 failed; exclusions: 0
+
+python3 tests/run_all.py
+INTERPRETER: /opt/homebrew/opt/python@3.14/bin/python3.14 (3.14.7)
+DISCOVERED: 29 test scripts; exclusions: 0
+RESULT: 29/29 scripts passed; 0 failed; exclusions: 0
+```
+
+`tests/test_reconcile.py` exits zero in both runs, including all six formerly
+failing groups. The earlier 27-pass/six-known-failure report is superseded by this
+validation. Nothing is exempted because a failure predates a change.

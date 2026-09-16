@@ -21,6 +21,7 @@ import os, re, sys, json, tempfile, shutil
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wd_recon_lib as R
+from reconcile_cli_support import run_reconcile
 
 
 def rec(ts, cmds=None, text=None, kind='assistant'):
@@ -861,7 +862,7 @@ def test_cli_stages():
         ld = os.path.join(d, 'ledger')
 
         def run(*args):
-            r = subprocess.run([sys.executable, os.path.join(here, 'wd_reconcile.py'),
+            r = run_reconcile([sys.executable, os.path.join(here, 'wd_reconcile.py'),
                                 '--state-dir', st, '--ledger-dir', ld, '--cwd', d] + list(args),
                                capture_output=True, text=True)
             return r.returncode, r.stdout + r.stderr
@@ -1059,7 +1060,7 @@ def test_cli_all_stages():
         ld = os.path.join(d, 'ledger')
 
         def run(*args):
-            r = subprocess.run([sys.executable, os.path.join(here, 'wd_reconcile.py'),
+            r = run_reconcile([sys.executable, os.path.join(here, 'wd_reconcile.py'),
                                 '--state-dir', st, '--ledger-dir', ld, '--cwd', d] + list(args),
                                capture_output=True, text=True)
             return r.returncode, r.stdout + r.stderr
@@ -1376,7 +1377,7 @@ def test_corner_cases():
         ld = os.path.join(d, 'ledger')
 
         def run(*args):
-            r = subprocess.run([sys.executable, os.path.join(here, 'wd_reconcile.py'),
+            r = run_reconcile([sys.executable, os.path.join(here, 'wd_reconcile.py'),
                                 '--state-dir', st, '--ledger-dir', ld, '--cwd', d] + list(args),
                                capture_output=True, text=True)
             return r.returncode, r.stdout + r.stderr
@@ -1453,7 +1454,7 @@ def test_robustness():
         ld = os.path.join(d, 'ledger')
 
         def run(*args):
-            r = subprocess.run([sys.executable, os.path.join(here, 'wd_reconcile.py'),
+            r = run_reconcile([sys.executable, os.path.join(here, 'wd_reconcile.py'),
                                 '--state-dir', st, '--ledger-dir', ld, '--cwd', d] + list(args),
                                capture_output=True, text=True)
             return r.returncode, r.stdout + r.stderr
@@ -1499,12 +1500,12 @@ def test_robustness():
         os.makedirs(ro)
         os.makedirs(rold)
         json.dump({'owner_queue': []}, open(os.path.join(ro, 'state.json'), 'w'))
-        subprocess.run([sys.executable, os.path.join(here, 'wd_reconcile.py'),
+        run_reconcile([sys.executable, os.path.join(here, 'wd_reconcile.py'),
                         '--state-dir', ro, '--ledger-dir', rold,
                         '2026-09-11T00:00:00Z', '2026-09-11T01:00:00Z',
                         '--init'], capture_output=True)
         os.chmod(rold, stat.S_IRUSR | stat.S_IXUSR)
-        r = subprocess.run([sys.executable, os.path.join(here, 'wd_reconcile.py'),
+        r = run_reconcile([sys.executable, os.path.join(here, 'wd_reconcile.py'),
                             '--state-dir', ro, '--ledger-dir', rold,
                             '--restore', 'an item long enough to be real',
                             '--evidence', 'x'], capture_output=True, text=True)
@@ -2436,7 +2437,7 @@ def test_cli_readings():
         ld = os.path.join(d, 'ledger')
 
         def run(*args):
-            r = subprocess.run([sys.executable, os.path.join(here, 'wd_reconcile.py'),
+            r = run_reconcile([sys.executable, os.path.join(here, 'wd_reconcile.py'),
                                 '--state-dir', st, '--ledger-dir', ld, '--cwd', d] + list(args),
                                capture_output=True, text=True)
             return r.returncode, r.stdout + r.stderr
@@ -2985,7 +2986,7 @@ def test_reaches_a_hundred():
         RS.write(os.path.join(d, '80f99b89-hundred.jsonl'), recs)
 
         def run(*args):
-            r = subprocess.run([sys.executable, os.path.join(here, 'wd_reconcile.py'),
+            r = run_reconcile([sys.executable, os.path.join(here, 'wd_reconcile.py'),
                                 '--state-dir', st, '--ledger-dir', ld, '--cwd', d] + list(args),
                                capture_output=True, text=True)
             return r.returncode, r.stdout + r.stderr

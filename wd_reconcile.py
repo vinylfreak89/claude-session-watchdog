@@ -81,8 +81,12 @@ def rival_hooks(state_dir=None, ps_out=None):
         try:
             # -ww: never truncate the command line, or its --state-dir is cut off and every hook
             # reads as a rival of every state
-            out = subprocess.run(['ps', '-axww', '-o', 'pid=,ppid=,command='],
-                                 capture_output=True, text=True, timeout=20).stdout
+            census = subprocess.run(['ps', '-axww', '-o', 'pid=,ppid=,command='],
+                                    capture_output=True, text=True, timeout=20)
+            if census.returncode != 0:
+                return [('?', 'cannot enumerate processes: ps exited %s: %s' %
+                         (census.returncode, census.stderr.strip()))]
+            out = census.stdout
         except Exception as e:
             # A check that cannot run must NOT read as "no rivals" -- that is the missing-is-not-a-
             # value defect, and here it would licence exactly the concurrency this guard forbids.
@@ -571,6 +575,7 @@ def run_stage(n, L, S, a):
                           'needs': x['needs']} for x in acts
                          if x.get('state') == 'live' and (x.get('needs') or '').startswith('a reading')]
         L['stage3'] = {'ts': now_iso(), 'target': tid, 'tally': dict(tally),
+                       'source_transcript': os.path.realpath(path), 'source_cwd': getattr(a, 'cwd', None),
                        'findings': [{'ts': x['ts'], 'cite': x['cite'], 'verb': x['verb'],
                                      'id': x.get('id'), 'verdict': x['verdict'], 'why': x['why']}
                                     for x in rep if x['verdict'] != 'ok'],
@@ -731,7 +736,19 @@ def run_stage(n, L, S, a):
             return False
         payload = [dict(w['repair'], cite=w['key'], sha256=w.get('sha256', ''), now=now_iso())
                    for w in todo]
-        res = RL.stage5_repair(S, payload, apply=a.apply)
+        archive_source = None
+        if any(r['store'] == 'resolved_questions' for r in payload):
+            try:
+                replay = L.get('stage3') or {}
+                if replay.get('source_transcript'):
+                    archive_source = (replay['source_transcript'], replay.get('source_cwd'))
+                elif a.proj:
+                    archive_source = (RL.transcript_for(a.self_prefix, a.proj), getattr(a, 'cwd', None))
+                else:
+                    raise ValueError('run stage 3 to record the source transcript; no default corpus may substitute for it')
+            except (OSError, ValueError) as exc:
+                raise SystemExit('REFUSED: cannot locate archive source: %s' % exc)
+        res = RL.stage5_repair(S, payload, apply=a.apply, archive_source=archive_source)
         print('stage 5: %s -- %d appended, %d amended, %d advanced, %d skipped'
               % ('APPLIED' if a.apply else 'DRY RUN (nothing written)', len(res['added']),
                  len(res['amended']), len(res['advanced']), len(res['skipped'])))
