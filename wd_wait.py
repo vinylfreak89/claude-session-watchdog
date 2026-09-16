@@ -41,7 +41,7 @@ Exactly one event per transcript turn: a counter bump that lands while a turn is
 already reported, is logged to stderr as a lagged count and NOT emitted. Silent interrogation: while the target
 is idle past --stale-after and state.json lists in-flight work, every backstop tick re-checks each item's
 progress and says nothing until one stalls. Completed items leave state.json under the shared writer lock;
-their exit evidence is logged to stderr. Other writes are to state/wait_memory.json (which stalls and overdue
+their completion evidence is logged to stderr. Other writes are to state/wait_memory.json (which stalls and overdue
 replies it has already reported, so a re-armed hook stays quiet). The target's files remain read-only.
 """
 import os, sys, json, time, re, select, argparse
@@ -181,25 +181,31 @@ class Watch(object):
 
     # ---- silent interrogation of in-flight work
     def _progress(self, item):
-        """(signature, alive, assessable, finished, detail) for one in-flight item.
+        """(signature, alive, finished, detail) for one in-flight item.
 
         A missing process is not completion. Only terminal evidence sets finished.
         """
+        s_ = W.task_output_status(item.get('output_file')) if item.get('output_file') else {}
+        if s_.get('exit_code') is not None:
+            return (s_.get('size'), s_.get('mtime'), s_['exit_code']), False, True, 'exit_marker exit_code=%s' % s_['exit_code']
         if item.get('kind') == 'bg':
-            s_ = W.task_output_status(item.get('output_file'))
-            if s_.get('exit_code') is not None:
-                return (s_.get('size'), s_.get('mtime'), s_['exit_code']), False, True, True, 'exit_marker exit_code=%s' % s_['exit_code']
             procs = W.proc_matches(item.get('command', ''), W.live_children(self.sess))
             sig = (s_.get('size'), s_.get('mtime'), len(procs))
-            if not s_.get('exists'): return sig, bool(procs), bool(procs), False, 'missing_exit_marker; no output file; live processes %d' % len(procs)
-            return sig, bool(procs), True, False, 'missing_exit_marker; output %s bytes, mtime %s, live processes %d' % (s_.get('size'), s_.get('mtime'), len(procs))
+            if not s_.get('exists'): return sig, bool(procs), False, 'missing_exit_marker; no output file; live processes %d' % len(procs)
+            return sig, bool(procs), False, 'missing_exit_marker; output %s bytes, mtime %s, live processes %d' % (s_.get('size'), s_.get('mtime'), len(procs))
         ts_ = W.codex_thread_state(item.get('thread') or '')
-        if not ts_.get('found'): return None, False, False, False, 'no rollout found for thread %s' % (item.get('thread') or '')[:8]
+        if not ts_.get('found'): return None, False, False, 'no rollout found for thread %s' % (item.get('thread') or '')[:8]
         sig = (ts_.get('size'), ts_.get('mtime'), ts_.get('in_flight'), ts_.get('lifecycle_known'))
         if ts_.get('lifecycle_known') is not True:
-            return sig, False, False, False, 'lifecycle unknown for thread %s' % (item.get('thread') or '')[:8]
-        if not ts_.get('in_flight'): return sig, False, True, False, 'rollout shows no turn in flight (last complete %s)' % ts_.get('last_complete')
-        return sig, True, True, False, 'rollout in flight, last event %s' % ts_.get('last_event')
+            return sig, False, False, 'lifecycle unknown for thread %s' % (item.get('thread') or '')[:8]
+        completed = W.epoch_from_iso(ts_.get('last_complete'))
+        launched = W.epoch_from_iso(item.get('launched_ts'))
+        if (ts_.get('in_flight') is False and completed is not None and
+                launched is not None and completed > launched):
+            return sig, False, True, 'rollout_completion last_complete=%s' % ts_['last_complete']
+        if ts_.get('in_flight') is not True:
+            return sig, False, False, 'missing_completion_after_dispatch; last complete %s' % ts_.get('last_complete')
+        return sig, True, False, 'rollout in flight, last event %s' % ts_.get('last_event')
 
     def _retire_finished(self, completed):
         """Remove only the exact items probed; preserve concurrent writes and replacements."""
@@ -229,7 +235,7 @@ class Watch(object):
         completed = []
         for it in items:
             iid = it.get('id') or (it.get('thread') or '')[:8]
-            sig, alive, assessable, finished, detail = self._progress(it)
+            sig, alive, finished, detail = self._progress(it)
             if finished:
                 completed.append((it, detail))
                 continue
@@ -254,8 +260,6 @@ class Watch(object):
             last_change = self.prog[iid][1]
             idle_min = (now - last_change) / 60.0
             stalled = (not alive) and idle_min >= self.stall_min
-            if it.get('kind') == 'codex' and assessable and sig and not sig[2]:
-                stalled = False   # the codex turn finished; the target's own notification will wake it
             if stalled and iid not in self.stalled:
                 self.stalled.add(iid); self.mem.setdefault('stalled', {})[iid] = list(sig or []); self._save_mem()
                 if it.get('kind') == 'bg':

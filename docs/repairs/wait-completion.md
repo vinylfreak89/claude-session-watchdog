@@ -42,3 +42,63 @@ The script reported `Ran 7 tests` / `FAILED (failures=5)` before the repair
 (including both exit-code subtests), then `Ran 7 tests` / `OK` after it. The
 positive missing-marker control already produced STALL before the fix; its
 new reason-name assertion failed until the diagnostic was made explicit.
+
+## The same distinction in Codex interrogation
+
+The old `assessable and not in_flight` condition also suppressed stalls for a
+rollout with no lifecycle events, or with completion predating the tracked
+dispatch. Conversely, wait ignored an exit marker on a dispatch's output file
+when its rollout was missing. Wake already checks that marker and dates rollout
+completion after dispatch. Wait now does likewise, retires completed dispatches,
+and retains unknown or unconfirmed completion. The rollout route requires
+explicit `lifecycle_known=True`, `in_flight=False`, and parseable completion and
+launch times with completion strictly later. Missing facts cannot retire work.
+
+Three additional real-handler controls failed before this second repair:
+
+- `test_old_codex_completion_does_not_finish_new_dispatch` reported
+  `AssertionError: 3 != 0` and a HEARTBEAT instead of a STALL.
+- `test_no_codex_lifecycle_is_not_completion` reported
+  `AssertionError: 3 != 0` and a HEARTBEAT instead of a STALL.
+- `test_codex_output_exit_marker_finishes_without_rollout` reported
+  `AssertionError: 0 != 3` followed by
+  `STALL kind=codex thread=background-control idle_min=33 reason=no_rollout_found_for_thread_00000000`.
+
+The existing known-completed-rollout control gained a persisted-eviction
+assertion, which also failed before this repair. Together the script reported
+`Ran 10 tests` / `FAILED (failures=5)`, then `Ran 10 tests` / `OK` after it.
+Unknown lifecycle still produces a stall after its window; absence of a process
+or of a start event never establishes completion.
+
+## Other wait-side lifecycle consumers examined
+
+`idle_check` consults tracked work after interrogation, so removal now prevents
+completed rows from suppressing IDLE indefinitely when interrogation is enabled.
+The reply deadline path uses peer replies, not process presence.
+
+`outstanding_agents` remains a separate heuristic: two user-record mentions of
+an agent ID count as a return, and launch discovery examines six recent turns.
+From code inspection, a quoted mention can therefore hide a pending agent, and
+an older launch can leave the search window. These are **reasoned findings, not
+reproduced controls in this repair**. A follow-up should use typed launch and
+completion records with durable tracking; this change does not claim that the
+subagent heuristic proves completion. No relaxation or new exception was added.
+
+## Final validation
+
+Both whole-suite commands exited zero, with no skipped script or known-failing
+exception:
+
+```
+/usr/bin/python3 tests/run_all.py  # Python 3.9.6
+RESULT: 29/29 scripts passed; 0 failed; exclusions: 0
+
+python3 tests/run_all.py           # Python 3.14.7
+RESULT: 29/29 scripts passed; 0 failed; exclusions: 0
+```
+
+An in-memory mutation replacing `wd_wait.main` with a successful no-op made both
+background controls fail. The harness reported
+`NO-OP MUTATION REJECTED: both background handler controls fail`. The controls
+therefore require the real command's observable alarm and persisted retirement,
+not just the output parser's exit-code fact.

@@ -129,5 +129,35 @@ class MonitorLifecycle(ContractCase):
         self.assertEqual(rc, 3, out)
         self.assertIn('HEARTBEAT', out)
         self.assertNotIn('STALL kind=codex', out)
+        self.assertEqual(self.state()['in_flight'], [])
+        self.assertIn('FINISHED kind=codex', out)
+
+    def test_old_codex_completion_does_not_finish_new_dispatch(self):
+        records = ''.join(json.dumps(dict(type='event_msg', timestamp=ts(t), payload=dict(type=k))) + '\n'
+                          for t, k in [(1, 'task_started'), (2, 'task_complete')])
+        rc, out = self.monitor(records)
+        self.assertEqual(rc, 0, out)
+        self.assertIn('STALL kind=codex', out)
+        self.assertIn('missing_completion_after_dispatch', out)
+        self.assertEqual(len(self.state()['in_flight']), 1)
+
+    def test_no_codex_lifecycle_is_not_completion(self):
+        rc, out = self.monitor(json.dumps(dict(type='session_meta', timestamp=ts(1), payload={})) + '\n')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('STALL kind=codex', out)
+        self.assertEqual(len(self.state()['in_flight']), 1)
+
+    def test_codex_output_exit_marker_finishes_without_rollout(self):
+        for code in (0, 1):
+            with self.subTest(exit_code=code):
+                item = self.background('[exited with code %d]\n' % code)
+                item.update(kind='codex', thread=THREAD)
+                state = self.state(); state['in_flight'] = [item]
+                K.save_state(str(self.state_dir), state)
+                rc, out = self.run_monitor(stall_min=20)
+                self.assertEqual(rc, 3, out)
+                self.assertNotIn('STALL', out)
+                self.assertIn('FINISHED kind=codex', out)
+                self.assertEqual(self.state()['in_flight'], [])
 
 if __name__ == '__main__': unittest.main(verbosity=2)
