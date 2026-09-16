@@ -172,3 +172,13 @@ unknown lifecycle remains assessable only as unknown and cannot quiet the monito
 A real wake/bootstrap control additionally verifies that an apparent completion
 with unknown lifecycle does not prune in-flight work; a conclusive completion does.
 All three controls in `tests/test_monitor_lifecycle.py` pass.
+
+## Launch attribution
+
+Seven real wake/bootstrap controls were observed red (`FAILED (failures=6)`), then
+green. A quoted `codex-run` command is not a dispatch; foreground output cannot
+supply background identity. The shared launch reader now requires Bash, boolean
+`run_in_background: true`, a successful result, and an exact session/tasks/id.output
+path structure. The original nine launch-reader checks still pass. Compound shell
+commands and wrappers remain unproven dispatches; no permissive fallback parses
+quoted content as executed code.

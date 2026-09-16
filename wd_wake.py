@@ -131,7 +131,7 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
         for n in T.notifications:
             digest.append('%s notification: task %s %s %s' % ((n['ts'] or '')[11:19], n['task_id'], n['status'], n['summary']))
     claims = W.extract_claims(T) if T else []
-    dispatches = [d for t in new_turns for d in W.dispatches_in(t)]
+    dispatches = [d for t in new_turns for d in W.dispatches_in(t, sess.get('cli'))]
     # sess['cli'] scopes the launch to this session's own tasks directory -- see background_launches
     launches = [b for t in new_turns for b in t.background_launches(sess.get('cli'))]
     commits = [c for t in new_turns for c in W.commits_in(t)]
@@ -208,7 +208,7 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
                                         dc['sentence'] if dc else quote, 'Codex rollout for thread %s (%s)' % (d['thread'][:8], thread_state['rollout']),
                                         'no task_started after the dispatch at %s (last task_started %s, last task_complete %s); codex-run task %s still without an exit marker' % (d['ts'], ls_, thread_state.get('last_complete'), rec['task_id']), turn_label, end_ts))
     for c in [c for c in claims if c['kind'] == 'dispatch']:
-        recent = [d for t in turns[-3:] for d in W.dispatches_in(t)]
+        recent = [d for t in turns[-3:] for d in W.dispatches_in(t, sess.get('cli'))]
         if not recent:
             findings.append(finding('dispatch_claim_no_call', 'dispatch_claim_no_call:%s' % W.h(c['sentence']), dict(sentence=c['sentence']), c['sentence'],
                                     'codex-run task/send/say/queue/steer tool calls in the last 3 turns', 'none', turn_label, end_ts))

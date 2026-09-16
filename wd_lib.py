@@ -11,7 +11,7 @@ Turn model: a user record that is not a tool_result and whose promptId differs f
 user record's promptId opens a turn; tool_results, task notifications injected mid-turn, slash-command
 records and interrupt markers inherit the open turn's promptId. Assistant records carry no promptId.
 """
-import os, re, json, glob, time, subprocess, hashlib, datetime, collections
+import os, re, json, glob, time, subprocess, hashlib, datetime, collections, shlex
 
 HOME = os.path.expanduser('~')
 STATE_GLOB = os.path.join(HOME, 'Library', 'Application Support', 'Claude', 'claude-code-sessions', '*', '*', 'local_*.json')
@@ -353,14 +353,17 @@ class Turn(object):
         """
         out = []
         for tu in self.tool_uses:
-            if not (tu['input'] or {}).get('run_in_background'):
+            if tu['name'] != 'Bash' or (tu['input'] or {}).get('run_in_background') is not True:
                 continue
             r = self.tool_results.get(tu['id'])
-            if not r: continue
+            if not r or r.get('is_error') is not False: continue
             m = LAUNCH_RE.match((r['text'] or '').lstrip())
             if not m: continue
             task_id, output_file = m.group(1), m.group(2)
-            if session_cli and ('/%s/' % session_cli) not in (output_file or ''):
+            task_dir = os.path.dirname(os.path.normpath(output_file))
+            if os.path.basename(output_file) != task_id + '.output' or os.path.basename(task_dir) != 'tasks':
+                continue
+            if session_cli and os.path.basename(os.path.dirname(task_dir)) != session_cli:
                 continue
             out.append(dict(task_id=task_id, output_file=output_file, command=(tu['input'] or {}).get('command', ''),
                             description=(tu['input'] or {}).get('description', ''), ts=tu['ts'], tool_use_id=tu['id']))
@@ -413,27 +416,35 @@ THREAD_RE = re.compile(r'\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9
 HEREDOC_RE = re.compile(r"cat\s*>\s*(\S+)\s*<<\s*'?(\w+)'?\n(.*?)\n\2\b", re.S)
 COMMIT_RESULT_RE = re.compile(r'^\[([\w./-]+)\s+(?:\(root-commit\)\s+)?([0-9a-f]{7,40})\]', re.M)
 
-def dispatches_in(turn):
-    """codex-run dispatch calls in a turn, with what the tool result / background output said."""
+def dispatches_in(turn, session_cli=None):
+    """Only direct executable invocations are dispatch facts; shell data is not code.
+
+    Compound commands, substitutions and shell wrappers are intentionally unproven.
+    Background identity uses the same structural launch rule as ordinary tasks.
+    """
     out = []
+    launches = {b['tool_use_id']: b for b in turn.background_launches(session_cli)}
     for tu in turn.tool_uses:
         if tu['name'] != 'Bash': continue
         cmd = (tu['input'] or {}).get('command', '') or ''
-        for m in DISPATCH_RE.finditer(cmd):
-            verb, rest = m.group(1), m.group(2)
-            th = THREAD_RE.search(rest)
-            brief = _grab(r'(/[^\s"\']+\.md)\b', rest)
-            heredocs = {hp: body for hp, _, body in HEREDOC_RE.findall(cmd)}
-            r = turn.tool_results.get(tu['id'])
-            bg = None
-            # Anchored for the same reason as background_launches: a dispatch whose output happens
-            # to quote another task's launch line has not itself been backgrounded.
-            if r:
-                mb = LAUNCH_RE.match((r['text'] or '').lstrip())
-                if mb: bg = dict(task_id=mb.group(1), output_file=mb.group(2))
-            out.append(dict(tool_use_id=tu['id'], ts=tu['ts'], verb=verb, thread=th.group(1) if th else None, brief_path=brief,
-                            brief_text=heredocs.get(brief), inline=short(rest, 200), background=bg,
-                            result_text=(r['text'] if r else None), result_is_error=(r['is_error'] if r else None), command=cmd))
+        if any(c in cmd for c in ('\n', '$', '`')): continue
+        try:
+            lexer = shlex.shlex(cmd, posix=True, punctuation_chars=';&|<>()')
+            lexer.whitespace_split = True
+            argv = list(lexer)
+        except ValueError:
+            continue
+        if len(argv) < 2 or os.path.basename(argv[0]) != 'codex-run': continue
+        if any(arg and all(c in ';&|<>()' for c in arg) for arg in argv): continue
+        verb = argv[1]
+        if verb not in ('task', 'send', 'say', 'queue', 'steer', 'on-file'): continue
+        thread = next((arg for arg in argv[2:] if THREAD_RE.fullmatch(arg)), None)
+        brief = next((arg for arg in argv[2:] if arg.startswith('/') and arg.endswith('.md')), None)
+        r = turn.tool_results.get(tu['id'])
+        bg = launches.get(tu['id'])
+        out.append(dict(tool_use_id=tu['id'], ts=tu['ts'], verb=verb, thread=thread, brief_path=brief,
+                        brief_text=None, inline=short(' '.join(argv[2:]), 200), background=bg,
+                        result_text=(r['text'] if r else None), result_is_error=(r['is_error'] if r else None), command=cmd))
     return out
 
 def commits_in(turn):
