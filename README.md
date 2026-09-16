@@ -69,6 +69,11 @@ itself every 15 s (output growth, live child processes of the session, Codex rol
 as long as it progresses. `wd.sh wake --trigger '<line>'` then analyses; the session sends the `MESSAGE` block
 verbatim (one message), records `wd.sh sent`, logs `wd.sh cost`, and re-arms `wd.sh wait`.
 
+During interrogation, a background output exit marker means FINISHED, including a nonzero exit code.
+The wait hook logs that evidence and removes the completed item under the shared state writer lock.
+Without a marker, no live process and an elapsed idle window still produce a STALL naming
+`missing_exit_marker`. Completion and successful execution are separate facts.
+
 Items the owner sends for the target are held on the watchdog's side (`wd.sh queue add`), printed at the top of
 every wake, and delivered as one message with that wake's findings. Relaying on the owner's cadence instead
 fragments the target's work, since each message opens or queues a turn there.

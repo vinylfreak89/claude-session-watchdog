@@ -40,12 +40,14 @@ They are `wd_check.next_item()`'s output, not a restatement of it, so they canno
 Exactly one event per transcript turn: a counter bump that lands while a turn is open, or after the turn was
 already reported, is logged to stderr as a lagged count and NOT emitted. Silent interrogation: while the target
 is idle past --stale-after and state.json lists in-flight work, every backstop tick re-checks each item's
-progress and says nothing until one stalls. Read-only on everything except its own memory file,
-state/wait_memory.json (which stalls and overdue replies it has already reported, so a re-armed hook stays quiet).
+progress and says nothing until one stalls. Completed items leave state.json under the shared writer lock;
+their exit evidence is logged to stderr. Other writes are to state/wait_memory.json (which stalls and overdue
+replies it has already reported, so a re-armed hook stays quiet). The target's files remain read-only.
 """
 import os, sys, json, time, re, select, argparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wd_lib as W
+import wd_state as S
 
 def log(msg):
     sys.stderr.write('[wd_wait %s] %s\n' % (W.now_iso(), msg)); sys.stderr.flush()
@@ -104,7 +106,7 @@ class Watch(object):
         self.prog = {}          # in-flight item id -> (signature, last_change_epoch)
         self.stalled = set()    # item ids already reported this episode
         self.overdue_emitted = None
-        self.mem_path = os.path.join(state_dir, 'wait_memory.json')   # the hook's own memory across re-arms (its only write)
+        self.mem_path = os.path.join(state_dir, 'wait_memory.json')   # the hook's own memory across re-arms
         self.mem = (W.read_json_retry(self.mem_path) if os.path.exists(self.mem_path) else None) or {}
         self.stalled = set(self.mem.get('stalled', {}).keys()); self.overdue_emitted = self.mem.get('overdue_emitted')
 
@@ -179,21 +181,44 @@ class Watch(object):
 
     # ---- silent interrogation of in-flight work
     def _progress(self, item):
-        """(signature, alive, assessable, detail) for one in-flight item."""
-        now = time.time()
+        """(signature, alive, assessable, finished, detail) for one in-flight item.
+
+        A missing process is not completion. Only terminal evidence sets finished.
+        """
         if item.get('kind') == 'bg':
             s_ = W.task_output_status(item.get('output_file'))
+            if s_.get('exit_code') is not None:
+                return (s_.get('size'), s_.get('mtime'), s_['exit_code']), False, True, True, 'exit_marker exit_code=%s' % s_['exit_code']
             procs = W.proc_matches(item.get('command', ''), W.live_children(self.sess))
             sig = (s_.get('size'), s_.get('mtime'), len(procs))
-            if not s_.get('exists'): return sig, bool(procs), bool(procs), 'no output file; live processes %d' % len(procs)
-            return sig, bool(procs), True, 'output %s bytes, mtime %s, live processes %d' % (s_.get('size'), s_.get('mtime'), len(procs))
+            if not s_.get('exists'): return sig, bool(procs), bool(procs), False, 'missing_exit_marker; no output file; live processes %d' % len(procs)
+            return sig, bool(procs), True, False, 'missing_exit_marker; output %s bytes, mtime %s, live processes %d' % (s_.get('size'), s_.get('mtime'), len(procs))
         ts_ = W.codex_thread_state(item.get('thread') or '')
-        if not ts_.get('found'): return None, False, False, 'no rollout found for thread %s' % (item.get('thread') or '')[:8]
+        if not ts_.get('found'): return None, False, False, False, 'no rollout found for thread %s' % (item.get('thread') or '')[:8]
         sig = (ts_.get('size'), ts_.get('mtime'), ts_.get('in_flight'), ts_.get('lifecycle_known'))
         if ts_.get('lifecycle_known') is not True:
-            return sig, False, False, 'lifecycle unknown for thread %s' % (item.get('thread') or '')[:8]
-        if not ts_.get('in_flight'): return sig, False, True, 'rollout shows no turn in flight (last complete %s)' % ts_.get('last_complete')
-        return sig, True, True, 'rollout in flight, last event %s' % ts_.get('last_event')
+            return sig, False, False, False, 'lifecycle unknown for thread %s' % (item.get('thread') or '')[:8]
+        if not ts_.get('in_flight'): return sig, False, True, False, 'rollout shows no turn in flight (last complete %s)' % ts_.get('last_complete')
+        return sig, True, True, False, 'rollout in flight, last event %s' % ts_.get('last_event')
+
+    def _retire_finished(self, completed):
+        """Remove only the exact items probed; preserve concurrent writes and replacements."""
+        if not completed: return
+        import wd_wake as WK
+        with S.transaction(self.state_dir):
+            current = WK.load_state(self.state_dir)
+            items = current.get('in_flight') or []
+            removed = []
+            for item, detail in completed:
+                if item in items:
+                    items.remove(item)
+                    removed.append((item, detail))
+            if removed:
+                current['in_flight'] = items
+                WK.save_state(self.state_dir, current)
+        for item, detail in removed:
+            log('FINISHED kind=%s id=%s reason=%s' % (item.get('kind'),
+                item.get('id') or (item.get('thread') or '')[:8], detail.replace(' ', '_')))
 
     def interrogate(self):
         out = []
@@ -201,10 +226,14 @@ class Watch(object):
         items = st.get('in_flight') or []
         now = time.time()
         live_ids = set()
+        completed = []
         for it in items:
             iid = it.get('id') or (it.get('thread') or '')[:8]
+            sig, alive, assessable, finished, detail = self._progress(it)
+            if finished:
+                completed.append((it, detail))
+                continue
             live_ids.add(iid)
-            sig, alive, assessable, detail = self._progress(it)
             prev = self.prog.get(iid)
             if prev is None and iid in self.stalled and self.mem.get('stalled', {}).get(iid) == list(sig or []):
                 self.prog[iid] = (sig, 0)   # already reported in an earlier run with this very signature; do not re-emit
@@ -233,7 +262,8 @@ class Watch(object):
                     out.append('STALL kind=bg id=%s idle_min=%d reason=%s' % (iid, idle_min, detail.replace(' ', '_')))
                 else:
                     out.append('STALL kind=codex thread=%s idle_min=%d reason=%s' % (iid, idle_min, detail.replace(' ', '_')))
-        for iid in list(self.prog):
+        self._retire_finished(completed)
+        for iid in set(self.prog) | self.stalled:
             if iid not in live_ids:
                 self.prog.pop(iid, None); self.stalled.discard(iid)
                 if iid in self.mem.get('stalled', {}): self.mem['stalled'].pop(iid, None); self._save_mem()
