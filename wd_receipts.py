@@ -1,6 +1,7 @@
 """Transcript-derived delivery receipts. Caller supplied IDs are never receipt evidence."""
 import hashlib
 import json
+import math
 import re
 
 import wd_lib as W
@@ -171,6 +172,18 @@ def record_delivery(path, sender, state, ident, queue_id=None, finding_ids=None)
     # No rebranding of a previously spent transcript record or legacy credit.
     if rec['ts'] <= (state.get('credited_send_ts') or ''):
         raise EvidenceError('legacy delivery credit cannot be migrated without an independent receipt')
+    waiting = dict(state.get('awaiting_reply') or {})
+    for fid in fids:
+        f = findings[fid]
+        if f.get('is_poke') and waiting:
+            waiting.update(poked=True, poke_message_id=ident)
+        elif f.get('asks_reply'):
+            delay = f.get('reply_min', 20)
+            if type(delay) not in (int, float) or not math.isfinite(delay) or delay < 0:
+                raise EvidenceError('invalid recorded reply interval')
+            deadline = W.iso_from_epoch(epoch(rec['ts']) + 60 * delay)
+            if not waiting or epoch(deadline) < epoch(waiting.get('deadline')):
+                waiting = dict(message_id=ident, sent_ts=rec['ts'], deadline=deadline, findings=[fid], poked=False)
     if q is not None:
         q['sent'] = rec['ts']
         q['message_id'] = ident
@@ -181,6 +194,8 @@ def record_delivery(path, sender, state, ident, queue_id=None, finding_ids=None)
         state.setdefault('raised', {})[f['key']] = dict(evidence_hash=f['evidence_hash'], finding_id=fid,
                                                        ts=rec['ts'], message_id=ident)
     state.setdefault('send_receipts', {})[ident] = value
+    if waiting:
+        state['awaiting_reply'] = waiting
     state['last_send_ts'] = max(state.get('last_send_ts') or '', rec['ts'])
     return rec, True
 

@@ -867,7 +867,7 @@ def main():
         state['last_ct'] = st['ct']; state['last_cec'] = st['cec']; state['last_wake_ts'] = W.now_iso()
         state['dispatch_log'] = (state.get('dispatch_log') or [])[-300:] + [dict(ts=r['ts'], ct=st['ct'], verb=r['verb'], thread=r['thread'], brief_path=r['brief_path'], inline=r['inline']) for r in R['disp_records']]
         for f in R['findings']:
-            if f['status'] == 'send': state['proposed'][f['id']] = dict(key=f['key'], evidence_hash=f['evidence_hash'], ts=W.now_iso(), message=f['message'], asks_reply=bool(f.get('asks_reply')), is_poke=bool(f.get('is_poke')))
+            if f['status'] == 'send': state['proposed'][f['id']] = dict(key=f['key'], evidence_hash=f['evidence_hash'], ts=W.now_iso(), message=f['message'], asks_reply=bool(f.get('asks_reply')), is_poke=bool(f.get('is_poke')), reply_min=a.reply_min)
         if R.get('reply'):
             state['last_reply'] = R['reply']; state['awaiting_reply'] = None
         append_findings_md(a.state_dir, [dict(id=f['id'], wake=wake_no, wake_ts=W.now_iso(), turn_ct=st['ct'], cls=f['cls'], status=f['status'], message=f['message']) for f in R['findings']])

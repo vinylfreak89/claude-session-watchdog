@@ -190,3 +190,12 @@ Its three real-handler controls first reported `FAILED (failures=2)`; all now pa
 Veto retains its authorized role for never-delivered findings, but delivery
 ambiguity and unreadable transcripts block it. The shell wrapper passes the same
 configured target and sender as the receipt handlers.
+
+## Reply reminders across mark order
+
+The receipt refactor initially omitted the existing reply-window side effect.
+Two real-handler controls exposed this (`FAILED (failures=2)`) and now pass.
+The central receipt writer starts the reminder from delivery time, records a poke
+without postponing its deadline, and never resets the window on a repeated mark.
+Wake captures the existing configured reply interval on the proposal, so either
+mark order uses the same recorded interval. No new CLI option was added.
