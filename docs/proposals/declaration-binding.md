@@ -216,3 +216,22 @@ failed assertions out of nine. Read-only evaluation of the live `owed` rows also
 confirmed `REPORTED_DECLARATIONS_STILL_BROKEN: 2`. No claim of a green repair is
 made; adding the requested negative regression control to the green suite and
 clearing those live rows remain dependent on the evidence-contract decision.
+
+## Cost of a wrong binding in either direction
+
+A false binding marks an unkept promise fulfilled. The reminder disappears,
+unrelated work may consume another obligation's credit, and the owner can make
+decisions on work that was never dispatched. If retained as trusted evidence,
+the wrong binding can also contaminate later reconciliation. This is the silent
+and more dangerous direction; missing or ambiguous evidence must not close work.
+
+A missed binding leaves a kept promise owed. It causes repeated false accusations,
+unnecessary investigation and possible duplicate dispatches. Over time an alarm
+that keeps reporting completed work loses credibility and may be ignored when a
+real obligation is missed. That cost is real; it calls for an auditable binding
+and an honest "unbound" diagnosis, not an operator-controlled way to mute it.
+
+The owner is choosing both costs when choosing the authority and migration
+contract: stricter provenance prevents silent false closure but leaves more
+legitimate legacy work requiring independent adjudication. Neither hashing a
+guess nor widening a time window removes that tradeoff.
