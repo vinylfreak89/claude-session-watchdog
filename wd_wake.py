@@ -20,7 +20,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wd_lib as W
 import wd_state as S
 
-FAIL_SIG = re.compile(r'(\bfailed\b|Traceback|queue failed|\bexit=[1-9]\d*|\[exited with code [1-9]\d*\]|\bError\b|No such file|not found|refused|thread not found)', re.I)
 NOT_PUSHED = re.compile(r"(not pushed|unpushed|haven't pushed|hasn't been pushed|without pushing|committed, not pushed|committed but not pushed|local only|not yet pushed|push(?:ed)? later)", re.I)
 DEFAULT_STATE = dict(wake_count=0, finding_counter=0, seen_pids=[], ledger=None, dispatch_log=[], in_flight=[], raised={}, proposed={},
                      notified=[], last_ct=None, last_cec=None, last_wake_ts=None, bootstrap_ts=None)
@@ -134,7 +133,8 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
         for n in T.notifications:
             digest.append('%s notification: task %s %s %s' % ((n['ts'] or '')[11:19], n['task_id'], n['status'], n['summary']))
     claims = W.extract_claims(T) if T else []
-    dispatches = [d for t in new_turns for d in W.dispatches_in(t, sess.get('cli'))]
+    dispatch_scans = [W.dispatch_scan(t, sess.get('cli')) for t in new_turns]
+    dispatches = [d for scan in dispatch_scans for d in scan['attempts']]
     # sess['cli'] scopes the launch to this session's own tasks directory -- see background_launches
     launches = [b for t in new_turns for b in t.background_launches(sess.get('cli'))]
     commits = [c for t in new_turns for c in W.commits_in(t)]
@@ -173,24 +173,24 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
     for d in dispatches:
         rec = dict(ts=d['ts'], verb=d['verb'], thread=d['thread'], brief_path=d['brief_path'], turn_ct=ct, task_id=(d['background'] or {}).get('task_id'),
                    output_file=(d['background'] or {}).get('output_file'), inline=d['inline'])
-        outcome, failed, tail = 'unknown', False, ''
+        outcome, failed, tail = 'unknown', d['status'] == 'failed', ''
         ts_ = {}
         if d['background']:
             ts_ = W.task_output_status(d['background']['output_file'])
             if ts_.get('exit_code') is not None:
-                outcome = 'exited %s' % ts_['exit_code']; failed = ts_['exit_code'] != 0; tail = ts_.get('tail', '')
+                outcome = 'exited %s' % ts_['exit_code']; failed = failed or ts_['exit_code'] != 0; tail = ts_.get('tail', '')
             elif ts_.get('exists'):
                 outcome = 'running (output %s bytes, mtime %s)' % (ts_.get('size'), ts_.get('mtime')); tail = ts_.get('tail', '')
             else:
                 outcome = 'no output file'
         elif d['result_text'] is not None:
-            failed = bool(d['result_is_error']) or bool(FAIL_SIG.search(d['result_text'][-1500:]))
+            failed = failed or bool(d['result_is_error'])
             outcome = ('error result' if d['result_is_error'] else 'result') + ': ' + W.short(d['result_text'][-300:], 160)
             tail = d['result_text'][-600:]
         else:
             outcome = 'no tool result'
-        if not failed and tail and FAIL_SIG.search(tail): failed = True
-        rec.update(outcome=outcome, failed=failed)
+        if not failed and tail and W.DISPATCH_FAILURE.search(tail): failed = True
+        rec.update(outcome=outcome, failed=failed, accepted=d['status'] == 'accepted')
         thread_state = W.codex_thread_state(d['thread']) if d['thread'] else None
         rec['thread_state'] = {k: thread_state.get(k) for k in ('found', 'in_flight', 'last_started', 'last_complete', 'mtime')} if thread_state else None
         disp_records.append(rec)
@@ -200,7 +200,7 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
             findings.append(finding('dispatch_failed', 'dispatch_failed:%s' % (rec['task_id'] or d['tool_use_id']), dict(outcome=outcome, tail=W.short(tail, 200)),
                                     dc['sentence'] if dc else quote, 'codex-run output for that call (%s)' % (rec['output_file'] or 'tool result'),
                                     '%s; tail: %s' % (outcome, W.short(tail, 220)), turn_label, end_ts))
-        elif thread_state and thread_state.get('found') and d['verb'] in ('task', 'send', 'queue') and rec['task_id']:
+        elif rec['accepted'] and thread_state and thread_state.get('found') and d['verb'] in ('task', 'send', 'queue') and rec['task_id']:
             age = now - (W.epoch_from_iso(d['ts']) or now)
             ls_ = thread_state.get('last_started')
             # lifecycle_known guards against accusing a RUNNING turn: if the backward search for
@@ -211,10 +211,12 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
                                         dc['sentence'] if dc else quote, 'Codex rollout for thread %s (%s)' % (d['thread'][:8], thread_state['rollout']),
                                         'no task_started after the dispatch at %s (last task_started %s, last task_complete %s); codex-run task %s still without an exit marker' % (d['ts'], ls_, thread_state.get('last_complete'), rec['task_id']), turn_label, end_ts))
     for c in [c for c in claims if c['kind'] == 'dispatch']:
-        recent = [d for t in turns[-3:] for d in W.dispatches_in(t, sess.get('cli'))]
-        if not recent:
+        recent = [W.dispatch_scan(t, sess.get('cli')) for t in turns[-3:]]
+        if all(scan['complete'] and not scan['attempts'] for scan in recent):
             findings.append(finding('dispatch_claim_no_call', 'dispatch_claim_no_call:%s' % W.h(c['sentence']), dict(sentence=c['sentence']), c['sentence'],
                                     'codex-run task/send/say/queue/steer tool calls in the last 3 turns', 'none', turn_label, end_ts))
+        elif not any(scan['dispatches'] for scan in recent) and any(not scan['complete'] for scan in recent):
+            observations.append('DISPATCH CLAIM UNPROVEN: ' + '; '.join(reason for scan in recent for reason in scan['reasons']))
 
     # ---- file claims: HINTS for the model (paths are regex-extracted and can be wrong, e.g. "25.0/25.3")
     for c in [c for c in claims if c['kind'] == 'file']:
@@ -347,7 +349,7 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
         if not any(i.get('id') == b['task_id'] for i in inflight):
             inflight.append(dict(kind='bg', id=b['task_id'], output_file=b['output_file'], command=W.short(b['command'], 300), desc=b['description'], launched_ts=b['ts'], turn_ct=ct))
     for r in disp_records:
-        if r['thread'] and r['verb'] in ('task', 'send', 'queue', 'say') and not r['failed'] and not (r['outcome'] or '').startswith('exited'):
+        if r['accepted'] and r['thread'] and r['verb'] in ('task', 'send', 'queue', 'say') and not r['failed'] and not (r['outcome'] or '').startswith('exited'):
             if not any(i.get('kind') == 'codex' and i.get('thread') == r['thread'] and i.get('launched_ts') == r['ts'] for i in inflight):
                 inflight.append(dict(kind='codex', thread=r['thread'], task_id=r['task_id'], output_file=r['output_file'], launched_ts=r['ts'], turn_ct=ct, brief_path=r['brief_path']))
     still = []

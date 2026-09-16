@@ -145,16 +145,10 @@ def check(a, sess, kind, args, state):
         return 'rollout %s' % ts_.get('rollout'), 'in_flight %s; last task_started %s; last task_complete %s; last event %s; last message: %s' % (ts_.get('in_flight'), ts_.get('last_started'), ts_.get('last_complete'), ts_.get('last_event'), W.short(ts_.get('last_agent_message') or '', 160)), dict(in_flight=ts_.get('in_flight'), lifecycle_known=ts_.get('lifecycle_known'), last_started=ts_.get('last_started'), last_complete=ts_.get('last_complete'))
     raise SystemExit('unknown check kind %r' % kind)
 
-DISPATCH_TOOLS = ('send_message',)
-DISPATCH_CMD = __import__('re').compile(r'codex-(run|app)\b', __import__('re').I)
+def turn_made_a_dispatch(turn, session_cli=None):
+    """Same executable-call evidence as wake; promise binding remains separate."""
+    return bool(W.dispatches_in(turn, session_cli))
 
-def turn_made_a_dispatch(turn):
-    """Did this turn actually send anything -- to a peer session or to Codex?"""
-    for u in turn.tool_uses:
-        name = u.get('name') or ''
-        if any(t in name for t in DISPATCH_TOOLS): return True
-        if DISPATCH_CMD.search(json.dumps(u.get('input') or {})): return True
-    return False
 
 def answered_allowed(tx_path, self_sel, state, owner_ack, message_id=None):
     """Receipt evidence, or the explicitly retained owner-acknowledgement exception."""
@@ -203,7 +197,7 @@ def owed(sess, state, self_sel=None):
         text = ' '.join(x for _, x in t.assistant_texts)
         rows.append(dict(ts=t.end_ts, why=' + '.join(why),
                          declared=W.declared_actions(text),
-                         dispatched=turn_made_a_dispatch(t),
+                         dispatched=turn_made_a_dispatch(t, sess.get('cli')),
                          head=W.short(t.final_text or '', 130)))
     return rows
 

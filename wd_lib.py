@@ -11,7 +11,7 @@ Turn model: a user record that is not a tool_result and whose promptId differs f
 user record's promptId opens a turn; tool_results, task notifications injected mid-turn, slash-command
 records and interrupt markers inherit the open turn's promptId. Assistant records carry no promptId.
 """
-import os, re, json, glob, time, subprocess, hashlib, datetime, collections, shlex
+import os, re, json, glob, time, subprocess, hashlib, datetime, collections
 
 HOME = os.path.expanduser('~')
 STATE_GLOB = os.path.join(HOME, 'Library', 'Application Support', 'Claude', 'claude-code-sessions', '*', '*', 'local_*.json')
@@ -411,41 +411,74 @@ def last_turns(sess, n=3):
     return path, turns[-n:] if len(turns) >= n else turns
 
 # ----------------------------------------------------------------------------- tool-level facts
-DISPATCH_RE = re.compile(r'codex-run\s+(task|send|say|queue|steer|on-file)\b([^\n;|&]*)')
 THREAD_RE = re.compile(r'\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b')
 HEREDOC_RE = re.compile(r"cat\s*>\s*(\S+)\s*<<\s*'?(\w+)'?\n(.*?)\n\2\b", re.S)
 COMMIT_RESULT_RE = re.compile(r'^\[([\w./-]+)\s+(?:\(root-commit\)\s+)?([0-9a-f]{7,40})\]', re.M)
 
-def dispatches_in(turn, session_cli=None):
-    """Only direct executable invocations are dispatch facts; shell data is not code.
+DISPATCH_FAILURE = re.compile(
+    r'(?im)^\s*(?:refused\b|error\b|dispatch (?:failed|refused)\b|queue failed\b|'
+    r'codex-run exit [1-9]\d*\b|exit(?:ed)?(?: with)?(?: code)?[=: ]+[1-9]\d*\b|'
+    r'\[exited with code [1-9]\d*\]|.*(?:command not found|no such file or directory))')
 
-    Compound commands, substitutions and shell wrappers are intentionally unproven.
-    Background identity uses the same structural launch rule as ordinary tasks.
+
+def dispatch_scan(turn, session_cli=None):
+    """One definition for wake and declaration checks: executable Codex calls.
+
+    attempts retains failed calls for diagnosis; dispatches contains only calls
+    with a non-error result. Neither list binds a call to promised work or proves
+    its acceptance by the receiver. complete=False forbids an absence finding.
+    Shell parsing is shared in wd_shell; data and unsupported execution are distinct.
     """
-    out = []
+    import wd_shell as SH
+    attempts, accepted, reasons = [], [], []
     launches = {b['tool_use_id']: b for b in turn.background_launches(session_cli)}
     for tu in turn.tool_uses:
         if tu['name'] != 'Bash': continue
         cmd = (tu['input'] or {}).get('command', '') or ''
-        if any(c in cmd for c in ('\n', '$', '`')): continue
         try:
-            lexer = shlex.shlex(cmd, posix=True, punctuation_chars=';&|<>()')
-            lexer.whitespace_split = True
-            argv = list(lexer)
-        except ValueError:
+            commands = SH.commands(cmd)
+        except SH.Unproven as exc:
+            reasons.append('%s: %s' % (tu['id'], exc))
             continue
-        if len(argv) < 2 or os.path.basename(argv[0]) != 'codex-run': continue
-        if any(arg and all(c in ';&|<>()' for c in arg) for arg in argv): continue
-        verb = argv[1]
-        if verb not in ('task', 'send', 'say', 'queue', 'steer', 'on-file'): continue
-        thread = next((arg for arg in argv[2:] if THREAD_RE.fullmatch(arg)), None)
-        brief = next((arg for arg in argv[2:] if arg.startswith('/') and arg.endswith('.md')), None)
-        r = turn.tool_results.get(tu['id'])
-        bg = launches.get(tu['id'])
-        out.append(dict(tool_use_id=tu['id'], ts=tu['ts'], verb=verb, thread=thread, brief_path=brief,
-                        brief_text=None, inline=short(' '.join(argv[2:]), 200), background=bg,
-                        result_text=(r['text'] if r else None), result_is_error=(r['is_error'] if r else None), command=cmd))
-    return out
+        for words in commands:
+            argv = [w.value for w in words]
+            if any(not w.known for w in words):
+                reasons.append('%s: opaque expansion' % tu['id'])
+            if argv[0] in ('bash', 'sh', 'zsh', 'env', 'command', 'sudo', 'timeout'):
+                reasons.append('%s: shell or executable wrapper' % tu['id'])
+            if os.path.basename(argv[0]) != 'codex-run': continue
+            if len(argv) < 2 or not words[1].known:
+                reasons.append('%s: unknown dispatch verb' % tu['id']); continue
+            verb = argv[1]
+            if verb not in ('task', 'send', 'say', 'queue', 'steer', 'on-file'): continue
+            thread = next((w.value for w in words[2:] if w.known and THREAD_RE.fullmatch(w.value)), None)
+            brief = next((w.value for w in words[2:] if w.known and w.value.startswith('/') and w.value.endswith('.md')), None)
+            r = turn.tool_results.get(tu['id'])
+            bg = launches.get(tu['id'])
+            status = 'undecided' if not r or r.get('is_error') is not False else 'accepted'
+            if r and (r.get('is_error') is True or DISPATCH_FAILURE.search(r.get('text') or '')):
+                status = 'failed'
+            # A background launch acknowledges scheduling. A recorded failure in
+            # its output supersedes that acknowledgement for both consumers.
+            if bg:
+                output = task_output_status(bg['output_file'])
+                if output.get('error'): status = 'undecided'
+                elif output.get('exit_code') not in (None, 0) or DISPATCH_FAILURE.search(output.get('tail') or ''):
+                    status = 'failed'
+            if status == 'undecided': reasons.append('%s: result unavailable' % tu['id'])
+            d = dict(tool_use_id=tu['id'], ts=tu['ts'], verb=verb, thread=thread, brief_path=brief,
+                     brief_text=None, inline=short(' '.join(argv[2:]), 200), background=bg,
+                     result_text=(r['text'] if r else None), result_is_error=(status == 'failed'),
+                     command=cmd, status=status)
+            attempts.append(d)
+            if status == 'accepted': accepted.append(d)
+    return dict(attempts=attempts, dispatches=accepted, complete=not reasons, reasons=reasons)
+
+
+def dispatches_in(turn, session_cli=None):
+    """Recognized executable dispatches with non-error results; see dispatch_scan."""
+    return dispatch_scan(turn, session_cli)['dispatches']
+
 
 def commits_in(turn):
     """Commits made by tool calls in this turn (git commit results '[branch sha] ...')."""
