@@ -219,3 +219,19 @@ A successful target push must name the requested full hash as the source of an
 explicit `HASH:refs/heads/BRANCH` refspec. A generic push of a mutable branch cannot
 prove which commit that call published, and remains unverified. A missing task
 baseline exit is explicitly undecided, not inferred to mean unfinished.
+
+## Control audit and operator guidance
+
+The old send-gate helper fixtures reported `RESULT: 3 FAILED` because their queue
+items lacked acceptance and baselines. They were replaced with six real command
+controls covering ready, busy, unrelayed, held, empty and owner-urgent cases; all
+pass without weakening the gate. The quoted-delivery control now has an otherwise
+valid registered payload, so unrelated content rejection cannot make it pass.
+A mutation that fabricates sender provenance is detected by that control.
+
+Eight mutation tests now cover each of the seven removed kinds, no-op whole
+handlers, and specifically no-op owed, sent1, answered and finding-sent branches.
+A separate status control requires `not-yet` for an absent artifact and names its
+path; producer/schema failures require `undecided`. Usage now names the target
+receipt UUID and the pre-delivery requirement boundary. `due` points to `next`
+instead of telling the operator to send a batch.

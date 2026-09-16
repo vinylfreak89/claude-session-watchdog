@@ -679,7 +679,7 @@ def run(a):
         elif not sendable:
             print('GATE: nothing sendable.')
         elif receptive:
-            print('GATE: work set looks closed and nothing is owed -> deliver the sendable items as ONE message.')
+            print('GATE: receptive snapshot only. Run wd.sh next for the one-item send decision.')
         else:
             print('GATE: it is mid-work -> hold.')
         if openq: print('note: it has a question outstanding to the owner (%s) -- it is waiting, not stopped' % W.short(openq[-1], 90))
@@ -740,9 +740,8 @@ def run(a):
             save_state(a.state_dir, state); print('queued %s%s' % (q[-1]['id'], ' URGENT' if q[-1]['urgent'] else ''))
         if a.queue_acted_when:
             # WHAT THE TARGET HAVING ACTED LOOKS LIKE. Separate from sending on purpose: this is a
-            # statement about the item, not a claim that anything was delivered, so it needs no
-            # delivery evidence -- and keeping it separate is what lets an item that was sent before
-            # this existed acquire one without re-citing a credited message.
+            # pre-delivery requirement. The transcript gate above forbids retrofitting
+            # acceptance on delivered legacy items, including unmarked deliveries.
             it = next((x for x in q if str(x.get('id')) == a.queue_acted_when), None)
             if it is None:
                 print('no queued item %s' % a.queue_acted_when); return 1

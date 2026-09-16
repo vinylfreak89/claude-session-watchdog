@@ -6,14 +6,14 @@
 #   wd.sh sent F1,F2 <message_id>   record that findings were sent (opens the reply window when one asked for a reply)
 #   wd.sh veto F3 "reason"          record a veto
 #   wd.sh owed                      what the watchdog still owes: turns nobody relayed, and actions the target declared and did not take
-#   wd.sh answered                 record that a message was just sent to the target (the MCP send tool cannot do it itself)
+#   wd.sh answered <delivery_uuid> verify a registered payload in the target transcript; delivery alone is not action
 #   wd.sh relayed <turn end_ts>     mark turns up to here as relayed to the owner (a send answers them separately)
 #   wd.sh hold <turn end_ts> "why"  deliberately hold a turn: it is blocked on the owner
 #   wd.sh cost                      append this session's per-turn token cost to state/cost.tsv
 #   wd.sh queue add "<text>"        hold an owner item until the next wake (add --urgent to send at once,
 #                                   --acted-when "<check>" to say what the target ACTING will look like)
 #   wd.sh queue acted-when <id> "<check> <args>"   what closes this item: commit <sha> | file <path> [since] |
-#                                   grep <path> <regex> | csv ... | row <ID> | task <id> | msg-to-watchdog
+#                                   grep <path> <regex> | csv ... | row <ID> | task <id> | msg-to-watchdog "<exact reply>"
 #   wd.sh queue list | hold <id> "<condition>" | drop <id> "<why>"   (drop withdraws an UNSENT item only)
 #   wd.sh sent1 <id> <message_id>   record that a queued item was delivered. Needs the message in the
 #                                   target's transcript AND an acted-when on the item; the item then stays

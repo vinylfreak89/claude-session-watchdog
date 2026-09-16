@@ -10,6 +10,14 @@ It never edits the project, never judges whether a change is correct, never tell
 never asserts anything it did not check. The message text is produced by the scripts from the evidence; the
 session running the loop may only veto a line, never write one. The original brief is `docs/BRIEF.md`.
 
+Send marks (`sent`, `sent1`, `answered`) require the UUID of an actual target
+transcript delivery with structural sender provenance. Queue acceptance and its
+baseline must be recorded before delivery; `owed` closes the item only after fresh,
+target-attributed action passes that requirement. Hold and closed retain their
+owner-authorized roles with audited reasons and turn bindings. Existing tracking
+gets a frozen migration boundary. See [repair contracts and limitations](docs/repairs/send-acceptance.md)
+for supported action checks, undecidable cases, and the deciding controls.
+
 ```
 wd.sh                 the watchdog session's commands: boot | wait | wake | check | finding | queue | sent | veto | cost | status
 wd_lib.py             session discovery, transcript turn model, claim extraction, read-only world checks

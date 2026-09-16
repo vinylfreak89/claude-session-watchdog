@@ -1,81 +1,59 @@
 #!/usr/bin/python3
-"""Controls for the send gate: `next` must refuse while busy, while a reply is unhandled, and while held.
+"""Exercise the send gate's command handler with real queued requirements and transcripts."""
+import unittest
+from send_contract_support import ContractCase, C, K, ts
 
-The gate had exactly one refusal -- the target being mid-turn -- so the queue kept pace with TURN
-BOUNDARIES rather than with the work, and turns were ending every couple of minutes. Worse, `queue hold`
-wrote `hold_until` and this gate never read it: the hold printed "HELD UNTIL ..." and changed nothing.
-That is the two-stores failure (`wd_wake.py --due` read the field, the gate did not) and the gate is
-the reading side.
+class SendGate(ContractCase):
+    def test_unanswered_relayed_turn_allows_one_ready_item(self):
+        q = self.queue()
+        rc, out = self.cli(C, 'next')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('SEND EXACTLY THIS ONE ITEM', out)
+        self.assertIn('sent1 ' + q, out)
 
-Owner, 2026-09-11: "you're not waiting for turns to close... don't rapid fire the queue."
+    def test_open_turn_blocks_send(self):
+        self.queue()
+        self.records(dict(type='user', promptId='open', timestamp=ts(6), message=dict(role='user', content='More work')))
+        rc, out = self.cli(C, 'next')
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn('TARGET BUSY', out)
 
-Every control calls `next_item` -- the function the gate actually uses. An earlier attempt to verify
-the hold re-derived the filter in the test and "passed" against a gate that ignored the field entirely,
-which is the same defect one level up: checking a property by writing the property.
-"""
-import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
-import wd_check as C, wd_lib as W
+    def test_unrelayed_turn_blocks_send(self):
+        self.queue()
+        state = self.state(); state.pop('last_relay_ts', None)
+        K.save_state(str(self.state_dir), state)
+        rc, out = self.cli(C, 'next')
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn('UNRELAYED', out)
 
-class _Turn:
-    def __init__(self, ts, state='end_turn'):
-        self.end_ts = ts; self.end_state = state; self.start_ts = ts
-        self.assistant_texts = [(ts, 'work')]; self.final_text = 'work'
+    def test_held_item_is_skipped_for_ready_item(self):
+        held = self.queue('Held request')
+        rc, out = self.cli(K, '--queue-hold', held, '--hold-until', 'Owner decision')
+        self.assertEqual(rc, 0, out)
+        rc, out = self.cli(C, 'next')
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn('HELD', out)
+        ready = self.queue('Ready request', 'file second.txt')
+        rc, out = self.cli(C, 'next')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('sent1 ' + ready, out)
+        self.assertNotIn('Held request', out)
 
-TS = '2026-09-10T19:00:00.000Z'
+    def test_empty_queue_sends_nothing(self):
+        rc, out = self.cli(C, 'next')
+        self.assertNotEqual(rc, 0, out)
+        self.assertNotIn('SEND EXACTLY', out)
 
-def _setup(busy=False, owed_rows=()):
-    W.last_turns = lambda sess, n=8: ('p', [_Turn(TS, 'open' if busy else 'end_turn')])
-    C.owed = lambda sess, state: list(owed_rows)
+    def test_owner_urgent_pacing_exception_remains(self):
+        rc, out = self.cli(K, '--queue-add', 'Urgent request', '--queue-urgent', '--acted-when', 'file urgent.txt')
+        self.assertEqual(rc, 0, out)
+        self.records(dict(type='user', promptId='open', timestamp=ts(6), message=dict(role='user', content='More work')))
+        state = self.state(); state.pop('last_relay_ts', None)
+        K.save_state(str(self.state_dir), state)
+        rc, out = self.cli(C, 'next')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('URGENT', out)
+        self.assertIn('SEND EXACTLY', out)
+        self.assertFalse(self.state()['owner_queue'][0].get('sent'))
 
-def _q(**kw):
-    item = dict(id='Q1', text='body'); item.update(kw)
-    return dict(owner_queue=[item])
-
-def main():
-    fails = 0
-    def check(name, expect, verdict, why):
-        nonlocal fails
-        ok = verdict == expect
-        fails += not ok
-        print('%-46s -> %-5s : %s%s' % (name, verdict, 'PASS' if ok else 'FAIL',
-                                        '' if ok else '  (expected %s)' % expect))
-
-    _setup(busy=True)
-    v, _, why, _ = C.next_item(None, _q()); check('target MID-TURN', 'busy', v, why)
-
-    _setup(owed_rows=[dict(ts=TS, why='not relayed')])
-    v, _, why, _ = C.next_item(None, _q()); check('its last reply UNRELAYED', 'owed', v, why)
-
-    # the deadlock control: a turn that is relayed but not yet answered must NOT block, because the
-    # queued item is how it gets answered. Blocking here stopped the only message that could clear it.
-    _setup(owed_rows=[dict(ts=TS, why='not answered or held')])
-    v, _, why, _ = C.next_item(None, _q()); check('relayed but UNANSWERED -> must still send', 'send', v, why)
-
-    _setup()
-    v, _, why, _ = C.next_item(None, _q(hold_until='Q34 resolved')); check('item HELD behind a condition', 'held', v, why)
-
-    _setup()
-    v, _, why, _ = C.next_item(None, dict(owner_queue=[])); check('nothing queued', 'none', v, why)
-
-    _setup()
-    v, item, why, n = C.next_item(None, _q()); check('clean: idle, nothing owed, not held', 'send', v, why)
-
-    # the owner's override must beat all three refusals at once
-    _setup(busy=True, owed_rows=[dict(ts=TS)])
-    v, item, why, _ = C.next_item(None, _q(urgent=True, hold_until='x'))
-    check('URGENT beats busy + owed + held', 'send', v, why)
-
-    # and a held item must not be picked when an unheld one exists behind it
-    _setup()
-    st = dict(owner_queue=[dict(id='HELD', text='a', hold_until='x'), dict(id='FREE', text='b')])
-    v, item, why, _ = C.next_item(None, st)
-    ok = v == 'send' and item['id'] == 'FREE'
-    fails += not ok
-    print('%-46s -> %-5s : %s' % ('skips a held item to reach a free one', v, 'PASS' if ok else 'FAIL'))
-
-    print('RESULT: %s' % ('all controls pass' if not fails else '%d FAILED' % fails))
-    return 1 if fails else 0
-
-if __name__ == '__main__':
-    raise SystemExit(main())
+if __name__ == '__main__': unittest.main(verbosity=2)

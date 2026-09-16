@@ -88,6 +88,13 @@ class AcceptanceContract(ContractCase):
         self.assertEqual(len(self.state()['owner_queue']), 1)
         self.assertIn('undecided', out.lower())
 
+    def test_missing_artifact_is_not_yet_and_names_subject(self):
+        q = self.queue(); self.deliver('Create artifact'); self.sent(q)
+        out = self.poll()
+        self.assertIn('not-yet', out)
+        self.assertIn('artifact.txt', out)
+        self.assertEqual(len(self.state()['owner_queue']), 1)
+
     def test_bad_count_type_is_undecided_not_a_crash(self):
         q = self.queue(spec='grep artifact.txt created'); self.deliver('Create artifact'); self.sent(q)
         self.write_target('artifact.txt', 'created')

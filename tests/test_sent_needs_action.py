@@ -132,7 +132,8 @@ class SendContract(ContractCase):
                 self.assertEqual(self.state(), before)
 
     def test_human_quote_is_not_delivery(self):
-        self.deliver('Synthetic acknowledgement', origin=False)
+        self.queue()
+        self.deliver('Create artifact', origin=False)
         rc, out = self.cli(C, 'answered', 'delivery-1')
         self.assertNotEqual(rc, 0, out)
         self.assertNotIn('last_send_ts', self.state())

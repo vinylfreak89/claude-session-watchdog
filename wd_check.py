@@ -170,8 +170,9 @@ def answered_allowed(tx_path, self_sel, state, owner_ack, message_id=None):
 def owed(sess, state, self_sel=None):
     """Relay is required; only a transcript-bound receipt can answer a specific turn.
 
-    Legacy watermarks and operator-authored hold/closure metadata cannot discharge
-    an obligation. Read the whole record so unanswered turns cannot age out of a tail.
+    Owner-authorized hold/closed dispositions require audited turn bindings. A
+    frozen migration frontier preserves pre-upgrade history. Within tracking,
+    unanswered turns cannot age out of a tail and later sends cannot move the frontier.
     """
     turns = W.split_turns(D.read_records(W.transcript_path(sess)))
     tracking = state.get('turn_tracking') or {}
@@ -464,7 +465,7 @@ def run(a, ap):
         verdict, item, why, n = next_item(sess, state)
         if verdict == 'send':
             if why: print(why)
-            print('SEND EXACTLY THIS ONE ITEM, then run:  wd.sh sent1 %s' % item.get('id'))
+            print('SEND EXACTLY THIS ONE ITEM, then run:  wd.sh sent1 %s <target-delivery-uuid>' % item.get('id'))
             print('---'); print(item.get('text','')); print('---')
             print('%d other item(s) stay queued.' % (n - 1)); return 0
         print(why); return 1
@@ -491,14 +492,14 @@ def run(a, ap):
                   'delivery that can be checked.'); return 1
         # The acceptance lives on the ITEM, set when it was queued or with `queue acted-when`.
         # Declaring what done looks like is not a claim that anything was sent, so it is deliberately
-        # NOT part of this call: keeping them apart is what lets an item whose acceptance was never
-        # recorded get one without re-citing a delivery, and stops this verb growing a second job.
+        # NOT part of this call: requirements and baselines must precede delivery.
+        # Delivered legacy items lacking either remain undecided.
         spec = item.get('acted_when')
         ok, why = acceptance_valid(spec)
         if not ok:
             print('REFUSED: %s. Set it first:  wd.sh queue acted-when %s "<check> <args>"  '
                   '(e.g. "commit <sha>", "grep <path> <regex>", "file <path> <since>", '
-                  '"msg-to-watchdog")' % (why, i))
+                  '"msg-to-watchdog <exact reply>")' % (why, i))
             return 1
         try:
             rec, changed = D.record_delivery(W.transcript_path(sess), a.self_sel, state, mid, queue_id=i)
