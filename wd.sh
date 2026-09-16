@@ -10,8 +10,15 @@
 #   wd.sh relayed <turn end_ts>     mark turns up to here as relayed to the owner (a send answers them separately)
 #   wd.sh hold <turn end_ts> "why"  deliberately hold a turn: it is blocked on the owner
 #   wd.sh cost                      append this session's per-turn token cost to state/cost.tsv
-#   wd.sh queue add "<text>"        hold an owner item until the next wake (add --urgent to send at once)
-#   wd.sh queue list | clear <id>   show held items; clear them once delivered in a message
+#   wd.sh queue add "<text>"        hold an owner item until the next wake (add --urgent to send at once,
+#                                   --acted-when "<check>" to say what the target ACTING will look like)
+#   wd.sh queue acted-when <id> "<check> <args>"   what closes this item: commit <sha> | file <path> [since] |
+#                                   grep <path> <regex> | csv ... | row <ID> | task <id> | msg-to-watchdog
+#   wd.sh queue list | hold <id> "<condition>" | drop <id> "<why>"   (drop withdraws an UNSENT item only)
+#   wd.sh sent1 <id> <message_id>   record that a queued item was delivered. Needs the message in the
+#                                   target's transcript AND an acted-when on the item; the item then stays
+#                                   OWED until that check passes. `wd.sh owed` settles it from the record --
+#                                   there is no verb to close one by hand.
 #   wd.sh due                       what is undelivered (owner items + findings) and whether the target is receptive
 #   wd.sh owe add|list|ungate|done   decisions the owner owes, each READY or GATED behind unfinished target work
 #   wd.sh status                    one-screen state summary
@@ -74,11 +81,14 @@ case "$cmd" in
   queue)  sub=$1; shift
           case "$sub" in
             add)   urgent=""; [ "$1" = "--urgent" ] && { urgent="--queue-urgent"; shift; }
-                   exec $PY "$D/wd_wake.py" --state-dir "$S" --queue-add "$*" $urgent ;;
+                   acted=""; [ "$1" = "--acted-when" ] && { acted="$2"; shift 2; }
+                   exec $PY "$D/wd_wake.py" --state-dir "$S" --queue-add "$*" $urgent --acted-when "$acted" ;;
             list)  exec $PY "$D/wd_wake.py" --state-dir "$S" --queue-list ;;
+            acted-when) id=$1; shift; exec $PY "$D/wd_wake.py" --state-dir "$S" --queue-acted-when "$id" --acted-when "$*" ;;
+            drop)  id=$1; shift; exec $PY "$D/wd_wake.py" --state-dir "$S" --queue-drop "$id" --reason "$*" ;;
             clear) exec $PY "$D/wd_wake.py" --state-dir "$S" --queue-clear "$1" ;;
             hold)  id=$1; shift; exec $PY "$D/wd_wake.py" --state-dir "$S" --queue-hold "$id" --hold-until "$*" ;;
-            *) echo "wd.sh queue add [--urgent] \"<owner's words>\" | list | clear <message_id>" >&2; exit 2 ;;
+            *) echo "wd.sh queue add [--urgent] [--acted-when \"<check>\"] \"<owner's words>\" | list | acted-when <id> \"<check>\" | hold <id> \"<condition>\"" >&2; exit 2 ;;
           esac ;;
   outcome) id=$1; v=$2; shift 2; exec $PY "$D/wd_wake.py" --state-dir "$S" --outcome "$id" "$v" --reason "$*" ;;
   due)    exec $PY "$D/wd_wake.py" --state-dir "$S" --target "$TARGET" --due ;;

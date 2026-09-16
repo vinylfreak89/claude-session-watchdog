@@ -578,7 +578,7 @@ def main():
     ap.add_argument('--max-digest', type=int, default=30); ap.add_argument('--bootstrap', action='store_true'); ap.add_argument('--replay', type=int, default=0)
     ap.add_argument('--no-state', action='store_true'); ap.add_argument('--json', action='store_true')
     ap.add_argument('--sent'); ap.add_argument('--message-id', default=''); ap.add_argument('--veto'); ap.add_argument('--reason', default='')
-    ap.add_argument('--queue-add'); ap.add_argument('--queue-urgent', action='store_true'); ap.add_argument('--queue-list', action='store_true'); ap.add_argument('--outcome', nargs=2, metavar=('ID','VERDICT')); ap.add_argument('--queue-clear'); ap.add_argument('--queue-hold'); ap.add_argument('--hold-until', default='')
+    ap.add_argument('--queue-add'); ap.add_argument('--queue-urgent', action='store_true'); ap.add_argument('--queue-list', action='store_true'); ap.add_argument('--outcome', nargs=2, metavar=('ID','VERDICT')); ap.add_argument('--queue-clear'); ap.add_argument('--queue-hold'); ap.add_argument('--hold-until', default=''); ap.add_argument('--queue-acted-when'); ap.add_argument('--queue-drop'); ap.add_argument('--acted-when', default='')
     ap.add_argument('--due', action='store_true')
     ap.add_argument('--owe-add'); ap.add_argument('--gated-on', default=''); ap.add_argument('--owe-list', action='store_true')
     ap.add_argument('--owe-clear'); ap.add_argument('--owe-ungate')
@@ -694,19 +694,61 @@ def main():
         save_state(a.state_dir, state)
         print('%s %s' % (hit[0]['id'], ('HELD UNTIL: ' + a.hold_until) if a.hold_until else 'released -- sendable now'))
         return 0
-    if a.queue_add or a.queue_list or a.queue_clear:
+    if a.queue_add or a.queue_list or a.queue_clear or a.queue_acted_when or a.queue_drop:
         q = state.setdefault('owner_queue', [])
         if a.queue_add:
             q.append(dict(id='Q%d' % (len(q) + len(state.get('owner_queue_sent') or []) + 1), ts=W.now_iso(),
-                          urgent=bool(a.queue_urgent), text=a.queue_add))
+                          urgent=bool(a.queue_urgent), text=a.queue_add,
+                          acted_when=(a.acted_when or '').strip() or None))
             save_state(a.state_dir, state); print('queued %s%s' % (q[-1]['id'], ' URGENT' if q[-1]['urgent'] else ''))
+        if a.queue_acted_when:
+            # WHAT THE TARGET HAVING ACTED LOOKS LIKE. Separate from sending on purpose: this is a
+            # statement about the item, not a claim that anything was delivered, so it needs no
+            # delivery evidence -- and keeping it separate is what lets an item that was sent before
+            # this existed acquire one without re-citing a credited message.
+            it = next((x for x in q if str(x.get('id')) == a.queue_acted_when), None)
+            if it is None:
+                print('no queued item %s' % a.queue_acted_when); return 1
+            import wd_check as _C
+            ok, why = _C.acceptance_valid((a.acted_when or '').strip())
+            if not ok:
+                print('REFUSED: %s' % why); return 1
+            it['acted_when'] = (a.acted_when or '').strip()
+            save_state(a.state_dir, state)
+            print('%s closes when: %s' % (it['id'], it['acted_when']))
+        if a.queue_drop:
+            # WITHDRAW an item that was never sent. Retiring `queue clear` left no way to take back
+            # something added by mistake, which would have pushed the next person back to editing
+            # state by hand -- the thing this whole path exists to stop.
+            #
+            # The line it will not cross: an item that WAS sent cannot be dropped. Once the target
+            # has it, the obligation is real and only the record closes it. So this can retract a
+            # mistake and cannot make a debt disappear.
+            it = next((x for x in q if str(x.get('id')) == a.queue_drop), None)
+            if it is None:
+                print('no queued item %s' % a.queue_drop); return 1
+            if it.get('sent'):
+                print('REFUSED: %s was SENT at %s. A sent item closes when its acceptance check '
+                      'passes, never by hand.' % (it['id'], it['sent'])); return 2
+            why = (a.reason or '').strip()
+            if not why:
+                print('REFUSED: say why it is being withdrawn -- `wd.sh queue drop %s "<why>"`'
+                      % a.queue_drop); return 1
+            q.remove(it); state.setdefault('owner_queue_dropped', []).append(
+                dict(it, dropped_ts=W.now_iso(), reason=why))
+            save_state(a.state_dir, state)
+            log_line(a.state_dir, '%s OWNER-QUEUE dropped %s: %s' % (W.now_iso(), it['id'], why))
+            print('dropped %s (never sent): %s' % (it['id'], why))
         if a.queue_clear:
-            sent = state.setdefault('owner_queue_sent', [])
-            for it in list(q):
-                if it.get('hold_until'): continue   # a held item was never in the message; it stays queued
-                sent.append(dict(it, sent_ts=W.now_iso(), message_id=a.queue_clear)); q.remove(it)
-            save_state(a.state_dir, state); log_line(a.state_dir, '%s OWNER-QUEUE delivered %s' % (W.now_iso(), a.queue_clear))
-            print('queue cleared into message %s' % a.queue_clear)
+            # RETIRED. It took a MESSAGE id and swept every unheld item into the archive stamped
+            # with it, whether or not each had been sent -- so with more than one unheld item it
+            # recorded deliveries that never happened, and it was called once with a QUEUE id, which
+            # it accepted silently. An item now leaves the queue exactly one way: it was sent
+            # (`sent1`, which needs delivery evidence) and its acceptance check has since passed
+            # (`settle_acted`, which reads the record). Nothing archives an item by hand.
+            print('RETIRED: `queue clear` archived items on this session\'s say-so. An item leaves '
+                  'the queue when it was SENT and its acceptance check PASSES -- see `wd.sh owed`, '
+                  'which settles them, and `wd.sh queue acted-when <id> "<check>"`.'); return 2
         if a.queue_list or a.queue_add:
             for it in q: print('%s [%s]%s %s' % (it['id'], it['ts'], ' URGENT' if it.get('urgent') else '', W.short(it['text'], 200)))
             if not q: print('(owner queue empty)')

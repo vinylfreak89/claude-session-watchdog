@@ -152,7 +152,7 @@ def turn_made_a_dispatch(turn):
         if DISPATCH_CMD.search(json.dumps(u.get('input') or {})): return True
     return False
 
-def answered_allowed(tx_path, self_sel, state, owner_ack):
+def answered_allowed(tx_path, self_sel, state, owner_ack, message_id=None):
     """May `answered` be recorded? Only on EVIDENCE, never on this session's say-so.
 
     `answered` asserts that a message reached the target. Nothing verified it, and five invocations
@@ -227,11 +227,20 @@ def answered_allowed(tx_path, self_sel, state, owner_ack):
         return False, ('NO MESSAGE FROM THIS SESSION IS IN THE TARGET\'S TRANSCRIPT. '
                        'Relaying to the owner is not replying to the target. Send, or pass '
                        '--owner-ack "<his words>".')
-    already = state.get('credited_send_ts')
-    if already and newest <= already:
-        return False, ('the newest delivered message (%s) was ALREADY credited to an earlier '
-                       '`answered`. One reply cannot discharge two turns.' % newest)
-    state['credited_send_ts'] = newest
+    # The credit is per MESSAGE, not per call. One message legitimately carries a queue item AND
+    # the findings that go with it, so each of those marks must be able to cite the same delivery --
+    # while a mark with NO send behind it still finds nothing new to cite. Keyed by message_id the
+    # second mark is idempotent; keyed only by timestamp (as this was) the second mark was refused
+    # and the agent's next move was to reach for a verb that asked for no evidence at all.
+    credited = state.setdefault('credited_sends', {})
+    if message_id and message_id in credited:
+        return True, 'already credited to message %s (delivered %s)' % (message_id, credited[message_id])
+    high = max([v for v in credited.values() if v] + [state.get('credited_send_ts') or ''])
+    if high and newest <= high:
+        return False, ('the newest delivered message (%s) was ALREADY credited to an earlier mark. '
+                       'One reply cannot discharge two turns.' % newest)
+    credited[message_id or newest] = newest
+    state['credited_send_ts'] = newest          # kept: older code and states read this
     return True, 'delivered message at %s' % newest
 
 
@@ -301,6 +310,111 @@ def owed(sess, state):
                          dispatched=turn_made_a_dispatch(t),
                          head=W.short(t.final_text or '', 130)))
     return rows
+
+
+# --------------------------------------------------------------------------- acceptance
+# DELIVERY IS NOT ACTION (owner, 2026-09-16: "answered needs to not just be 'the target transcript
+# agreed to it'. it needs to verify the target took action, otherwise its supposed to remind").
+#
+# So a sent item records WHAT WOULD COUNT as the target having acted, and stays owed -- reminding --
+# until that is observed in the record. The kinds are the ones `check` above already implements;
+# this maps each one's facts onto a single question: has it happened yet?
+#
+# A kind absent from this table CANNOT close an item, and that is the important half. Defaulting an
+# unknown kind to "satisfied" would be a door straight through this gate -- the same
+# missing-is-not-a-value shape that produced the phantom task on 2026-09-16.
+#
+# ⚠️ These key names were READ OUT OF `check`, not remembered. The first draft guessed four of six
+# wrong (`exit_code` for `exit`, `found` for `present`/`count`/`matched`/`hits`). Every wrong key
+# reads falsy, so the item would have nagged forever instead of closing -- safe, and therefore
+# quiet enough to survive a long time unnoticed.
+ACCEPTANCE = {
+    # committed AND on the remote: an unpushed commit is invisible to the owner
+    'commit': lambda f: bool(f.get('exists')) and bool(f.get('remote')),
+    # written, and if a `since` was given, written AFTER it
+    'file': lambda f: bool(f.get('exists')) and f.get('modified_since') is not False,
+    'grep': lambda f: (f.get('hits') or 0) > 0,
+    'row': lambda f: f.get('present') is True,
+    'csv': lambda f: (f.get('matched') or 0) > 0,
+    'task': lambda f: f.get('exit') is not None,
+    'msg-to-watchdog': lambda f: (f.get('count') or 0) > 0,
+    # 'running', 'tree' and 'dispatch' describe a SITUATION rather than a completed act, so they are
+    # deliberately absent: each would be satisfied by the target doing nothing at all.
+}
+
+
+def acceptance_valid(spec):
+    """May this spec close an item? Checked when the send is RECORDED, not when it is evaluated.
+
+    Refusing at record time is the difference between an item that can never close and a send that
+    is refused until its author says what done looks like.
+    """
+    parts = (spec or '').split()
+    if not parts:
+        return False, 'no acceptance check given'
+    if parts[0] not in ACCEPTANCE:
+        return False, ('check kind %r cannot establish that the target ACTED (usable: %s)'
+                       % (parts[0], ', '.join(sorted(ACCEPTANCE))))
+    if len(parts) == 1 and parts[0] != 'msg-to-watchdog':
+        return False, '%r needs its argument(s), e.g. "commit <sha>" or "grep <path> <regex>"' % parts[0]
+    return True, 'acceptance: %s' % spec
+
+
+def acceptance_satisfied(a, sess, state, spec):
+    """Has the target DONE it? -> (decided, satisfied, evidence).
+
+    `decided` is false when the check could not run. An error is not a pass and not a failure: it
+    keeps the item owed and says why, so a broken check nags instead of silently closing.
+    """
+    ok, why = acceptance_valid(spec)
+    if not ok:
+        return False, False, why
+    kind, args = spec.split()[0], spec.split()[1:]
+    try:
+        checked, result, facts = check(a, sess, kind, args, state)
+    except (Exception, SystemExit) as e:
+        # A broken check must NAG, never close -- and never take the nagger down with it. SystemExit
+        # is caught by name because `check` uses it for a malformed argument (the csv expression),
+        # and it does not inherit from Exception: one bad acceptance spec would otherwise kill the
+        # whole `owed` poll, which is the one thing that would still be running when everything else
+        # has gone quiet.
+        return False, False, '%s check raised %s: %s' % (kind, type(e).__name__, e)
+    return True, bool(ACCEPTANCE[kind](facts or {})), result
+
+
+def unacted_items(a, sess, state):
+    """Items the target was SENT and has not been shown to act on -- what `owed` nags about."""
+    rows = []
+    for it in (state.get('owner_queue') or []):
+        if not it.get('sent') or it.get('acted_ts'):
+            continue
+        decided, ok, ev = acceptance_satisfied(a, sess, state, it.get('acted_when'))
+        rows.append(dict(id=it.get('id'), sent=it['sent'], spec=it.get('acted_when'),
+                         decided=decided, satisfied=ok, evidence=ev,
+                         head=W.short(it.get('text') or '', 110)))
+    return rows
+
+
+def settle_acted(a, sess, state):
+    """Close every sent item whose acceptance check now passes. Returns the ids closed.
+
+    Closure is a CONSEQUENCE of the record, never a verb the agent calls: there is deliberately no
+    `wd.sh acted <id>`, because that would be exactly the say-so this whole path exists to remove.
+    """
+    closed = []
+    for it in (state.get('owner_queue') or []):
+        if not it.get('sent') or it.get('acted_ts'):
+            continue
+        decided, ok, ev = acceptance_satisfied(a, sess, state, it.get('acted_when'))
+        if decided and ok:
+            it['acted_ts'] = W.now_iso(); it['acted_evidence'] = W.short(ev, 300)
+            closed.append(it.get('id'))
+    if closed:
+        sent = state.setdefault('owner_queue_sent', [])
+        for it in list(state.get('owner_queue') or []):
+            if it.get('acted_ts'):
+                sent.append(it); state['owner_queue'].remove(it)
+    return closed
 
 
 def next_item(sess, state):
@@ -528,13 +642,48 @@ def main():
             print('%d other item(s) stay queued.' % (n - 1)); return 0
         print(why); return 1
     if a.mode == 'sent1':
-        i = a.rest[0] if a.rest else ''
-        for x in (state.get('owner_queue') or []):
-            if str(x.get('id')) == i: x['sent'] = W.now_iso(); break
-        else: print('no queued item %s' % i); return 1
+        # sent1 <id> <message_id> --acted-when "<check> <args>"
+        #
+        # Two requirements, and neither is this session's word for it. The message must be IN the
+        # target's transcript, so a mark with no send behind it cannot silence `owed`. And the item
+        # must say what the target HAVING ACTED would look like, so it cannot close on delivery --
+        # delivery is not action (owner, 2026-09-16). An item marked sent stays owed, reminding,
+        # until its check passes; `settle_acted` closes it from the record, and there is
+        # deliberately no verb to close one by hand.
+        rest = list(a.rest)
+        i = rest[0] if rest else ''
+        mid = rest[1] if len(rest) > 1 else ''
+        item = next((x for x in (state.get('owner_queue') or []) if str(x.get('id')) == i), None)
+        if item is None:
+            print('no queued item %s' % i); return 1
+        if not mid:
+            print('REFUSED: sent1 <id> <message_id>. The message id is what ties this mark to a '
+                  'delivery that can be checked.'); return 1
+        # The acceptance lives on the ITEM, set when it was queued or with `queue acted-when`.
+        # Declaring what done looks like is not a claim that anything was sent, so it is deliberately
+        # NOT part of this call: keeping them apart is what lets an item whose acceptance was never
+        # recorded get one without re-citing a delivery, and stops this verb growing a second job.
+        spec = item.get('acted_when')
+        ok, why = acceptance_valid(spec)
+        if not ok:
+            print('REFUSED: %s. Set it first:  wd.sh queue acted-when %s "<check> <args>"  '
+                  '(e.g. "commit <sha>", "grep <path> <regex>", "file <path> <since>", '
+                  '"msg-to-watchdog")' % (why, i))
+            return 1
+        allowed, ev = answered_allowed(W.transcript_path(sess), a.self_sel, state, None, mid)
+        if not allowed:
+            print('REFUSED: %s' % ev); return 1
+        item['sent'] = W.now_iso(); item['message_id'] = mid
         state['last_send_ts'] = W.now_iso(); WK.save_state(a.state_dir, state)
-        print('item %s marked sent at %s' % (i, state['last_send_ts'])); return 0
+        print('item %s sent at %s (%s); OWED until %s' % (i, item['sent'], ev, spec)); return 0
     if a.mode == 'owed':
+        # Settle first: an item whose acceptance check now passes is closed BY THE RECORD, on the
+        # poll that is already running, so nothing has to remember to close it. Then whatever is
+        # still unacted is nagged with the rest -- a sent item is not a finished one.
+        closed = settle_acted(a, sess, state)
+        unacted = unacted_items(a, sess, state)
+        if closed:
+            WK.save_state(a.state_dir, state)
         rows = owed(sess, state)
         broken = [r for r in rows if r['declared'] and not r['dispatched']]
         due_now = due_questions(sess, state, a.quiet_min)
@@ -551,6 +700,13 @@ def main():
         print('DECLARED an action and made no dispatch: %d' % len(broken))
         for r in broken: print('   %s  declared: %s' % (r['ts'], ' | '.join(r['declared'])))
         if not rows: print('   nothing owed')
+        # In the headline the monitor already reads, for the same reason the nudge is: a section
+        # further down is not an alarm.
+        print('SENT, NOT YET ACTED ON: %d%s' % (len(unacted),
+              ('  (closed this poll: %s)' % ', '.join(closed)) if closed else ''))
+        for u in unacted:
+            print('   %s sent %s -- waiting on: %s' % (u['id'], u['sent'], u['spec']))
+            print('      %s: %s' % ('NOT YET' if u['decided'] else 'CANNOT TELL', W.short(u['evidence'], 140)))
         # The owner's primitive, 2026-09-10: "keep track of what you've requested and what the
         # engine has and hasn't answered... keep reminding yourself, and not interrupting, but
         # nudging for answers when you don't get them." So open questions ride on the check that
