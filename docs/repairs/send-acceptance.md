@@ -235,3 +235,49 @@ A separate status control requires `not-yet` for an absent artifact and names it
 path; producer/schema failures require `undecided`. Usage now names the target
 receipt UUID and the pre-delivery requirement boundary. `due` points to `next`
 instead of telling the operator to send a batch.
+
+## Review reproduction coverage
+
+The historical review probe deliberately asserts unsafe behavior and is preserved
+as a record, not run as a regression suite. Each of its 18 cases now has a command
+handler control below (test names omit the `test_` prefix):
+
+| Historical reproduction | Deciding control in `tests/` |
+|---|---|
+| reconcile_restores_refused_answer_without_delivery | test_reconcile_send_guard.py: stale_answered_repair_cannot_advance_send |
+| delivered_but_unmarked_item_can_be_dropped | test_sent_needs_action.py: delivered_unmarked_item_cannot_be_dropped |
+| next_ignores_sent_unacted_item | test_sent_needs_action.py: next_blocks_sent_unacted_item |
+| sent_without_delivery | test_sent_needs_action.py: unknown_finding_cannot_record_send |
+| reusing_message_id_clears_new_turn | test_sent_needs_action.py: same_receipt_does_not_answer_later_turn |
+| same_delivery_marks_unrelated_queue_item | test_sent_needs_action.py: one_receipt_cannot_mark_two_items |
+| delayed_first_mark_clears_post_delivery_turn | test_sent_needs_action.py: delayed_answer_does_not_answer_later_turn |
+| change_acceptance_after_send_closes_without_action | test_sent_needs_action.py: sent_requirement_is_immutable |
+| preexisting_file_is_action | test_sent_needs_action.py: preexisting_file_does_not_close |
+| missing_file_fact_fails_open | test_acceptance_contract.py: missing_file_fact_is_undecided |
+| bad_fact_type_kills_poll | test_acceptance_contract.py: bad_count_type_is_undecided_not_a_crash |
+| unknown_kind_accepted_on_add | test_sent_needs_action.py: unknown_acceptance_refused_on_add |
+| queue_ids_collide_after_drop | test_queue_identity.py: drop_cannot_reuse_a_live_id |
+| human_quote_is_delivery | test_sent_needs_action.py: human_quote_is_not_delivery |
+| real_text_block_delivery_is_rejected | test_sent_needs_action.py: text_block_delivery_is_usable |
+| lifecycle_event_split_across_chunks_is_lost | test_lifecycle_handlers.py: start_across_chunk_boundary_is_in_flight |
+| unknown_lifecycle_treated_as_finished_by_monitor | test_monitor_lifecycle.py: unknown_lifecycle_still_nags |
+| foreground_quoted_dispatch_is_a_launch | test_launch_handlers.py: quoted_command_is_not_dispatch |
+
+Final full run: **27 test scripts pass**; `tests/test_reconcile.py` reports exactly
+the same six pre-existing missing-ledger CLI failures quoted above. Its stage-5
+receipt-bypass controls pass. No live sessions, state or target files were changed,
+and no network remote was used for the synthetic acceptance tests.
+
+## Owner-ack authority question
+
+The old owner-ack control attributes that exception to an owner ruling too. The
+repair currently refuses operator-supplied acknowledgement words without an
+independently verifiable owner record. Whether to preserve that old route pending
+a separate hardening proposal was explicitly raised for clarification; its owner
+authority must not be silently conflated with the unverified CLI representation.
+There is no authenticated owner-ack replacement in this change.
+
+The standalone compile check first hit the sandbox's external bytecode cache:
+`PermissionError: [Errno 1] Operation not permitted: '/Users/vinylfreak89/Library/Caches/com.apple.python/Users/vinylfreak89/Documents/claude-session-watchdog/wd_acceptance.cpython-39.pyc.4340495728'`.
+Repeating with `PYTHONPYCACHEPREFIX=/tmp/wd-repair-pycache` passed, as did `bash -n wd.sh`
+and `git diff --check`. This was a cache-write restriction, not a syntax failure.

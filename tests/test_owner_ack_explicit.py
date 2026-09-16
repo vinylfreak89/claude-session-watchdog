@@ -4,7 +4,7 @@ import unittest
 from send_contract_support import ContractCase, C
 
 class OwnerAckContract(ContractCase):
-    def test_owner_ack_is_retired(self):
+    def test_unverified_owner_ack_is_refused(self):
         before = self.state()
         rc, out = self.cli(C, 'answered', '--owner-ack', 'Synthetic authority claim')
         self.assertNotEqual(rc, 0, out)

@@ -159,7 +159,7 @@ def turn_made_a_dispatch(turn):
 def answered_allowed(tx_path, self_sel, state, owner_ack, message_id=None):
     """Compatibility entry point; every credit needs a registered transcript receipt."""
     if owner_ack is not None:
-        return False, 'operator-attested acknowledgements are retired'
+        return False, 'owner acknowledgement needs independent provenance; an argument is not delivery evidence'
     try:
         rec, changed = D.record_delivery(tx_path, self_sel, state, message_id)
         return True, 'delivered record %s at %s' % (rec['id'], rec['ts'])
