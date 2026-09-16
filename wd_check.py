@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wd_lib as W
 import wd_wake as WK
 import wd_receipts as D
+import wd_turns as TD
 
 def check(a, sess, kind, args, state):
     repo = a.repo or sess['cwd']
@@ -164,14 +165,6 @@ def answered_allowed(tx_path, self_sel, state, owner_ack, message_id=None):
         return False, str(exc)
 
 
-def close_turn(state, ts, reason):
-    return False, 'operator-attested turn closure is retired; cite a verified delivery'
-
-
-def turn_is_closed(state, ts):
-    return False
-
-
 def owed(sess, state, self_sel=None):
     """Relay is required; only a transcript-bound receipt can answer a specific turn.
 
@@ -179,14 +172,21 @@ def owed(sess, state, self_sel=None):
     an obligation. Read the whole record so unanswered turns cannot age out of a tail.
     """
     turns = W.split_turns(D.read_records(W.transcript_path(sess)))
-    done = [t for t in turns if t.end_state != 'open']
+    tracking = state.get('turn_tracking') or {}
+    since = tracking.get('since')
+    done = [t for t in turns if t.end_state != 'open'
+            and (not since or D.epoch(t.end_ts) >= D.epoch(since))]
     relayed = state.get('last_relay_ts') or ''
     answered = D.answered_turns(W.transcript_path(sess), self_sel, state)
     rows = []
     for t in done:
         why = []
         if not (relayed and t.end_ts <= relayed): why.append('not relayed')
-        if t.end_ts not in answered:
+        legacy = tracking.get('legacy_answered_through')
+        historical = bool(legacy and D.epoch(t.end_ts) <= D.epoch(legacy))
+        held = TD.valid_disposition(sess, t, (state.get('held_turns') or {}).get(t.end_ts), 'hold')
+        closed = TD.valid_disposition(sess, t, (state.get('closed_turns') or {}).get(t.end_ts), 'closed')
+        if not (historical or t.end_ts in answered or held or closed):
             why.append('not answered or held')
         if not why: continue
         text = ' '.join(x for _, x in t.assistant_texts)
@@ -386,6 +386,8 @@ def main():
     ap.add_argument('mode', choices=['check', 'finding', 'owed', 'relayed', 'hold', 'answered', 'ask', 'resolved', 'open', 'next', 'sent1', 'nudged', 'conditional', 'fired', 'closed']); ap.add_argument('rest', nargs=argparse.REMAINDER)
     a = ap.parse_args(); W.set_row_pattern(a.row_pattern)
     sess = W.find_session(a.target); state = WK.load_state(a.state_dir)
+    if TD.initialize_tracking(state):
+        WK.save_state(a.state_dir, state)
     if a.mode == 'answered':
         if len(a.rest) != 1:
             print('REFUSED: answered <target delivery uuid>; the body must match registered obligations')
@@ -395,27 +397,23 @@ def main():
             print('REFUSED: %s' % why); return 1
         WK.save_state(a.state_dir, state)
         print('answered: %s' % why); return 0
-    if a.mode in ('relayed', 'hold'):
+    if a.mode in ('hold', 'closed'):
+        if len(a.rest) < 2:
+            print('REFUSED: %s <turn end_ts> "reason"' % a.mode); return 1
+        try:
+            actor = W.find_session(a.self_sel)['sessionId'] if a.self_sel else None
+            changed = TD.record_disposition(sess, actor, state, a.mode, a.rest[0], ' '.join(a.rest[1:]))
+        except D.EvidenceError as exc:
+            print('REFUSED: %s' % exc); return 1
+        if changed:
+            WK.save_state(a.state_dir, state)
+        print('%s %s with recorded attribution and turn evidence' % (a.mode, a.rest[0])); return 0
+    if a.mode == 'relayed':
         ts = a.rest[0] if a.rest else ''
-        if not ts: ap.error('%s <turn end_ts> %s' % (a.mode, '"reason"' if a.mode == 'hold' else ''))
-        if a.mode == 'hold' and 'owner' not in ' '.join(a.rest[1:]).lower() and 'you' not in ' '.join(a.rest[1:]).lower():
-            # hold means BLOCKED ON THE OWNER. Waiting on Codex, a subagent or a running job is
-            # not a hold -- it is work in flight that still needs collecting, and calling it a
-            # hold is how a loop gets lost: the check goes quiet on something that needs a kick.
-            # Cost, 2026-09-10: four turns marked held for "with Codex" while nothing collected
-            # the reply, until the owner noticed the loop had stopped.
-            print('REFUSED: hold is for turns blocked on the OWNER. Waiting on Codex, a subagent'
-                  ' or a job is work in flight -- kick it or poll it, do not hold it.')
-            return 1
-        if a.mode == 'relayed':
-            state['last_relay_ts'] = max(ts, state.get('last_relay_ts') or '')
-            print('relayed to the owner up to %s' % state['last_relay_ts'])
-        else:
-            reason = ' '.join(a.rest[1:]).strip()
-            if not reason: ap.error('hold <turn end_ts> "why it is blocked on the owner"')
-            state.setdefault('held_turns', {})[ts] = dict(reason=reason, ts=W.now_iso())
-            print('holding %s: %s' % (ts, reason))
-        WK.save_state(a.state_dir, state); return 0
+        if not ts: ap.error('relayed <turn end_ts>')
+        state['last_relay_ts'] = max(ts, state.get('last_relay_ts') or '')
+        WK.save_state(a.state_dir, state)
+        print('relayed to the owner up to %s' % state['last_relay_ts']); return 0
 
     # ---- unanswered questions (owner's primitive, 2026-09-10) ----------------------------
     # A question sent mid-turn is exactly where things stop getting answered: it lands at a
@@ -450,14 +448,6 @@ def main():
         q['last_send'] = W.now_iso(); q['asked_ct'] = str(st.get('ct'))
         WK.save_state(a.state_dir, state)
         print('nudged %s (%d resend(s)); due again at the next gate crossing' % (key, q['resends'])); return 0
-    if a.mode == 'closed':
-        ts = a.rest[0] if a.rest else ''
-        if not ts: ap.error('closed <turn end_ts> "why it needed no reply"')
-        ok, why = close_turn(state, ts, ' '.join(a.rest[1:]))
-        if not ok:
-            print('REFUSED: %s' % why); return 1
-        WK.save_state(a.state_dir, state)
-        print('closed %s under the one-line exception: %s' % (ts, why)); return 0
     if a.mode in ('conditional', 'fired'):
         key = a.rest[0] if a.rest else ''
         if not key: ap.error('%s <key> [condition]' % a.mode)

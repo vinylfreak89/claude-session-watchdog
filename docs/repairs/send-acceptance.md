@@ -2,7 +2,7 @@
 
 The command handlers, not helper return values, are the control boundary. All
 fixtures use synthetic transcripts and temporary state; no live session is sent
-anything. No override, force mode or operator-attested closure is introduced.
+anything. No override or force mode is introduced. Owner-authorized dispositions retain their own audited path.
 
 ## Red baseline
 
@@ -40,9 +40,8 @@ watermarks no longer discharge turns, and unanswered turns cannot age out of an
 8-turn read window.
 
 `answered` now requires a target delivery UUID and a body matching registered
-obligations. Bare acknowledgements, owner-ack arguments, manual closed-turn marks
-and held-turn metadata cannot supply independent action evidence. These former
-exceptions no longer close turns. Legacy receipts without structural peer origin
+obligations. Bare acknowledgements and owner-ack arguments cannot supply delivery evidence.
+Owner-authorized hold and closed dispositions are handled separately, as described below. Legacy receipts without structural peer origin
 metadata remain unverifiable, including attachments that carry only quoted text.
 No migration flag or guessed provenance is provided.
 
@@ -74,3 +73,34 @@ RESULT: 6 FAILED: CRASHED test_cli_readings: FileNotFoundError(2, 'No such file 
 an item was never delivered. A saved sent mark, a delivery not yet marked, an
 ambiguous matching record, or an unreadable transcript blocks both operations.
 Missing legacy acceptance cannot be filled after delivery. It remains owed.
+
+## Corrected scope: owner dispositions and migration
+
+The first receipt repair removed hold/closed dispositions too broadly. The owner
+clarified their authority: RELAY AND (RESPOND OR HOLD), and the D15 one-line
+exception. They are restored through real command handlers with nonempty reason,
+acting session, governing ruling, timestamp, target identity and the hash of the
+exact completed turn. A different turn or altered transcript cannot reuse one.
+Relay remains required for a hold. Existing audited records cannot be rewritten.
+
+The migration is automatic and one-time for an existing bootstrap. It freezes the
+pre-upgrade bootstrap timestamp and legacy send frontier in `turn_tracking`
+before upgraded handlers change anything. This preserves the historical policy
+without letting a later send, boot or poll advance that legacy frontier. It does
+not retroactively reopen pre-watchdog history. New receipts remain individually
+bound. There is no CLI argument for a cutoff. Tests cover both boundaries.
+
+The seven disposition/migration controls were observed red (`FAILED (failures=6)`)
+and then green. During implementation an import alias collided with the existing
+local turn variable (`UnboundLocalError: local variable 'T' referenced before
+assignment`); the alias was corrected. A fixture that queued after its synthetic
+delivery correctly received `REFUSED: item must have been recorded before
+delivery`; its clock was corrected.
+
+Question detection is conservative: explicit question punctuation (including the
+full-width form), interrogative/request language, and outbound message text block
+hold/closed. It is not a semantic proof that arbitrary natural-language text has
+no direct question. The owner was asked whether a separate semantic review is
+required; this limitation is not represented as a solved language-understanding
+problem. Legacy disposition records missing attribution remain unauditable beyond
+the frozen historical frontier; no author or ruling is fabricated for them.

@@ -587,6 +587,9 @@ def main():
     W.set_row_pattern(a.row_pattern)
     os.makedirs(a.state_dir, exist_ok=True)
     state = load_state(a.state_dir)
+    import wd_turns as T
+    if T.initialize_tracking(state):
+        save_state(a.state_dir, state)
     if a.owe_add or a.owe_list or a.owe_clear or a.owe_ungate:
         # Decisions the OWNER owes. Each is READY or GATED behind work the target has not finished: a decision
         # he cannot sensibly make yet must never be presented to him as if it were waiting on him.
@@ -811,6 +814,7 @@ def main():
         R = analyse(a, sess, st, state, turns, 'bootstrap', self_sess=self_sess)
         state.update(seen_pids=[t.pid for t in turns if t.pid][-40:], ledger=R['new_ledger'], in_flight=R['inflight'], notified=R['notified'], last_ct=st['ct'], last_cec=st['cec'],
                      bootstrap_ts=W.now_iso(), last_wake_ts=W.now_iso(), dispatch_log=(state.get('dispatch_log') or []))
+        T.initialize_tracking(state)
         save_state(a.state_dir, state)
         print('bootstrapped: target=%s ct=%s cec=%s turns_seen=%d ledger=%s in_flight=%d' % (sess['sessionId'], st['ct'], st['cec'], len(state['seen_pids']), R['ledger_summary'], len(R['inflight'])))
         log_line(a.state_dir, '%s BOOTSTRAP ct=%s' % (W.now_iso(), st['ct'])); return 0
