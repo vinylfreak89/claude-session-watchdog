@@ -163,3 +163,12 @@ partial lines across chunks, validates actual event records rather than marker
 mentions, obeys its byte cap, and treats malformed/incomplete reads as unknown.
 Both start and completion events are covered at the 4 MiB boundary. The CLI exposes
 lifecycle certainty explicitly so a caller need not infer it from `in_flight`.
+
+## Lifecycle consumers
+
+The real monitor control initially failed with `AssertionError: 3 != 0` and a
+`HEARTBEAT` instead of a stall for malformed lifecycle records. It now passes:
+unknown lifecycle remains assessable only as unknown and cannot quiet the monitor.
+A real wake/bootstrap control additionally verifies that an apparent completion
+with unknown lifecycle does not prune in-flight work; a conclusive completion does.
+All three controls in `tests/test_monitor_lifecycle.py` pass.

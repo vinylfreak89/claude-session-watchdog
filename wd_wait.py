@@ -189,7 +189,9 @@ class Watch(object):
             return sig, bool(procs), True, 'output %s bytes, mtime %s, live processes %d' % (s_.get('size'), s_.get('mtime'), len(procs))
         ts_ = W.codex_thread_state(item.get('thread') or '')
         if not ts_.get('found'): return None, False, False, 'no rollout found for thread %s' % (item.get('thread') or '')[:8]
-        sig = (ts_.get('size'), ts_.get('mtime'), ts_.get('in_flight'))
+        sig = (ts_.get('size'), ts_.get('mtime'), ts_.get('in_flight'), ts_.get('lifecycle_known'))
+        if ts_.get('lifecycle_known') is not True:
+            return sig, False, False, 'lifecycle unknown for thread %s' % (item.get('thread') or '')[:8]
         if not ts_.get('in_flight'): return sig, False, True, 'rollout shows no turn in flight (last complete %s)' % ts_.get('last_complete')
         return sig, True, True, 'rollout in flight, last event %s' % ts_.get('last_event')
 

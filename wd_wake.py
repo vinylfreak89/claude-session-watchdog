@@ -366,7 +366,7 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
             ts_ = W.codex_thread_state(i['thread'])
             out_ = W.task_output_status(i.get('output_file')) if i.get('output_file') else {}
             if out_.get('exit_code') is not None: continue
-            if ts_.get('found') and ts_.get('last_complete') and ts_['last_complete'] > i['launched_ts'] and not ts_.get('in_flight'):
+            if ts_.get('found') and ts_.get('lifecycle_known') is True and ts_.get('last_complete') and ts_['last_complete'] > i['launched_ts'] and not ts_.get('in_flight'):
                 continue
             i['status'] = 'codex in_flight=%s last_event=%s' % (ts_.get('in_flight'), ts_.get('last_event'))
             quiet_min = (now - (W.epoch_from_iso(ts_.get('last_event')) or now)) / 60.0 if ts_.get('last_event') else None
