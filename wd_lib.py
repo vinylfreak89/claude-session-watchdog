@@ -700,12 +700,35 @@ def task_output_status(output_file):
     return dict(exists=True, size=st.st_size, mtime=iso_from_epoch(st.st_mtime), exit_code=(int(m[-1]) if m else None),
                 tail=short(tail[-600:], 300), is_symlink=os.path.islink(output_file))
 
+def _last_marked_line(path, size, marker, cap_bytes=192 * 1024 * 1024, chunk=4 * 1024 * 1024):
+    """The last line containing `marker`, searching BACKWARDS in chunks up to cap_bytes.
+
+    Returns (line_or_None, searched_to_start). The second value is what keeps the caller honest:
+    'not found in the bytes I looked at' is not 'not there', and conflating them is how a running
+    turn reads as a turn that never started.
+    """
+    end, searched = size, 0
+    while end > 0 and searched < cap_bytes:
+        start = max(0, end - chunk)
+        with open(path, 'rb') as fh:
+            fh.seek(start); data = fh.read(end - start)
+        searched += end - start
+        # the first line of a mid-file chunk is usually partial; drop it unless we reached the top
+        lines = data.split(b'\n')
+        if start > 0: lines = lines[1:]
+        for line in reversed(lines):
+            if marker in line:
+                return line, start == 0
+        end = start
+    return None, end <= 0
+
 def codex_thread_state(thread_id, tail_bytes=1024 * 1024):
     files = glob.glob(os.path.join(CODEX_SESSIONS, '*', '*', '*', 'rollout-*-%s.jsonl' % thread_id))
     if not files:
         # every caller may read the same keys whether or not a rollout exists
         return dict(found=False, thread=thread_id, rollout=None, mtime=None, size=None, last_started=None,
-                    last_complete=None, in_flight=False, last_agent_message=None, last_event=None)
+                    last_complete=None, in_flight=False, last_agent_message=None, last_event=None,
+                    lifecycle_known=False)
     f = max(files, key=os.path.getmtime)
     st = os.stat(f)
     with open(f, 'rb') as fh:
@@ -721,9 +744,33 @@ def codex_thread_state(thread_id, tail_bytes=1024 * 1024):
         if pt == 'task_started': started = o.get('timestamp')
         elif pt == 'task_complete':
             complete = o.get('timestamp'); last_msg = short(p.get('last_agent_message') or '', 200)
+    # The 1 MB tail above is a cheap read for recency, NOT a reliable place to find the turn's
+    # lifecycle: a busy turn writes megabytes of reasoning and tool records, so `task_started`
+    # scrolls out of the window precisely when the turn is most alive. 2026-09-16: a Codex review
+    # started 18 s after its dispatch and sat 3.7 MB behind a 1 MB window, and the watchdog raised
+    # `dispatch_no_turn` against a turn that was running while it looked. Search backwards for the
+    # real events, and say when the search itself came up short.
+    lifecycle_known = True
+    if started is None:
+        line, exhausted = _last_marked_line(f, st.st_size, b'"task_started"')
+        if line is not None:
+            try: started = json.loads(line.decode('utf-8', 'replace')).get('timestamp')
+            except ValueError: pass
+        elif not exhausted:
+            lifecycle_known = False          # we did not read far enough to be able to say
+    if complete is None:
+        line, _ = _last_marked_line(f, st.st_size, b'"task_complete"')
+        if line is not None:
+            try:
+                o = json.loads(line.decode('utf-8', 'replace'))
+                complete = o.get('timestamp')
+                p_ = o.get('payload') if isinstance(o.get('payload'), dict) else {}
+                last_msg = last_msg or short(p_.get('last_agent_message') or '', 200)
+            except ValueError: pass
     in_flight = bool(started) and (not complete or complete < started)
     return dict(found=True, thread=thread_id, rollout=f, mtime=iso_from_epoch(st.st_mtime), size=st.st_size,
-                last_started=started, last_complete=complete, in_flight=in_flight, last_agent_message=last_msg, last_event=last_evt)
+                last_started=started, last_complete=complete, in_flight=in_flight, last_agent_message=last_msg,
+                last_event=last_evt, lifecycle_known=lifecycle_known)
 
 def live_children(sess):
     """Processes running UNDER the session's claude process(es): background tasks, watchers, dispatches.
