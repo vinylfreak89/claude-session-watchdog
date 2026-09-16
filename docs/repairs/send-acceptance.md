@@ -293,3 +293,23 @@ The provenance hardening is now only a
 [separate proposal](../proposals/owner-ack-provenance.md), with its contract,
 infrastructure costs and migration decision spelled out. This supersedes the
 previous refusal and unresolved-authority notes above.
+
+## Lifecycle result discrepancy: Python 3.14 stderr contamination
+
+The review failure was reproduced with Homebrew Python 3.14.7:
+`json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)`.
+The previous run used `/usr/bin/python3` (3.9), where the case passes. Tracing
+confirmed that both patched lifecycle scans execute and the handler returns zero
+with a complete JSON result containing `lifecycle_known: false`. The captured
+string was not empty: it began with a `DeprecationWarning` for
+`datetime.datetime.utcfromtimestamp()` from `wd_lib.py`, followed by the JSON.
+Python 3.14's unittest warning policy exposes that warning on the first case;
+the fixture incorrectly merged stderr with the JSON stdout.
+
+The fix is in the fixture, not the scanner: preserve separate stdout and stderr,
+retain diagnostics in `cli_stderr`, and combine them only for failure diagnostics.
+The capped control now asserts both scans reached the patch. An additional real
+handler control injects a stderr warning while performing the capped scans; it
+was observed red (`FAILED (errors=1)`) before the fixture fix. All seven lifecycle
+handler controls now pass under both Python 3.9 and 3.14. No JSON failure is ignored
+and no scanner result is substituted by the fixture.

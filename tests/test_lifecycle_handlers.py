@@ -2,6 +2,7 @@
 """Lifecycle evidence must survive chunk boundaries through the check CLI."""
 import json
 import unittest
+import warnings
 from unittest.mock import patch
 from send_contract_support import ContractCase, C, W, ts
 
@@ -55,9 +56,22 @@ class LifecycleHandlers(ContractCase):
     def test_capped_search_is_unknown(self):
         self.straddle('task_started')
         scan = W._last_marked_line
-        with patch.object(W, '_last_marked_line', side_effect=lambda path, size, marker: scan(path, size, marker, cap_bytes=64, chunk=64)):
+        with patch.object(W, '_last_marked_line', side_effect=lambda path, size, marker: scan(path, size, marker, cap_bytes=64, chunk=64)) as bounded:
+            state = self.check_dispatch()
+            self.assertEqual(bounded.call_count, 2, 'both lifecycle scans must reach the capped reader')
+        self.assertFalse(state.get('lifecycle_known', True))
+
+    def test_scanner_stderr_does_not_replace_json(self):
+        self.straddle('task_started')
+        scan = W._last_marked_line
+        def bounded(path, size, marker):
+            warnings.warn('synthetic scanner diagnostic', RuntimeWarning)
+            return scan(path, size, marker, cap_bytes=64, chunk=64)
+        with warnings.catch_warnings(), patch.object(W, '_last_marked_line', side_effect=bounded):
+            warnings.simplefilter('always')
             state = self.check_dispatch()
         self.assertFalse(state.get('lifecycle_known', True))
+        self.assertIn('synthetic scanner diagnostic', self.cli_stderr)
 
     def test_small_empty_lifecycle_remains_conclusive(self):
         self.rollout.write_text(json.dumps(dict(timestamp=ts(10), type='response_item', payload=dict(type='reasoning'))) + '\n')

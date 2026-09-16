@@ -91,13 +91,17 @@ class ContractCase(unittest.TestCase):
         base = [module.__file__, '--state-dir', str(self.state_dir), '--target', TARGET, '--self', SELF,
                 '--repo', str(self.root), '--ledger', 'ledger.md']
         out = io.StringIO()
-        with patch.object(sys, 'argv', base + list(args)), patch.object(W, 'now_iso', return_value=ts(self.clock)), contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+        err = io.StringIO()
+        with patch.object(sys, 'argv', base + list(args)), patch.object(W, 'now_iso', return_value=ts(self.clock)), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             try:
                 rc = module.main()
             except SystemExit as e:
                 rc = e.code if isinstance(e.code, int) else 1
                 if not isinstance(e.code, int): out.write(str(e.code))
-        return rc, out.getvalue()
+        # JSON stdout is a separate protocol from diagnostics. In particular,
+        # Python 3.14 warns on utcfromtimestamp under unittest's warning filter.
+        self.cli_stderr = err.getvalue()
+        return rc, out.getvalue() + (self.cli_stderr if rc != 0 else '')
 
     def queue(self, text='Create artifact', spec='file artifact.txt'):
         rc, out = self.cli(K, '--queue-add', text, '--acted-when', spec)
