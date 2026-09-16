@@ -147,3 +147,10 @@ Mutation controls confirm that no-op check/wake handlers, specifically no-op owe
 and finding-sent handlers, and removal of **each** of the seven kinds are detected
 by the positive command-handler controls. `tests/test_acceptance_mutations.py`
 passes only when those broken implementations make their deciding controls fail.
+
+## Queue identities
+
+All three real-handler identity controls failed before the repair and pass after
+it. The monotonic sequence is seeded from live, sent and dropped history, including
+the highest dropped ID. Existing ambiguous live IDs refuse sends; the repair does
+not silently rename historical records.

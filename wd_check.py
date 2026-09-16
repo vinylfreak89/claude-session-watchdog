@@ -263,6 +263,9 @@ def next_item(sess, state):
     did not, and THIS is the one that gates the send. The gate is the reading side.
     """
     q = [x for x in (state.get('owner_queue') or []) if not x.get('sent')]
+    identities = [x.get('id') for x in state.get('owner_queue') or []]
+    if len(identities) != len(set(identities)):
+        return 'held', None, 'AMBIGUOUS QUEUE IDS. SEND NOTHING.', len(q)
     urgent = [x for x in q if x.get('urgent')]
     if not q:
         return 'none', None, 'nothing queued.', 0
@@ -471,7 +474,10 @@ def main():
         rest = list(a.rest)
         i = rest[0] if rest else ''
         mid = rest[1] if len(rest) > 1 else ''
-        item = next((x for x in (state.get('owner_queue') or []) if str(x.get('id')) == i), None)
+        matches = [x for x in state.get('owner_queue') or [] if str(x.get('id')) == i]
+        if len(matches) > 1:
+            print('REFUSED: ambiguous queue id'); return 1
+        item = matches[0] if matches else None
         if item is None:
             print('no queued item %s' % i); return 1
         if not mid:

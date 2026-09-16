@@ -723,7 +723,11 @@ def main():
                 snapshot = A.baseline(a, W.find_session(a.target), spec) if spec else None
             except (Exception, SystemExit) as exc:
                 print('REFUSED: acceptance cannot be established: %s' % exc); return 1
-            q.append(dict(id='Q%d' % (len(q) + len(state.get('owner_queue_sent') or []) + 1), ts=W.now_iso(),
+            history = q + list(state.get('owner_queue_sent') or []) + list(state.get('owner_queue_dropped') or [])
+            used = [int(x['id'][1:]) for x in history if re.fullmatch(r'Q[0-9]+', str(x.get('id', '')))]
+            sequence = max([int(state.get('owner_queue_seq') or 0)] + used) + 1
+            state['owner_queue_seq'] = sequence
+            q.append(dict(id='Q%d' % sequence, ts=W.now_iso(),
                           urgent=bool(a.queue_urgent), text=a.queue_add,
                           acted_when=spec, acceptance_baseline=snapshot))
             save_state(a.state_dir, state); print('queued %s%s' % (q[-1]['id'], ' URGENT' if q[-1]['urgent'] else ''))
