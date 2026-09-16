@@ -104,3 +104,46 @@ no direct question. The owner was asked whether a separate semantic review is
 required; this limitation is not represented as a solved language-understanding
 problem. Legacy disposition records missing attribution remain unauditable beyond
 the frozen historical frontier; no author or ruling is fabricated for them.
+
+## Typed acceptance and action attribution
+
+Each kind returns `pass`, `not-yet` or `undecided`. Parsing, fact-shape validation,
+producer errors and evaluator exceptions share the undecided boundary. Unknown
+kinds and malformed arguments are refused when set. Baselines are captured before
+delivery; missing legacy baselines cannot be manufactured after delivery.
+
+The 25 real-handler/real-producer acceptance controls were observed red:
+`FAILED (failures=15, errors=1)`, then all passed. Every kind has a successful
+closure control, a pre-existing-state control, and an unattributed-change control.
+The producer-schema fault injections are through `owed`, not helper-only tests.
+
+Postconditions are intentionally specific:
+
+- `file`: changed bytes and mtime after delivery, with successful target Write/Edit
+  calls whose reconstructed contents equal the current file. A touch, failed write,
+  other writer or unchanged contents cannot pass.
+- `grep`: the above attribution plus newly matching lines.
+- `csv`: the above attribution plus newly matching complete rows; malformed columns,
+  rows or non-finite numeric comparisons are undecided.
+- `row`: a target-created or changed ledger row. This kind cannot prove removal.
+- `commit`: the full immutable hash was absent from live origin branches at baseline,
+  and a successful direct target `git push origin ...` after delivery is corroborated
+  by live remote reachability. Cached remote refs cannot pass it.
+- `task`: an unfinished baseline, a launch scoped to the target session, exit zero,
+  and a post-delivery harness completion notification.
+- `msg-to-watchdog`: an exact expected reply, a successful target send call after
+  delivery, and structural delivery evidence in the watchdog's transcript.
+
+Unsupported-but-legitimate cases remain owed: generated artifacts without a
+verifiable Write/Edit content history, ambiguous shell commands, already-published
+commits, row removal, missing harness provenance, and sent legacy requirements
+without baselines. Findings without a defined action postcondition remain explicitly
+undecided; verified delivery alone does not turn them into completed work. No new
+flag or setter can retrofit evidence after delivery. The ordinary send gate waits
+for unacted work; the existing owner-authorized urgent pacing exception does not
+close any obligation.
+
+Mutation controls confirm that no-op check/wake handlers, specifically no-op owed
+and finding-sent handlers, and removal of **each** of the seven kinds are detected
+by the positive command-handler controls. `tests/test_acceptance_mutations.py`
+passes only when those broken implementations make their deciding controls fail.

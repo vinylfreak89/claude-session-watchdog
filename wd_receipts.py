@@ -154,6 +154,8 @@ def record_delivery(path, sender, state, ident, queue_id=None, finding_ids=None)
         ok, why = C.acceptance_valid(q.get('acted_when'))
         if not ok:
             raise EvidenceError(why)
+        if not isinstance(q.get('acceptance_baseline'), dict):
+            raise EvidenceError('item lacks a pre-delivery acceptance baseline')
         if q.get('sent') and q.get('message_id') != ident:
             raise EvidenceError('item is already bound to another delivery')
     for fid in fids:
@@ -191,7 +193,11 @@ def answered_turns(path, sender, state):
             if (value.get('ts') != rec['ts'] or value.get('turn_ts') != rec['turn_ts'] or
                     value.get('body_hash') != hashlib.sha256(rec['body'].encode()).hexdigest()):
                 continue
-            if rec['turn_ts']:
+            item_id = value.get('queue_id')
+            completed = [q for q in state.get('owner_queue_sent') or []
+                         if q.get('id') == item_id and q.get('message_id') == ident
+                         and q.get('acted_status') == 'pass' and q.get('acted_evidence')]
+            if rec['turn_ts'] and len(completed) == 1 and not value.get('findings'):
                 answered.add(rec['turn_ts'])
         except EvidenceError:
             continue

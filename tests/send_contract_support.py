@@ -43,8 +43,9 @@ class ContractCase(unittest.TestCase):
         patch.object(W, 'read_state', return_value=dict(ct=1, lastActivityAt=0, cec=0)).start()
         patch.object(W, 'live_children', return_value=[]).start()
         patch.object(W, 'session_pids', return_value=[]).start()
-        patch.object(W, 'tasks_dir', return_value=str(self.root / 'tasks')).start()
-        (self.root / 'tasks').mkdir()
+        self.tasks = self.root / 'control-cli' / 'tasks'
+        self.tasks.mkdir(parents=True)
+        patch.object(W, 'tasks_dir', return_value=str(self.tasks)).start()
 
     def records(self, *records, path=None):
         with (path or self.tx).open('a') as f:

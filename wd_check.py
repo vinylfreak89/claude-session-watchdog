@@ -23,6 +23,7 @@ import wd_lib as W
 import wd_wake as WK
 import wd_receipts as D
 import wd_turns as TD
+import wd_acceptance as A
 
 def check(a, sess, kind, args, state):
     repo = a.repo or sess['cwd']
@@ -55,7 +56,7 @@ def check(a, sess, kind, args, state):
         rp = WK.resolve_path(args[0], repo); since = args[1] if len(args) > 1 else None
         checked = 'os.stat %s%s' % (rp, (' vs %s' % since) if since else '')
         if not os.path.exists(rp): return checked, 'no such file', dict(exists=False)
-        mt = W.mtime_iso(rp); mod = (mt > since) if since else None
+        mt = W.mtime_iso(rp); mod = (os.stat(rp).st_mtime > D.epoch(since)) if since else None
         return checked, 'exists, %d bytes, mtime %s%s' % (os.path.getsize(rp), mt, ('' if mod is None else (', modified since %s' % since if mod else ', NOT modified since %s' % since))), dict(exists=True, mtime=mt, modified_since=mod)
     if kind == 'task':
         tid = args[0]; out = os.path.join(W.tasks_dir(sess), tid + '.output'); st = W.task_output_status(out)
@@ -198,107 +199,47 @@ def owed(sess, state, self_sel=None):
 
 
 # --------------------------------------------------------------------------- acceptance
-# DELIVERY IS NOT ACTION (owner, 2026-09-16: "answered needs to not just be 'the target transcript
-# agreed to it'. it needs to verify the target took action, otherwise its supposed to remind").
-#
-# So a sent item records WHAT WOULD COUNT as the target having acted, and stays owed -- reminding --
-# until that is observed in the record. The kinds are the ones `check` above already implements;
-# this maps each one's facts onto a single question: has it happened yet?
-#
-# A kind absent from this table CANNOT close an item, and that is the important half. Defaulting an
-# unknown kind to "satisfied" would be a door straight through this gate -- the same
-# missing-is-not-a-value shape that produced the phantom task on 2026-09-16.
-#
-# ⚠️ These key names were READ OUT OF `check`, not remembered. The first draft guessed four of six
-# wrong (`exit_code` for `exit`, `found` for `present`/`count`/`matched`/`hits`). Every wrong key
-# reads falsy, so the item would have nagged forever instead of closing -- safe, and therefore
-# quiet enough to survive a long time unnoticed.
-ACCEPTANCE = {
-    # committed AND on the remote: an unpushed commit is invisible to the owner
-    'commit': lambda f: bool(f.get('exists')) and bool(f.get('remote')),
-    # written, and if a `since` was given, written AFTER it
-    'file': lambda f: bool(f.get('exists')) and f.get('modified_since') is not False,
-    'grep': lambda f: (f.get('hits') or 0) > 0,
-    'row': lambda f: f.get('present') is True,
-    'csv': lambda f: (f.get('matched') or 0) > 0,
-    'task': lambda f: f.get('exit') is not None,
-    'msg-to-watchdog': lambda f: (f.get('count') or 0) > 0,
-    # 'running', 'tree' and 'dispatch' describe a SITUATION rather than a completed act, so they are
-    # deliberately absent: each would be satisfied by the target doing nothing at all.
-}
-
 
 def acceptance_valid(spec):
-    """May this spec close an item? Checked when the send is RECORDED, not when it is evaluated.
-
-    Refusing at record time is the difference between an item that can never close and a send that
-    is refused until its author says what done looks like.
-    """
-    parts = (spec or '').split()
-    if not parts:
-        return False, 'no acceptance check given'
-    if parts[0] not in ACCEPTANCE:
-        return False, ('check kind %r cannot establish that the target ACTED (usable: %s)'
-                       % (parts[0], ', '.join(sorted(ACCEPTANCE))))
-    if len(parts) == 1 and parts[0] != 'msg-to-watchdog':
-        return False, '%r needs its argument(s), e.g. "commit <sha>" or "grep <path> <regex>"' % parts[0]
-    return True, 'acceptance: %s' % spec
-
-
-def acceptance_satisfied(a, sess, state, spec):
-    """Has the target DONE it? -> (decided, satisfied, evidence).
-
-    `decided` is false when the check could not run. An error is not a pass and not a failure: it
-    keeps the item owed and says why, so a broken check nags instead of silently closing.
-    """
-    ok, why = acceptance_valid(spec)
-    if not ok:
-        return False, False, why
-    kind, args = spec.split()[0], spec.split()[1:]
     try:
-        checked, result, facts = check(a, sess, kind, args, state)
-    except (Exception, SystemExit) as e:
-        # A broken check must NAG, never close -- and never take the nagger down with it. SystemExit
-        # is caught by name because `check` uses it for a malformed argument (the csv expression),
-        # and it does not inherit from Exception: one bad acceptance spec would otherwise kill the
-        # whole `owed` poll, which is the one thing that would still be running when everything else
-        # has gone quiet.
-        return False, False, '%s check raised %s: %s' % (kind, type(e).__name__, e)
-    return True, bool(ACCEPTANCE[kind](facts or {})), result
+        A.parse(spec)
+        return True, 'valid acceptance'
+    except (Exception, SystemExit) as exc:
+        return False, str(exc)
+
+
+def acceptance_satisfied(a, sess, state, item):
+    return A.evaluate(a, sess, state, item)
 
 
 def unacted_items(a, sess, state):
-    """Items the target was SENT and has not been shown to act on -- what `owed` nags about."""
     rows = []
-    for it in (state.get('owner_queue') or []):
-        if not it.get('sent') or it.get('acted_ts'):
+    for item in state.get('owner_queue') or []:
+        if not item.get('sent'):
             continue
-        decided, ok, ev = acceptance_satisfied(a, sess, state, it.get('acted_when'))
-        rows.append(dict(id=it.get('id'), sent=it['sent'], spec=it.get('acted_when'),
-                         decided=decided, satisfied=ok, evidence=ev,
-                         head=W.short(it.get('text') or '', 110)))
+        decision = acceptance_satisfied(a, sess, state, item)
+        rows.append(dict(id=item.get('id'), sent=item['sent'], spec=item.get('acted_when'),
+                         status=decision.status.value, evidence=decision.evidence))
+    # Findings lacking a postcondition cannot silently become completed actions.
+    for ident, finding in (state.get('sent_findings') or {}).items():
+        rows.append(dict(id=ident, sent=finding.get('sent'), spec=None, status='undecided',
+                         evidence='finding has no independently verifiable action postcondition'))
     return rows
 
 
 def settle_acted(a, sess, state):
-    """Close every sent item whose acceptance check now passes. Returns the ids closed.
-
-    Closure is a CONSEQUENCE of the record, never a verb the agent calls: there is deliberately no
-    `wd.sh acted <id>`, because that would be exactly the say-so this whole path exists to remove.
-    """
     closed = []
-    for it in (state.get('owner_queue') or []):
-        if not it.get('sent') or it.get('acted_ts'):
+    for item in list(state.get('owner_queue') or []):
+        if not item.get('sent'):
             continue
-        decided, ok, ev = acceptance_satisfied(a, sess, state, it.get('acted_when'))
-        if decided and ok:
-            it['acted_ts'] = W.now_iso(); it['acted_evidence'] = W.short(ev, 300)
-            closed.append(it.get('id'))
-    if closed:
-        sent = state.setdefault('owner_queue_sent', [])
-        for it in list(state.get('owner_queue') or []):
-            if it.get('acted_ts'):
-                sent.append(it); state['owner_queue'].remove(it)
+        decision = acceptance_satisfied(a, sess, state, item)
+        if decision.status is A.Status.PASS:
+            item['acted_ts'] = W.now_iso()
+            item['acted_status'] = decision.status.value
+            item['acted_evidence'] = decision.evidence
+            state.setdefault('owner_queue_sent', []).append(item)
+            state['owner_queue'].remove(item)
+            closed.append(item['id'])
     return closed
 
 
@@ -327,6 +268,8 @@ def next_item(sess, state):
         return 'none', None, 'nothing queued.', 0
     if urgent:
         return 'send', urgent[0], '** URGENT override: owner marked this send-immediately **', len(q)
+    if any(x.get('sent') for x in state.get('owner_queue') or []) or state.get('sent_findings'):
+        return 'owed', None, 'SENT WORK IS NOT YET VERIFIED. SEND NOTHING.', len(q)
     _, turns = W.last_turns(sess, n=1)
     if turns and turns[-1].end_state == 'open':
         return 'busy', None, 'TARGET BUSY (turn open). %d queued. SEND NOTHING.' % len(q), len(q)
@@ -347,6 +290,9 @@ def next_item(sess, state):
         held = q[0]
         return 'held', None, ('ALL %d QUEUED ITEMS ARE HELD. SEND NOTHING.\n   %s waits on: %s'
                               % (len(q), held.get('id'), held.get('hold_until'))), len(q)
+    ok, why = acceptance_valid(sendable[0].get('acted_when'))
+    if not ok or not sendable[0].get('acceptance_baseline'):
+        return 'held', None, 'ACCEPTANCE UNAVAILABLE. SEND NOTHING: %s' % why, len(q)
     return 'send', sendable[0], '', len(q)
 
 
@@ -579,7 +525,7 @@ def main():
               ('  (closed this poll: %s)' % ', '.join(closed)) if closed else ''))
         for u in unacted:
             print('   %s sent %s -- waiting on: %s' % (u['id'], u['sent'], u['spec']))
-            print('      %s: %s' % ('NOT YET' if u['decided'] else 'CANNOT TELL', W.short(u['evidence'], 140)))
+            print('      %s: %s' % (u['status'], W.short(u['evidence'], 300)))
         # The owner's primitive, 2026-09-10: "keep track of what you've requested and what the
         # engine has and hasn't answered... keep reminding yourself, and not interrupting, but
         # nudging for answers when you don't get them." So open questions ride on the check that

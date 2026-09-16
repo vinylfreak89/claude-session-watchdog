@@ -717,9 +717,15 @@ def main():
     if a.queue_add or a.queue_list or a.queue_clear or a.queue_acted_when or a.queue_drop:
         q = state.setdefault('owner_queue', [])
         if a.queue_add:
+            import wd_acceptance as A
+            spec = (a.acted_when or '').strip() or None
+            try:
+                snapshot = A.baseline(a, W.find_session(a.target), spec) if spec else None
+            except (Exception, SystemExit) as exc:
+                print('REFUSED: acceptance cannot be established: %s' % exc); return 1
             q.append(dict(id='Q%d' % (len(q) + len(state.get('owner_queue_sent') or []) + 1), ts=W.now_iso(),
                           urgent=bool(a.queue_urgent), text=a.queue_add,
-                          acted_when=(a.acted_when or '').strip() or None))
+                          acted_when=spec, acceptance_baseline=snapshot))
             save_state(a.state_dir, state); print('queued %s%s' % (q[-1]['id'], ' URGENT' if q[-1]['urgent'] else ''))
         if a.queue_acted_when:
             # WHAT THE TARGET HAVING ACTED LOOKS LIKE. Separate from sending on purpose: this is a
@@ -733,6 +739,12 @@ def main():
             ok, why = _C.acceptance_valid((a.acted_when or '').strip())
             if not ok:
                 print('REFUSED: %s' % why); return 1
+            import wd_acceptance as A
+            try:
+                snapshot = A.baseline(a, W.find_session(a.target), (a.acted_when or '').strip())
+            except (Exception, SystemExit) as exc:
+                print('REFUSED: acceptance cannot be established: %s' % exc); return 1
+            it['acceptance_baseline'] = snapshot
             it['acted_when'] = (a.acted_when or '').strip()
             save_state(a.state_dir, state)
             print('%s closes when: %s' % (it['id'], it['acted_when']))

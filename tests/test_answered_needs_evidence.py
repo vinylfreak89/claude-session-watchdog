@@ -11,6 +11,8 @@ class ReceiptContract(ContractCase):
         rc, out = self.cli(C, 'answered', 'delivery-1')
         self.assertEqual(rc, 0, out)
         self.assertEqual(self.state()['send_receipts']['delivery-1']['turn_ts'], ts(3))
+        self.assertIn(ts(3), self.poll(), 'delivery alone cannot satisfy the requested action')
+        self.write_target('artifact.txt', 'created')
         self.assertIn(ts(1), self.poll())
         self.assertNotIn(ts(3) + '  [', self.poll())
 

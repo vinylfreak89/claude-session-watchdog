@@ -1,0 +1,118 @@
+#!/usr/bin/python3
+"""Every supported kind has real-producer, real-handler positive and negative controls."""
+import os
+import subprocess
+import unittest
+from unittest.mock import patch
+from send_contract_support import ContractCase, C, K, W, SELF, TARGET, ts
+
+class AcceptanceContract(ContractCase):
+    def git(self, *args):
+        return subprocess.check_output(['git', '-C', str(self.root)] + list(args), stderr=subprocess.STDOUT, text=True).strip()
+
+    def spec(self, kind):
+        if kind == 'file': return 'file artifact.txt'
+        if kind == 'grep': return 'grep artifact.txt completed'
+        if kind == 'csv': return 'csv artifact.csv status==completed'
+        if kind == 'row': return 'row A1'
+        if kind == 'task': return 'task job1'
+        if kind == 'msg-to-watchdog': return 'msg-to-watchdog "Synthetic result"'
+        if kind == 'commit':
+            self.git('init', '-b', 'main')
+            self.git('config', 'user.name', 'Synthetic Test')
+            self.git('config', 'user.email', 'test@example.invalid')
+            (self.root / 'commit.txt').write_text('synthetic')
+            self.git('add', 'commit.txt')
+            self.git('commit', '-m', 'Synthetic fixture')
+            remote = self.root / 'remote.git'
+            subprocess.check_output(['git', 'init', '--bare', str(remote)], stderr=subprocess.STDOUT)
+            self.git('remote', 'add', 'origin', str(remote))
+            return 'commit ' + self.git('rev-parse', 'HEAD')
+        raise AssertionError(kind)
+
+    def act(self, kind, at=20, attributed=True):
+        if kind in ('file', 'grep', 'row', 'csv'):
+            name, content = {'file': ('artifact.txt', 'created'), 'grep': ('artifact.txt', 'completed'),
+                             'row': ('ledger.md', '| ID | Result |\n|---|---|\n| A1 | completed |\n'),
+                             'csv': ('artifact.csv', 'id,status\n1,completed\n')}[kind]
+            if attributed: self.write_target(name, content, at=at)
+            else:
+                path = self.root / name
+                path.write_text(content)
+                epoch = W.epoch_from_iso(ts(at + 1))
+                os.utime(path, (epoch, epoch))
+        elif kind == 'commit':
+            self.git('push', 'origin', 'main')
+            if attributed: self.tool('Bash', dict(command='git push origin main'), result='main -> main', at=at)
+        elif kind == 'task':
+            output = self.tasks / 'job1.output'
+            if attributed:
+                self.tool('Bash', dict(command='sleep 1', run_in_background=True),
+                          'Command running in background with ID: job1. Output is being written to: %s.' % output, at=at)
+            output.write_text('[exited with code 0]\n')
+            epoch = W.epoch_from_iso(ts(at + 1)); os.utime(output, (epoch, epoch))
+            if attributed:
+                self.records(dict(type='user', promptId='delivery-1', timestamp=ts(at + 2),
+                     origin=dict(kind='task-notification'), message=dict(role='user',
+                     content='<task-notification><task-id>job1</task-id><status>completed</status></task-notification>')))
+        elif kind == 'msg-to-watchdog':
+            if attributed:
+                self.tool('mcp__ccd_session_mgmt__send_message', dict(session_id=SELF, message='Synthetic result'), at=at)
+            self.records(dict(type='user', uuid='reply-1', timestamp=ts(at + 2), origin=dict(kind='peer', **{'from': TARGET}),
+                 message=dict(role='user', content='<cross-session-message from="%s">Synthetic result</cross-session-message>' % TARGET)), path=self.mine)
+
+    def exercise(self, kind, mode):
+        spec = self.spec(kind)
+        if mode == 'preexisting': self.act(kind, at=2)
+        q = self.queue('Perform synthetic action', spec)
+        self.deliver('Perform synthetic action')
+        self.sent(q)
+        before = self.poll()
+        self.assertEqual(len(self.state()['owner_queue']), 1, before)
+        if mode == 'preexisting': return
+        self.act(kind, attributed=mode != 'unattributed')
+        after = self.poll()
+        if mode == 'positive':
+            self.assertEqual(self.state()['owner_queue'], [], after)
+            self.assertEqual(self.state()['owner_queue_sent'][0]['id'], q)
+            self.assertTrue(self.state()['owner_queue_sent'][0].get('acted_evidence'))
+        else:
+            self.assertEqual(len(self.state()['owner_queue']), 1, after)
+
+    def test_missing_file_fact_is_undecided(self):
+        q = self.queue(); self.deliver('Create artifact'); self.sent(q)
+        self.write_target('artifact.txt', 'created')
+        with patch.object(C, 'check', return_value=('stat artifact.txt', 'exists', {'exists': True, 'modified_after': False})):
+            out = self.poll()
+        self.assertEqual(len(self.state()['owner_queue']), 1)
+        self.assertIn('undecided', out.lower())
+
+    def test_bad_count_type_is_undecided_not_a_crash(self):
+        q = self.queue(spec='grep artifact.txt created'); self.deliver('Create artifact'); self.sent(q)
+        self.write_target('artifact.txt', 'created')
+        with patch.object(C, 'check', return_value=('grep artifact.txt', 'hits', {'hits': 'one'})):
+            out = self.poll()
+        self.assertEqual(len(self.state()['owner_queue']), 1)
+        self.assertIn('undecided', out.lower())
+
+    def test_failed_target_write_does_not_close(self):
+        q = self.queue(); self.deliver('Create artifact'); self.sent(q)
+        path = self.root / 'artifact.txt'; path.write_text('created')
+        self.tool('Write', dict(file_path=str(path), content='created'), error=True)
+        self.assertEqual(len(self.state()['owner_queue']), 1, self.poll())
+
+    def test_missing_baseline_is_undecided(self):
+        q = self.queue(); self.deliver('Create artifact'); self.sent(q)
+        state = self.state(); state['owner_queue'][0].pop('acceptance_baseline', None)
+        K.save_state(str(self.state_dir), state)
+        self.write_target('artifact.txt', 'created')
+        out = self.poll()
+        self.assertEqual(len(self.state()['owner_queue']), 1)
+        self.assertIn('undecided', out.lower())
+
+for _kind in ('file', 'grep', 'csv', 'row', 'commit', 'task', 'msg-to-watchdog'):
+    for _mode in ('positive', 'preexisting', 'unattributed'):
+        def control(self, kind=_kind, mode=_mode): self.exercise(kind, mode)
+        setattr(AcceptanceContract, 'test_%s_%s' % (_kind.replace('-', '_'), _mode), control)
+
+if __name__ == '__main__': unittest.main(verbosity=2)
