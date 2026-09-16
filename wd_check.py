@@ -21,6 +21,7 @@ import os, sys, json, argparse, glob, time, collections
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wd_lib as W
 import wd_wake as WK
+import wd_receipts as D
 
 def check(a, sess, kind, args, state):
     repo = a.repo or sess['cwd']
@@ -153,155 +154,39 @@ def turn_made_a_dispatch(turn):
     return False
 
 def answered_allowed(tx_path, self_sel, state, owner_ack, message_id=None):
-    """May `answered` be recorded? Only on EVIDENCE, never on this session's say-so.
-
-    `answered` asserts that a message reached the target. Nothing verified it, and five invocations
-    in one session had no send behind them -- every one chained as `relayed <ts> && answered`, which
-    fuses relaying to the OWNER with discharging the obligation to the TARGET. Three of those turns
-    carried claims that then went unchecked while the alarm recorded them handled, and one reached
-    the owner before it was withdrawn. A sixth credited one send to two turns.
-
-    The evidence is the TARGET's own transcript: a delivered message appears there carrying
-    `<cross-session-message from="<self>"`. Each send is credited once, so a single reply
-    cannot discharge two turns. The owner's route is explicit and requires his words -- an empty
-    string must not launder a bypass. Control: tests/test_answered_needs_evidence.py.
-
-    TWO RECORD TYPES CARRY A DELIVERY, and reading only one refused real sends. A message that
-    arrives while the target is IDLE lands as a `user` record. One that arrives MID-TURN is absorbed
-    into its context and lands as an `attachment` whose `rendered` block is the system-reminder
-    "Another Claude session sent a message while you were working" -- with a
-    `queue-operation/enqueue` before it and a `queue-operation/remove` reason `absorbed_mid_turn`
-    after. Scanning `user` only, the gate refused a send that had demonstrably reached the target,
-    and would have nagged forever on a turn that WAS answered.
-
-    `queue-operation` is deliberately NOT evidence: `enqueue` proves the message was queued, never
-    that it arrived, and crediting it would be the false-positive this gate exists to prevent. The
-    `attachment` is the record that proves the text entered the target's context.
-    """
+    """Compatibility entry point; every credit needs a registered transcript receipt."""
     if owner_ack is not None:
-        if not str(owner_ack).strip():
-            return False, 'an empty --owner-ack is not an acknowledgement'
-        state['owner_ack'] = dict(words=str(owner_ack).strip(), at=W.now_iso())
-        return True, 'owner acknowledged: %s' % W.short(str(owner_ack).strip(), 80)
-    marker = 'from="%s"' % (self_sel or '')
-    newest = None
+        return False, 'operator-attested acknowledgements are retired'
     try:
-        with open(tx_path, errors='replace') as f:
-            for line in f:
-                # Prefilter on the BARE id: in the raw JSON line the quotes around it are escaped
-                # (`from=\\"id\\"`), so filtering on the quoted marker here rejects real sends --
-                # a character form standing in for the decoded one. The precise check is below,
-                # against the DECODED body.
-                if (self_sel or '') not in line:
-                    continue
-                try: d = json.loads(line)
-                except Exception: continue
-                t = d.get('type')
-                if t == 'user':
-                    c = d.get('message', {}).get('content')
-                    body = c if isinstance(c, str) else json.dumps(c)
-                elif t == 'attachment':
-                    # Mid-turn absorption. The body lives in `rendered`, not `message.content` --
-                    # and it must be EXTRACTED, not `json.dumps`ed: dumping re-escapes the inner
-                    # quotes so `from="id"` becomes `from=\\"id\\"` and the marker never matches.
-                    # That is the same escaping trap the prefilter comment above records, one
-                    # record type over.
-                    r = d.get('rendered')
-                    if isinstance(r, str):
-                        body = r
-                    elif isinstance(r, list):
-                        body = ' '.join(b.get('content', '') for b in r
-                                        if isinstance(b, dict) and isinstance(b.get('content'), str))
-                    else:
-                        continue
-                else:
-                    continue                      # queue-operation is queuing, not delivery
-                if marker not in body:
-                    continue
-                ts = d.get('timestamp') or ''
-                if ts and (newest is None or ts > newest):
-                    newest = ts
-    except FileNotFoundError:
-        return False, 'no target transcript at %s' % tx_path
-    if newest is None:
-        return False, ('NO MESSAGE FROM THIS SESSION IS IN THE TARGET\'S TRANSCRIPT. '
-                       'Relaying to the owner is not replying to the target. Send, or pass '
-                       '--owner-ack "<his words>".')
-    # The credit is per MESSAGE, not per call. One message legitimately carries a queue item AND
-    # the findings that go with it, so each of those marks must be able to cite the same delivery --
-    # while a mark with NO send behind it still finds nothing new to cite. Keyed by message_id the
-    # second mark is idempotent; keyed only by timestamp (as this was) the second mark was refused
-    # and the agent's next move was to reach for a verb that asked for no evidence at all.
-    credited = state.setdefault('credited_sends', {})
-    if message_id and message_id in credited:
-        return True, 'already credited to message %s (delivered %s)' % (message_id, credited[message_id])
-    high = max([v for v in credited.values() if v] + [state.get('credited_send_ts') or ''])
-    if high and newest <= high:
-        return False, ('the newest delivered message (%s) was ALREADY credited to an earlier mark. '
-                       'One reply cannot discharge two turns.' % newest)
-    credited[message_id or newest] = newest
-    state['credited_send_ts'] = newest          # kept: older code and states read this
-    return True, 'delivered message at %s' % newest
+        rec, changed = D.record_delivery(tx_path, self_sel, state, message_id)
+        return True, 'delivered record %s at %s' % (rec['id'], rec['ts'])
+    except D.EvidenceError as exc:
+        return False, str(exc)
 
 
 def close_turn(state, ts, reason):
-    """Record the owner's D15 exception for ONE turn: an honest reply of a line or less.
-
-    His ruling makes a reply the default and this the narrow exception, explicitly on probation:
-    "if you two get into loops of just writing ACK at each other to bypass doing work, I'm going to
-    ban you again". So a closure must SAY why the turn needed nothing, and it closes exactly the turn
-    named -- never a range, never a default. `answered` keeps demanding evidence of a send; this is a
-    different disposition, not a loosening of that one.
-    Control: tests/test_closed_turn.py, whose second case requires an ordinary turn to stay owed.
-    """
-    reason = (reason or '').strip()
-    if not reason:
-        return False, ('a closure must say why the turn needed no reply -- "closed" with nothing '
-                       'said IS the acknowledgement loop the exception exists to prevent')
-    state.setdefault('closed_turns', {})[ts] = dict(reason=reason, at=W.now_iso())
-    return True, reason
+    return False, 'operator-attested turn closure is retired; cite a verified delivery'
 
 
 def turn_is_closed(state, ts):
-    return ts in (state.get('closed_turns') or {})
+    return False
 
 
-def owed(sess, state):
-    """What the watchdog still owes on each completed target turn.
+def owed(sess, state, self_sel=None):
+    """Relay is required; only a transcript-bound receipt can answer a specific turn.
 
-    Owner's rule, 2026-09-10, in two parts. A turn is answered when it has been RELAYED to him
-    AND responded to -- a send back to the target -- or when it is DELIBERATELY HELD because it
-    is blocked on his answer. Relaying alone is not enough: that is the failure where he hears
-    about a result and nobody acts on it. Sending alone is not enough either: that is the failure
-    where the watchdog handles something and he never learns it happened.
-
-    "it should be firing every minute unless you actually sent something back... it firing
-    excessively is the point."
-
-    Formula: RELAY AND (RESPOND OR HOLD).
+    Legacy watermarks and operator-authored hold/closure metadata cannot discharge
+    an obligation. Read the whole record so unanswered turns cannot age out of a tail.
     """
-    _, turns = W.last_turns(sess, n=8)
+    turns = W.split_turns(D.read_records(W.transcript_path(sess)))
     done = [t for t in turns if t.end_state != 'open']
     relayed = state.get('last_relay_ts') or ''
-    sent = state.get('last_send_ts') or ''
-    held = state.get('held_turns') or {}
+    answered = D.answered_turns(W.transcript_path(sess), self_sel, state)
     rows = []
-    # Owner's formula, 2026-09-10: RELAY AND (RESPOND OR HOLD). Relay is mandatory in both
-    # branches - a hold is a decision to wait for him, which he cannot make if he was never
-    # told. The earlier version cleared a held turn whether or not it had been relayed.
-    # The send gate forbids answering while the target is mid-turn (owner, 2026-09-10: "wherever
-    # you get hooked to actually send a message, thats where you need to put the instruction to
-    # check if its busy, and if it is queue it"). So "not answered" is not a fault while it is
-    # busy -- it is the gate working, and reporting it every minute is noise on a state that
-    # cannot be cleared without violating the gate. RELAYING is always possible, so that half
-    # still counts. The nag resumes the moment the turn ends and the send becomes permitted.
-    _, _turns_now = W.last_turns(sess, n=1)
-    target_busy = bool(_turns_now) and _turns_now[-1].end_state == 'open'
     for t in done:
         why = []
         if not (relayed and t.end_ts <= relayed): why.append('not relayed')
-        if not ((sent and t.end_ts <= sent) or t.end_ts in held or target_busy
-                or turn_is_closed(state, t.end_ts)):
+        if t.end_ts not in answered:
             why.append('not answered or held')
         if not why: continue
         text = ' '.join(x for _, x in t.assistant_texts)
@@ -502,17 +387,14 @@ def main():
     a = ap.parse_args(); W.set_row_pattern(a.row_pattern)
     sess = W.find_session(a.target); state = WK.load_state(a.state_dir)
     if a.mode == 'answered':
-        # Sends go out through the MCP tool, which cannot write here, so this is the hook that
-        # records them. Forgetting it makes `owed` claim a turn is unanswered when it was answered.
-        # It is now GATED ON EVIDENCE rather than on this session's word: five invocations in one
-        # session had no send behind them, each chained as `relayed <ts> && answered`, which fuses
-        # relaying to the OWNER with replying to the TARGET. See answered_allowed.
-        ack = ' '.join(a.rest).strip() if a.rest else None
-        ok, why = answered_allowed(W.transcript_path(sess), a.self_sel, state, ack)
+        if len(a.rest) != 1:
+            print('REFUSED: answered <target delivery uuid>; the body must match registered obligations')
+            return 1
+        ok, why = answered_allowed(W.transcript_path(sess), a.self_sel, state, None, a.rest[0])
         if not ok:
             print('REFUSED: %s' % why); return 1
-        state['last_send_ts'] = W.now_iso(); WK.save_state(a.state_dir, state)
-        print('answered at %s (%s)' % (state['last_send_ts'], why)); return 0
+        WK.save_state(a.state_dir, state)
+        print('answered: %s' % why); return 0
     if a.mode in ('relayed', 'hold'):
         ts = a.rest[0] if a.rest else ''
         if not ts: ap.error('%s <turn end_ts> %s' % (a.mode, '"reason"' if a.mode == 'hold' else ''))
@@ -670,12 +552,13 @@ def main():
                   '(e.g. "commit <sha>", "grep <path> <regex>", "file <path> <since>", '
                   '"msg-to-watchdog")' % (why, i))
             return 1
-        allowed, ev = answered_allowed(W.transcript_path(sess), a.self_sel, state, None, mid)
-        if not allowed:
-            print('REFUSED: %s' % ev); return 1
-        item['sent'] = W.now_iso(); item['message_id'] = mid
-        state['last_send_ts'] = W.now_iso(); WK.save_state(a.state_dir, state)
-        print('item %s sent at %s (%s); OWED until %s' % (i, item['sent'], ev, spec)); return 0
+        try:
+            rec, changed = D.record_delivery(W.transcript_path(sess), a.self_sel, state, mid, queue_id=i)
+        except D.EvidenceError as exc:
+            print('REFUSED: %s' % exc); return 1
+        if changed:
+            WK.save_state(a.state_dir, state)
+        print('item %s delivered at %s; OWED until %s' % (i, rec['ts'], spec)); return 0
     if a.mode == 'owed':
         # Settle first: an item whose acceptance check now passes is closed BY THE RECORD, on the
         # poll that is already running, so nothing has to remember to close it. Then whatever is
@@ -684,7 +567,7 @@ def main():
         unacted = unacted_items(a, sess, state)
         if closed:
             WK.save_state(a.state_dir, state)
-        rows = owed(sess, state)
+        rows = owed(sess, state, a.self_sel)
         broken = [r for r in rows if r['declared'] and not r['dispatched']]
         due_now = due_questions(sess, state, a.quiet_min)
         # The nudge rides INSIDE owed, in the headline the monitor already reads (owner,
@@ -744,7 +627,7 @@ def main():
     # not-this-second, never not-at-all, and a finding that leaves the delivery path is a finding lost.
     if not f['status'].startswith('held:dup'):
         state['proposed'][f['id']] = dict(key=f['key'], evidence_hash=f['evidence_hash'], ts=W.now_iso(),
-                                          asks_reply=False, is_poke=False,
+                                          asks_reply=False, is_poke=False, message=f['message'],
                                           held=(None if f['status'] == 'send' else f['status']))
     WK.append_findings_md(a.state_dir, [dict(id=f['id'], wake=state.get('wake_count'), wake_ts=W.now_iso(), turn_ct=st['ct'], cls=cls, status=f['status'], message=f['message'])])
     WK.log_line(a.state_dir, '%s FINDING %s %s %s (model-selected, script-verified)' % (W.now_iso(), f['id'], cls, f['status']))

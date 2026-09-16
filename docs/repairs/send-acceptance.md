@@ -29,3 +29,19 @@ These constraints govern supported commands and reconciliation. They cannot make
 files tamper-proof against a principal that can directly rewrite both transcripts
 and state. Enforcing that stronger property requires a separate protected writer
 and authentic records; no CLI flag can create that trust boundary.
+
+## Receipt binding
+
+Finding and queue marks now share a target transcript UUID, a fixed delivery time,
+and exactly one prior completed turn. All payload components are matched exactly
+and recorded together, so item-first and finding-first marking have identical
+state. Arbitrary aliases and another item cannot reuse the receipt. Old timestamp
+watermarks no longer discharge turns, and unanswered turns cannot age out of an
+8-turn read window.
+
+`answered` now requires a target delivery UUID and a body matching registered
+obligations. Bare acknowledgements, owner-ack arguments, manual closed-turn marks
+and held-turn metadata cannot supply independent action evidence. These former
+exceptions no longer close turns. Legacy receipts without structural peer origin
+metadata remain unverifiable, including attachments that carry only quoted text.
+No migration flag or guessed provenance is provided.

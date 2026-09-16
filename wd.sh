@@ -58,13 +58,7 @@ case "$cmd" in
   veto)   id=$1; shift; exec $PY "$D/wd_wake.py" --state-dir "$S" --veto "$id" --reason "$*" ;;
   cost)   [ -n "$SELF" ] || { echo "config.json: 'self' is not set" >&2; exit 2; }; exec $PY "$D/wd_cost.py" --self "$SELF" --state-dir "$S" "$@" ;;
   owed)   exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" owed ;;
-  answered) # --owner-ack "<his words>" is the ONLY bypass, and it must be explicit: an earlier
-           # version took any trailing argument as the acknowledgement, and the historical usage
-           # was `answered <timestamp>`, so a timestamp would have been recorded as the owner
-           # saying so. Control: tests/test_owner_ack_explicit.py
-           if [ "$1" = "--owner-ack" ]; then shift; exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" answered "$@";
-           elif [ -n "$1" ]; then echo "answered takes no arguments; use --owner-ack \"<his words>\"" >&2; exit 2;
-           else exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" answered; fi ;;
+  answered) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" answered "$@" ;;
   relayed) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" relayed "$@" ;;
   ask)    exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" ask "$@" ;;
   resolved) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" resolved "$@" ;;
@@ -82,12 +76,12 @@ case "$cmd" in
           case "$sub" in
             add)   urgent=""; [ "$1" = "--urgent" ] && { urgent="--queue-urgent"; shift; }
                    acted=""; [ "$1" = "--acted-when" ] && { acted="$2"; shift 2; }
-                   exec $PY "$D/wd_wake.py" --state-dir "$S" --queue-add "$*" $urgent --acted-when "$acted" ;;
-            list)  exec $PY "$D/wd_wake.py" --state-dir "$S" --queue-list ;;
-            acted-when) id=$1; shift; exec $PY "$D/wd_wake.py" --state-dir "$S" --queue-acted-when "$id" --acted-when "$*" ;;
-            drop)  id=$1; shift; exec $PY "$D/wd_wake.py" --state-dir "$S" --queue-drop "$id" --reason "$*" ;;
-            clear) exec $PY "$D/wd_wake.py" --state-dir "$S" --queue-clear "$1" ;;
-            hold)  id=$1; shift; exec $PY "$D/wd_wake.py" --state-dir "$S" --queue-hold "$id" --hold-until "$*" ;;
+                   exec $PY "$D/wd_wake.py" "${WAKE_ARGS[@]}" --queue-add "$*" $urgent --acted-when "$acted" ;;
+            list)  exec $PY "$D/wd_wake.py" "${WAKE_ARGS[@]}" --queue-list ;;
+            acted-when) id=$1; shift; exec $PY "$D/wd_wake.py" "${WAKE_ARGS[@]}" --queue-acted-when "$id" --acted-when "$*" ;;
+            drop)  id=$1; shift; exec $PY "$D/wd_wake.py" "${WAKE_ARGS[@]}" --queue-drop "$id" --reason "$*" ;;
+            clear) exec $PY "$D/wd_wake.py" "${WAKE_ARGS[@]}" --queue-clear "$1" ;;
+            hold)  id=$1; shift; exec $PY "$D/wd_wake.py" "${WAKE_ARGS[@]}" --queue-hold "$id" --hold-until "$*" ;;
             *) echo "wd.sh queue add [--urgent] [--acted-when \"<check>\"] \"<owner's words>\" | list | acted-when <id> \"<check>\" | hold <id> \"<condition>\"" >&2; exit 2 ;;
           esac ;;
   outcome) id=$1; v=$2; shift 2; exec $PY "$D/wd_wake.py" --state-dir "$S" --outcome "$id" "$v" --reason "$*" ;;
