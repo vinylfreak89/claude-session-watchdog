@@ -182,3 +182,11 @@ supply background identity. The shared launch reader now requires Bash, boolean
 path structure. The original nine launch-reader checks still pass. Compound shell
 commands and wrappers remain unproven dispatches; no permissive fallback parses
 quoted content as executed code.
+
+## Finding withdrawal
+
+The sibling `veto` command could still withdraw a delivered but unmarked finding.
+Its three real-handler controls first reported `FAILED (failures=2)`; all now pass.
+Veto retains its authorized role for never-delivered findings, but delivery
+ambiguity and unreadable transcripts block it. The shell wrapper passes the same
+configured target and sender as the receipt handlers.

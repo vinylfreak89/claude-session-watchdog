@@ -807,9 +807,20 @@ def main():
                 log_line(a.state_dir, '%s SENT %s %s' % (rec['ts'], fid, a.message_id))
         print('recorded verified delivery: %s' % ','.join(ids)); return 0
     if a.veto:
+        import wd_receipts as D
         ids = [x.strip() for x in a.veto.split(',') if x.strip()]
         if any(fid not in state['proposed'] for fid in ids):
             print('REFUSED: only undelivered proposed findings may be vetoed'); return 1
+        if not ids or not a.target or not a.self_sel or not a.reason.strip():
+            print('REFUSED: veto requires target, sender and a reason'); return 1
+        try:
+            path = W.transcript_path(W.find_session(a.target))
+            for fid in ids:
+                item = state['proposed'][fid]
+                if D.possibly_delivered(path, a.self_sel, dict(item, text=item['message'])):
+                    raise D.EvidenceError('finding may already have been delivered')
+        except D.EvidenceError as exc:
+            print('REFUSED: %s' % exc); return 1
         for fid in ids:
             state['proposed'].pop(fid)
             rewrite_status(a.state_dir, fid, 'vetoed', a.reason.replace('|', '/'))
