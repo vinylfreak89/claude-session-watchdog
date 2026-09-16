@@ -157,9 +157,14 @@ def turn_made_a_dispatch(turn):
     return False
 
 def answered_allowed(tx_path, self_sel, state, owner_ack, message_id=None):
-    """Compatibility entry point; every credit needs a registered transcript receipt."""
+    """Receipt evidence, or the explicitly retained owner-acknowledgement exception."""
     if owner_ack is not None:
-        return False, 'owner acknowledgement needs independent provenance; an argument is not delivery evidence'
+        if not str(owner_ack).strip():
+            return False, 'an empty --owner-ack is not an acknowledgement'
+        # The owner explicitly retained this exception. Verifying its provenance
+        # is a separate proposal, not authority to disable his existing route.
+        state['owner_ack'] = dict(words=str(owner_ack).strip(), at=W.now_iso())
+        return True, 'owner acknowledged: %s' % W.short(str(owner_ack).strip(), 80)
     try:
         rec, changed = D.record_delivery(tx_path, self_sel, state, message_id)
         return True, 'delivered record %s at %s' % (rec['id'], rec['ts'])
@@ -189,7 +194,10 @@ def owed(sess, state, self_sel=None):
         historical = bool(legacy and D.epoch(t.end_ts) <= D.epoch(legacy))
         held = TD.valid_disposition(sess, t, (state.get('held_turns') or {}).get(t.end_ts), 'hold')
         closed = TD.valid_disposition(sess, t, (state.get('closed_turns') or {}).get(t.end_ts), 'closed')
-        if not (historical or t.end_ts in answered or held or closed):
+        owner_ack = state.get('owner_ack') or {}
+        owner_acknowledged = bool(str(owner_ack.get('words') or '').strip() and owner_ack.get('at')
+                                  and D.epoch(t.end_ts) <= D.epoch(owner_ack['at']))
+        if not (historical or t.end_ts in answered or held or closed or owner_acknowledged):
             why.append('not answered or held')
         if not why: continue
         text = ' '.join(x for _, x in t.assistant_texts)
@@ -345,6 +353,14 @@ def run(a, ap):
     if TD.initialize_tracking(state):
         WK.save_state(a.state_dir, state)
     if a.mode == 'answered':
+        if a.rest[:1] == ['--owner-ack']:
+            ack = ' '.join(a.rest[1:]).strip()
+            ok, why = answered_allowed(W.transcript_path(sess), a.self_sel, state, ack)
+            if not ok:
+                print('REFUSED: %s' % why); return 1
+            state['last_send_ts'] = W.now_iso()
+            WK.save_state(a.state_dir, state)
+            print('answered at %s (%s)' % (state['last_send_ts'], why)); return 0
         if len(a.rest) != 1:
             print('REFUSED: answered <target delivery uuid>; the body must match registered obligations')
             return 1

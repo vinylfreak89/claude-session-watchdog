@@ -281,3 +281,15 @@ The standalone compile check first hit the sandbox's external bytecode cache:
 `PermissionError: [Errno 1] Operation not permitted: '/Users/vinylfreak89/Library/Caches/com.apple.python/Users/vinylfreak89/Documents/claude-session-watchdog/wd_acceptance.cpython-39.pyc.4340495728'`.
 Repeating with `PYTHONPYCACHEPREFIX=/tmp/wd-repair-pycache` passed, as did `bash -n wd.sh`
 and `git diff --check`. This was a cache-write restriction, not a syntax failure.
+
+## Owner ruling after review
+
+The owner chose to preserve `answered --owner-ack "<his words>"`. It is restored:
+nonempty words and the acknowledgement instant are recorded, completed turns
+through that instant are acknowledged, and later turns stay owed. Sent work still
+requires its action check. Five real-handler controls were observed red
+(`FAILED (failures=4)`) and then green, including empty/missing argument refusal.
+The provenance hardening is now only a
+[separate proposal](../proposals/owner-ack-provenance.md), with its contract,
+infrastructure costs and migration decision spelled out. This supersedes the
+previous refusal and unresolved-authority notes above.
