@@ -694,6 +694,23 @@ def main():
         save_state(a.state_dir, state)
         print('%s %s' % (hit[0]['id'], ('HELD UNTIL: ' + a.hold_until) if a.hold_until else 'released -- sendable now'))
         return 0
+    if a.queue_acted_when or a.queue_drop:
+        import wd_receipts as D
+        ident = a.queue_acted_when or a.queue_drop
+        matches = [x for x in (state.get('owner_queue') or []) if str(x.get('id')) == ident]
+        if len(matches) != 1:
+            print('REFUSED: queue id must identify exactly one live item'); return 1
+        item = matches[0]
+        try:
+            if item.get('sent') or item.get('sent_ts'):
+                raise D.EvidenceError('a delivered item cannot be withdrawn or have its requirement changed')
+            if not a.target or not a.self_sel:
+                raise D.EvidenceError('target and sender are required to establish that the item was never delivered')
+            sess = W.find_session(a.target)
+            if D.possibly_delivered(W.transcript_path(sess), a.self_sel, item):
+                raise D.EvidenceError('the transcript may already carry this item; withdrawal and acceptance edits are refused')
+        except D.EvidenceError as exc:
+            print('REFUSED: %s' % exc); return 1
     if a.queue_add or a.queue_list or a.queue_clear or a.queue_acted_when or a.queue_drop:
         q = state.setdefault('owner_queue', [])
         if a.queue_add:

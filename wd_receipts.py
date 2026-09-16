@@ -93,7 +93,9 @@ def possibly_delivered(path, sender, item):
         if stamp and epoch(stamp) < epoch(item['ts']):
             continue
         # An ambiguous author/channel blocks withdrawal too; it never supplies credit.
-        if item.get('text') and item['text'] in json.dumps(record, ensure_ascii=False):
+        texts = [json.dumps(record, ensure_ascii=False), W._text_of((record.get('message') or {}).get('content')),
+                 (record.get('attachment') or {}).get('prompt', ''), record.get('content', '')]
+        if item.get('text') and any(isinstance(t, str) and item['text'] in t for t in texts):
             return True
         try:
             if item.get('text') and item['text'] in delivery(record, sender)['body']:

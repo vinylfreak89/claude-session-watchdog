@@ -67,3 +67,10 @@ Final existing-suite output (before and after):
 ```
 RESULT: 6 FAILED: CRASHED test_cli_readings: FileNotFoundError(2, 'No such file or directory'), CRASHED test_reaches_a_hundred: FileNotFoundError(2, 'No such file or directory'), CRASHED test_corner_cases: FileNotFoundError(2, 'No such file or directory'), CRASHED test_robustness: FileNotFoundError(2, 'No such file or directory'), CRASHED test_cli_stages: FileNotFoundError(2, 'No such file or directory'), CRASHED test_cli_all_stages: FileNotFoundError(2, 'No such file or directory')
 ```
+
+## Immutable delivered requirements
+
+`queue acted-when` and `queue drop` now require a conclusive transcript check that
+an item was never delivered. A saved sent mark, a delivery not yet marked, an
+ambiguous matching record, or an unreadable transcript blocks both operations.
+Missing legacy acceptance cannot be filled after delivery. It remains owed.
