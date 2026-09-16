@@ -42,8 +42,9 @@ class AcceptanceContract(ContractCase):
                 epoch = W.epoch_from_iso(ts(at + 1))
                 os.utime(path, (epoch, epoch))
         elif kind == 'commit':
-            self.git('push', 'origin', 'main')
-            if attributed: self.tool('Bash', dict(command='git push origin main'), result='main -> main', at=at)
+            refspec = self.git('rev-parse', 'HEAD') + ':refs/heads/main'
+            self.git('push', 'origin', refspec)
+            if attributed: self.tool('Bash', dict(command='git push origin ' + refspec), result='HEAD -> main', at=at)
         elif kind == 'task':
             output = self.tasks / 'job1.output'
             if attributed:
@@ -108,6 +109,24 @@ class AcceptanceContract(ContractCase):
         self.write_target('artifact.txt', 'created')
         out = self.poll()
         self.assertEqual(len(self.state()['owner_queue']), 1)
+        self.assertIn('undecided', out.lower())
+
+    def test_unrelated_push_cannot_attribute_commit(self):
+        spec = self.spec('commit')
+        q = self.queue('Publish synthetic commit', spec)
+        self.deliver('Publish synthetic commit'); self.sent(q)
+        self.act('commit', attributed=False)
+        self.tool('Bash', dict(command='git push origin unrelated'), result='Everything up-to-date')
+        out = self.poll()
+        self.assertEqual(len(self.state()['owner_queue']), 1, out)
+
+    def test_missing_task_baseline_exit_is_undecided(self):
+        q = self.queue(spec='task job1'); self.deliver('Create artifact'); self.sent(q)
+        state = self.state(); state['owner_queue'][0]['acceptance_baseline'].pop('exit')
+        K.save_state(str(self.state_dir), state)
+        self.act('task')
+        out = self.poll()
+        self.assertEqual(len(self.state()['owner_queue']), 1, out)
         self.assertIn('undecided', out.lower())
 
 for _kind in ('file', 'grep', 'csv', 'row', 'commit', 'task', 'msg-to-watchdog'):

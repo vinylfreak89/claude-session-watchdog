@@ -209,3 +209,13 @@ now pass. Existing unreadable/non-object state refuses mutation; defaults are
 independent copies. Check, wake and reconciliation merge serialize their complete
 read/modify/write transactions with the same per-state-directory lock. This is
 not a bypass flag and does not make direct file tampering trustworthy.
+
+## Attribution follow-up
+
+Two adversarial controls exposed defects in the first typed acceptance repair:
+`test_unrelated_push_cannot_attribute_commit` and
+`test_missing_task_baseline_exit_is_undecided` both failed. Both now pass.
+A successful target push must name the requested full hash as the source of an
+explicit `HASH:refs/heads/BRANCH` refspec. A generic push of a mutable branch cannot
+prove which commit that call published, and remains unverified. A missing task
+baseline exit is explicitly undecided, not inferred to mean unfinished.

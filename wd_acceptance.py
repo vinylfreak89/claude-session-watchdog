@@ -128,7 +128,7 @@ def target_calls(sess, after):
     return complete
 
 
-def exact_git_call(call, repo, verb):
+def exact_git_call(call, repo, verb, expected_sha=None):
     """Only direct git argv, never a shell string containing a quoted mention."""
     if call['name'] != 'Bash': return False
     command = call['input'].get('command') or ''
@@ -142,7 +142,9 @@ def exact_git_call(call, repo, verb):
     if not args or args[0] != verb: return False
     if verb == 'push':
         # Reject dry-run/no-op and alternate repositories/remotes; require explicit origin.
-        return len(args) >= 3 and args[1] == 'origin' and all(not x.startswith('-') for x in args[2:])
+        return (len(args) >= 3 and args[1] == 'origin' and all(not x.startswith('-') for x in args[2:])
+                and expected_sha is not None
+                and any(re.fullmatch(re.escape(expected_sha) + r':refs/heads/[^\s:]+', x, re.I) for x in args[2:]))
     return True
 
 
@@ -268,7 +270,7 @@ def evaluate_commit(a, sess, item, args, facts, calls):
     if type(before) is not bool: raise D.EvidenceError('remote baseline is missing')
     if before: return Result(Status.NOT_YET, 'commit was already on origin before the request')
     repo = a.repo or sess['cwd']
-    pushed = any(exact_git_call(c, repo, 'push') for c in calls)
+    pushed = any(exact_git_call(c, repo, 'push', args[0]) for c in calls)
     on_remote = remote_contains(repo, args[0])
     return Result(Status.PASS if pushed and on_remote else Status.NOT_YET,
                   'target push after delivery=%s; live origin contains %s=%s' % (pushed, args[0], on_remote))
@@ -278,7 +280,10 @@ def evaluate_task(a, sess, item, args, facts, calls):
     if 'exit' not in facts or (facts['exit'] is not None and type(facts['exit']) is not int):
         raise D.EvidenceError('task exit fact is missing or mistyped')
     if facts['exit'] != 0: return Result(Status.NOT_YET, 'task has not completed successfully')
-    if item['acceptance_baseline'].get('exit') is not None:
+    baseline = item['acceptance_baseline']
+    if 'exit' not in baseline or (baseline['exit'] is not None and type(baseline['exit']) is not int):
+        raise D.EvidenceError('task baseline exit is missing or mistyped')
+    if baseline['exit'] is not None:
         return Result(Status.NOT_YET, 'task was already finished before the request')
     records = D.read_records(W.transcript_path(sess))
     launches = [x for turn in W.split_turns(records) for x in turn.background_launches(sess.get('cli'))]
