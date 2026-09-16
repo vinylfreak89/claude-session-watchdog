@@ -54,7 +54,7 @@ case "$cmd" in
   boot)   exec $PY "$D/wd_wake.py" "${WAKE_ARGS[@]}" --bootstrap "$@" ;;
   wait)   exec $PY "$D/wd_wait.py" "${WAIT_ARGS[@]}" "$@" ;;
   wake)   exec $PY "$D/wd_wake.py" "${WAKE_ARGS[@]}" "$@" ;;
-  sent)   ids=$1; mid=$2; exec $PY "$D/wd_wake.py" --state-dir "$S" --reply-min "$(cfg reply_min 20)" --sent "$ids" --message-id "${mid:-}" ;;
+  sent)   ids=$1; mid=$2; exec $PY "$D/wd_wake.py" "${WAKE_ARGS[@]}" --sent "$ids" --message-id "${mid:-}" ;;
   veto)   id=$1; shift; exec $PY "$D/wd_wake.py" --state-dir "$S" --veto "$id" --reason "$*" ;;
   cost)   [ -n "$SELF" ] || { echo "config.json: 'self' is not set" >&2; exit 2; }; exec $PY "$D/wd_cost.py" --self "$SELF" --state-dir "$S" "$@" ;;
   owed)   exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" owed ;;

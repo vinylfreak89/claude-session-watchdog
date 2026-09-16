@@ -22,6 +22,22 @@ class SendContract(ContractCase):
         self.assertIn('F1', self.state()['proposed'])
         self.assertNotIn('last_send_ts', self.state())
 
+    def test_verified_finding_records_delivery(self):
+        s = self.state()
+        s['proposed']['F1'] = dict(key='control', evidence_hash='hash', ts=ts(5), message='Synthetic finding')
+        K.save_state(str(self.state_dir), s)
+        self.deliver('Synthetic finding')
+        self.clock = 50
+        rc, out = self.cli(K, '--sent', 'F1', '--message-id', 'delivery-1')
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn('F1', self.state()['proposed'])
+        self.assertEqual(self.state()['raised']['control']['message_id'], 'delivery-1')
+        self.assertEqual(self.state().get('last_send_ts'), ts(10))
+        before = self.state()
+        rc, out = self.cli(K, '--sent', 'F1', '--message-id', 'delivery-1')
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.state(), before)
+
     def test_file_closes_only_after_target_write(self):
         q = self.queue()
         self.deliver('Create artifact')
@@ -56,7 +72,8 @@ class SendContract(ContractCase):
         self.assertFalse(self.state()['owner_queue'][1].get('sent'))
 
     def test_delayed_answer_does_not_answer_later_turn(self):
-        self.deliver('Synthetic acknowledgement')
+        self.queue()
+        self.deliver('Create artifact')
         self.turn('later', 30, 31)
         self.clock = 50
         rc, out = self.cli(C, 'answered', 'delivery-1')

@@ -753,26 +753,32 @@ def main():
             for it in q: print('%s [%s]%s %s' % (it['id'], it['ts'], ' URGENT' if it.get('urgent') else '', W.short(it['text'], 200)))
             if not q: print('(owner queue empty)')
         return 0
-    if a.sent or a.veto:
-        ids = [x.strip() for x in (a.sent or a.veto).split(',') if x.strip()]
-        for fid in ids:
-            p = state['proposed'].pop(fid, None)
-            if a.sent:
-                if p: state['raised'][p['key']] = dict(evidence_hash=p['evidence_hash'], finding_id=fid, ts=W.now_iso(), message_id=a.message_id)
-                if p and p.get('is_poke') and state.get('awaiting_reply'):
-                    state['awaiting_reply']['poked'] = True; state['awaiting_reply']['poke_message_id'] = a.message_id
-                elif p and p.get('asks_reply'):
-                    now_ = time.time()
-                    state['awaiting_reply'] = dict(message_id=a.message_id, sent_ts=W.now_iso(), deadline=W.iso_from_epoch(now_ + 60 * a.reply_min), findings=[fid], poked=False)
+    if a.sent:
+        import wd_receipts as D
+        if not a.target or not a.self_sel or not a.message_id:
+            print('REFUSED: sent requires target, sender and target transcript delivery uuid'); return 1
+        ids = [x.strip() for x in a.sent.split(',') if x.strip()]
+        try:
+            sess = W.find_session(a.target)
+            rec, changed = D.record_delivery(W.transcript_path(sess), a.self_sel, state, a.message_id,
+                                             finding_ids=ids)
+        except D.EvidenceError as exc:
+            print('REFUSED: %s' % exc); return 1
+        if changed:
+            save_state(a.state_dir, state)
+            for fid in ids:
                 rewrite_status(a.state_dir, fid, 'sent', a.message_id)
-                log_line(a.state_dir, '%s SENT %s %s' % (W.now_iso(), fid, a.message_id))
-            else:
-                rewrite_status(a.state_dir, fid, 'vetoed', a.reason.replace('|', '/'))
-                log_line(a.state_dir, '%s VETO %s %s' % (W.now_iso(), fid, a.reason))
-        # A send is what ANSWERS a target turn, so record when it happened: `owed` clears
-        # turns up to this and keeps firing until it moves.
-        if a.sent: state['last_send_ts'] = W.now_iso()
-        save_state(a.state_dir, state); print('recorded %s: %s' % ('sent' if a.sent else 'veto', ids)); return 0
+                log_line(a.state_dir, '%s SENT %s %s' % (rec['ts'], fid, a.message_id))
+        print('recorded verified delivery: %s' % ','.join(ids)); return 0
+    if a.veto:
+        ids = [x.strip() for x in a.veto.split(',') if x.strip()]
+        if any(fid not in state['proposed'] for fid in ids):
+            print('REFUSED: only undelivered proposed findings may be vetoed'); return 1
+        for fid in ids:
+            state['proposed'].pop(fid)
+            rewrite_status(a.state_dir, fid, 'vetoed', a.reason.replace('|', '/'))
+            log_line(a.state_dir, '%s VETO %s %s' % (W.now_iso(), fid, a.reason))
+        save_state(a.state_dir, state); print('recorded veto: %s' % ids); return 0
     if not a.target: ap.error('--target is required')
     t0 = time.time()
     sess = W.find_session(a.target)
@@ -813,7 +819,7 @@ def main():
         state['last_ct'] = st['ct']; state['last_cec'] = st['cec']; state['last_wake_ts'] = W.now_iso()
         state['dispatch_log'] = (state.get('dispatch_log') or [])[-300:] + [dict(ts=r['ts'], ct=st['ct'], verb=r['verb'], thread=r['thread'], brief_path=r['brief_path'], inline=r['inline']) for r in R['disp_records']]
         for f in R['findings']:
-            if f['status'] == 'send': state['proposed'][f['id']] = dict(key=f['key'], evidence_hash=f['evidence_hash'], ts=W.now_iso(), asks_reply=bool(f.get('asks_reply')), is_poke=bool(f.get('is_poke')))
+            if f['status'] == 'send': state['proposed'][f['id']] = dict(key=f['key'], evidence_hash=f['evidence_hash'], ts=W.now_iso(), message=f['message'], asks_reply=bool(f.get('asks_reply')), is_poke=bool(f.get('is_poke')))
         if R.get('reply'):
             state['last_reply'] = R['reply']; state['awaiting_reply'] = None
         append_findings_md(a.state_dir, [dict(id=f['id'], wake=wake_no, wake_ts=W.now_iso(), turn_ct=st['ct'], cls=f['cls'], status=f['status'], message=f['message']) for f in R['findings']])
