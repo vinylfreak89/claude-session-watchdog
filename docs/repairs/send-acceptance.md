@@ -154,3 +154,12 @@ All three real-handler identity controls failed before the repair and pass after
 it. The monotonic sequence is seeded from live, sent and dropped history, including
 the highest dropped ID. Existing ambiguous live IDs refuse sends; the repair does
 not silently rename historical records.
+
+## Lifecycle reads
+
+Six controls through `check dispatch` were observed failing before the repair and
+passing after it; the original 12 lifecycle controls also pass. The scanner carries
+partial lines across chunks, validates actual event records rather than marker
+mentions, obeys its byte cap, and treats malformed/incomplete reads as unknown.
+Both start and completion events are covered at the 4 MiB boundary. The CLI exposes
+lifecycle certainty explicitly so a caller need not infer it from `in_flight`.

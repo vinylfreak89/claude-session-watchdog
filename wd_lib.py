@@ -701,76 +701,85 @@ def task_output_status(output_file):
                 tail=short(tail[-600:], 300), is_symlink=os.path.islink(output_file))
 
 def _last_marked_line(path, size, marker, cap_bytes=192 * 1024 * 1024, chunk=4 * 1024 * 1024):
-    """The last line containing `marker`, searching BACKWARDS in chunks up to cap_bytes.
+    """Find a complete lifecycle record, preserving lines across bounded reads.
 
-    Returns (line_or_None, searched_to_start). The second value is what keeps the caller honest:
-    'not found in the bytes I looked at' is not 'not there', and conflating them is how a running
-    turn reads as a turn that never started.
+    The second result is conclusive absence only when every relevant byte was
+    parsed. Truncation, malformed records and an exhausted budget stay unknown.
+    A marker in arbitrary output is not a lifecycle event.
     """
-    end, searched = size, 0
-    while end > 0 and searched < cap_bytes:
-        start = max(0, end - chunk)
+    expected = json.loads(marker.decode('utf-8'))
+    end, searched, carry = size, 0, b''
+    try:
         with open(path, 'rb') as fh:
-            fh.seek(start); data = fh.read(end - start)
-        searched += end - start
-        # the first line of a mid-file chunk is usually partial; drop it unless we reached the top
-        lines = data.split(b'\n')
-        if start > 0: lines = lines[1:]
-        for line in reversed(lines):
-            if marker in line:
-                return line, start == 0
-        end = start
-    return None, end <= 0
+            while end > 0 and searched < cap_bytes:
+                start = max(0, end - min(chunk, cap_bytes - searched))
+                fh.seek(start)
+                block = fh.read(end - start)
+                if len(block) != end - start:
+                    return None, False
+                searched += len(block)
+                lines = (block + carry).split(b'\n')
+                carry = lines.pop(0) if start > 0 else b''
+                for line in reversed(lines):
+                    if not line.strip(): continue
+                    try:
+                        record = json.loads(line.decode('utf-8'))
+                    except (ValueError, UnicodeError):
+                        return None, False
+                    if not isinstance(record, dict): return None, False
+                    payload = record.get('payload')
+                    if (record.get('type') == 'event_msg' and isinstance(payload, dict)
+                            and payload.get('type') == expected):
+                        if not epoch_from_iso(record.get('timestamp')):
+                            return None, False
+                        return line, start == 0
+                end = start
+    except OSError:
+        return None, False
+    return None, end == 0
+
 
 def codex_thread_state(thread_id, tail_bytes=1024 * 1024):
     files = glob.glob(os.path.join(CODEX_SESSIONS, '*', '*', '*', 'rollout-*-%s.jsonl' % thread_id))
-    if not files:
-        # every caller may read the same keys whether or not a rollout exists
-        return dict(found=False, thread=thread_id, rollout=None, mtime=None, size=None, last_started=None,
-                    last_complete=None, in_flight=False, last_agent_message=None, last_event=None,
-                    lifecycle_known=False)
-    f = max(files, key=os.path.getmtime)
-    st = os.stat(f)
-    with open(f, 'rb') as fh:
-        fh.seek(max(0, st.st_size - tail_bytes)); data = fh.read()
-    started, complete, last_msg, last_evt = None, None, None, None
-    for line in data.split(b'\n')[1:]:
-        if not line.strip(): continue
-        try: o = json.loads(line.decode('utf-8', 'replace'))
-        except ValueError: continue
-        p = o.get('payload') if isinstance(o.get('payload'), dict) else {}
-        pt = p.get('type')
-        if o.get('timestamp'): last_evt = o['timestamp']
-        if pt == 'task_started': started = o.get('timestamp')
-        elif pt == 'task_complete':
-            complete = o.get('timestamp'); last_msg = short(p.get('last_agent_message') or '', 200)
-    # The 1 MB tail above is a cheap read for recency, NOT a reliable place to find the turn's
-    # lifecycle: a busy turn writes megabytes of reasoning and tool records, so `task_started`
-    # scrolls out of the window precisely when the turn is most alive. 2026-09-16: a Codex review
-    # started 18 s after its dispatch and sat 3.7 MB behind a 1 MB window, and the watchdog raised
-    # `dispatch_no_turn` against a turn that was running while it looked. Search backwards for the
-    # real events, and say when the search itself came up short.
-    lifecycle_known = True
-    if started is None:
-        line, exhausted = _last_marked_line(f, st.st_size, b'"task_started"')
-        if line is not None:
-            try: started = json.loads(line.decode('utf-8', 'replace')).get('timestamp')
-            except ValueError: pass
-        elif not exhausted:
-            lifecycle_known = False          # we did not read far enough to be able to say
-    if complete is None:
-        line, _ = _last_marked_line(f, st.st_size, b'"task_complete"')
-        if line is not None:
+    result = dict(found=False, thread=thread_id, rollout=None, mtime=None, size=None,
+                  last_started=None, last_complete=None, in_flight=False,
+                  last_agent_message=None, last_event=None, lifecycle_known=False)
+    if not files: return result
+    try:
+        path = max(files, key=os.path.getmtime)
+        stat = os.stat(path)
+        result.update(found=True, rollout=path, mtime=iso_from_epoch(stat.st_mtime), size=stat.st_size)
+        offset = max(0, stat.st_size - tail_bytes)
+        with open(path, 'rb') as fh:
+            fh.seek(offset)
+            data = fh.read(stat.st_size - offset)
+        lines = data.split(b'\n')
+        if offset: lines = lines[1:]
+        for line in lines:
+            if not line.strip(): continue
+            try: record = json.loads(line.decode('utf-8'))
+            except (ValueError, UnicodeError): continue
+            if isinstance(record, dict) and record.get('timestamp'):
+                result['last_event'] = record['timestamp']
+        known = True
+        for kind, key in (('task_started', 'last_started'), ('task_complete', 'last_complete')):
+            line, exhausted = _last_marked_line(path, stat.st_size, json.dumps(kind).encode())
+            if line is None:
+                known = known and exhausted
+                continue
             try:
-                o = json.loads(line.decode('utf-8', 'replace'))
-                complete = o.get('timestamp')
-                p_ = o.get('payload') if isinstance(o.get('payload'), dict) else {}
-                last_msg = last_msg or short(p_.get('last_agent_message') or '', 200)
-            except ValueError: pass
-    in_flight = bool(started) and (not complete or complete < started)
-    return dict(found=True, thread=thread_id, rollout=f, mtime=iso_from_epoch(st.st_mtime), size=st.st_size,
-                last_started=started, last_complete=complete, in_flight=in_flight, last_agent_message=last_msg,
-                last_event=last_evt, lifecycle_known=lifecycle_known)
+                record = json.loads(line.decode('utf-8'))
+                result[key] = record['timestamp']
+                if kind == 'task_complete':
+                    result['last_agent_message'] = short(record['payload'].get('last_agent_message') or '', 200)
+            except (ValueError, KeyError, TypeError):
+                known = False
+        result['lifecycle_known'] = known
+        started, complete = result['last_started'], result['last_complete']
+        result['in_flight'] = bool(started) and (not complete or epoch_from_iso(complete) < epoch_from_iso(started))
+    except OSError:
+        result['lifecycle_known'] = False
+    return result
 
 def live_children(sess):
     """Processes running UNDER the session's claude process(es): background tasks, watchers, dispatches.

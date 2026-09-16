@@ -141,7 +141,7 @@ def check(a, sess, kind, args, state):
         if not fs: return 'Codex rollouts for thread %s*' % args[0], 'no rollout found', dict(found=False, id_form='thread')
         tid = os.path.basename(max(fs, key=os.path.getmtime)).split('rollout-')[1][20:-6]
         ts_ = W.codex_thread_state(tid)
-        return 'rollout %s' % ts_.get('rollout'), 'in_flight %s; last task_started %s; last task_complete %s; last event %s; last message: %s' % (ts_.get('in_flight'), ts_.get('last_started'), ts_.get('last_complete'), ts_.get('last_event'), W.short(ts_.get('last_agent_message') or '', 160)), dict(in_flight=ts_.get('in_flight'))
+        return 'rollout %s' % ts_.get('rollout'), 'in_flight %s; last task_started %s; last task_complete %s; last event %s; last message: %s' % (ts_.get('in_flight'), ts_.get('last_started'), ts_.get('last_complete'), ts_.get('last_event'), W.short(ts_.get('last_agent_message') or '', 160)), dict(in_flight=ts_.get('in_flight'), lifecycle_known=ts_.get('lifecycle_known'), last_started=ts_.get('last_started'), last_complete=ts_.get('last_complete'))
     raise SystemExit('unknown check kind %r' % kind)
 
 DISPATCH_TOOLS = ('send_message',)
