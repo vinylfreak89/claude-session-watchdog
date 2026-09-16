@@ -132,7 +132,8 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
             digest.append('%s notification: task %s %s %s' % ((n['ts'] or '')[11:19], n['task_id'], n['status'], n['summary']))
     claims = W.extract_claims(T) if T else []
     dispatches = [d for t in new_turns for d in W.dispatches_in(t)]
-    launches = [b for t in new_turns for b in t.background_launches()]
+    # sess['cli'] scopes the launch to this session's own tasks directory -- see background_launches
+    launches = [b for t in new_turns for b in t.background_launches(sess.get('cli'))]
     commits = [c for t in new_turns for c in W.commits_in(t)]
     pushes = [p for t in new_turns for p in W.pushes_in(t)]
     written = W.files_written_in(T) if T else {}
@@ -323,6 +324,19 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
         for n in t.notifications:
             if n.get('task_id'): notified.add(n['task_id'])
     inflight = [i for i in state.get('in_flight', [])]
+    # Evict any task whose output path belongs to ANOTHER session. Fixing the launch detector stops
+    # new phantoms; it cannot clear one already written to state, and a phantom is permanent -- a
+    # task this session never started can never exit, so its row waits forever and every wake
+    # re-raises it. The path names the owner, so this is decidable rather than a guess. Loud, not
+    # silent: dropping rows quietly is how a real stalled task would disappear too.
+    mine = ('/%s/' % sess['cli']) if sess.get('cli') else None
+    if mine:
+        foreign = [i for i in inflight if i.get('kind') == 'bg' and i.get('output_file')
+                   and mine not in i['output_file']]
+        for i in foreign:
+            print('DROPPED phantom in-flight task %s: its output path is another session\'s '
+                  '(%s). It was never launched here; see background_launches.' % (i.get('id'), i.get('output_file')))
+        inflight = [i for i in inflight if i not in foreign]
     for b in launches:
         if not any(i.get('id') == b['task_id'] for i in inflight):
             inflight.append(dict(kind='bg', id=b['task_id'], output_file=b['output_file'], command=W.short(b['command'], 300), desc=b['description'], launched_ts=b['ts'], turn_ct=ct))

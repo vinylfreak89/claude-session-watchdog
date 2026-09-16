@@ -20,6 +20,13 @@ CODEX_SESSIONS = os.path.join(HOME, '.codex', 'sessions')
 SCRATCH_ROOT = '/private/tmp/claude-%d' % os.getuid()
 WATCHDOG_TAG = '[watchdog]'
 
+# The harness's confirmation that IT started a background task for THIS tool call. Callers must
+# anchor it at the start of a result: the same sentence appears inside ordinary output whenever a
+# command prints another session's transcript, a log or a grep hit, and there it is a MENTION of
+# somebody else's task rather than a launch by this turn.
+LAUNCH_RE = re.compile(r'Command running in background with ID:\s*(\S+)\.\s*'
+                       r'Output is being written to:\s*(\S+)\.')
+
 # ----------------------------------------------------------------------------- small utils
 def slug(path):
     return re.sub(r'[^A-Za-z0-9]', '-', path or '')
@@ -326,16 +333,37 @@ class Turn(object):
         me = os.environ.get('WD_SELF_SESSION')
         return bool(me and self.peer_from and self.peer_from == me)
 
-    def background_launches(self):
-        """Background Bash tasks launched in this turn: from tool results 'Command running in background with ID: X'."""
+    def background_launches(self, session_cli=None):
+        """Background Bash tasks THIS turn launched.
+
+        A launch is a STRUCTURAL fact, not a phrase. Three independent things must hold, because
+        the phrase alone is satisfied by output that merely QUOTES somebody else's task:
+
+          1. the tool_use itself asked for it -- `run_in_background` is the caller's own record,
+             and a foreground Bash call never starts a task however its output reads;
+          2. the harness's confirmation is the FIRST thing in the result, not buried in it;
+          3. when `session_cli` is given, the output path sits under THIS session's tasks dir --
+             the path names the session that owns the task, so a foreign id cannot survive it.
+
+        Cost of matching the phrase anywhere, 2026-09-16: the target ran a foreground command that
+        printed a TEN-DAY-OLD transcript, one line of which was that sentence for task ba51t4akr.
+        The watchdog reported it as a task this session had launched and abandoned, and raised a
+        `task_dead` finding against work nobody owed. An invented task can never complete, so the
+        finding could never clear on its own -- the target had to disprove it by hand.
+        """
         out = []
         for tu in self.tool_uses:
+            if not (tu['input'] or {}).get('run_in_background'):
+                continue
             r = self.tool_results.get(tu['id'])
             if not r: continue
-            m = re.search(r'Command running in background with ID:\s*(\S+)\.\s*Output is being written to:\s*(\S+)\.', r['text'])
-            if m:
-                out.append(dict(task_id=m.group(1), output_file=m.group(2), command=(tu['input'] or {}).get('command', ''),
-                                description=(tu['input'] or {}).get('description', ''), ts=tu['ts'], tool_use_id=tu['id']))
+            m = LAUNCH_RE.match((r['text'] or '').lstrip())
+            if not m: continue
+            task_id, output_file = m.group(1), m.group(2)
+            if session_cli and ('/%s/' % session_cli) not in (output_file or ''):
+                continue
+            out.append(dict(task_id=task_id, output_file=output_file, command=(tu['input'] or {}).get('command', ''),
+                            description=(tu['input'] or {}).get('description', ''), ts=tu['ts'], tool_use_id=tu['id']))
         return out
 
     def agent_launches(self):
@@ -398,8 +426,10 @@ def dispatches_in(turn):
             heredocs = {hp: body for hp, _, body in HEREDOC_RE.findall(cmd)}
             r = turn.tool_results.get(tu['id'])
             bg = None
+            # Anchored for the same reason as background_launches: a dispatch whose output happens
+            # to quote another task's launch line has not itself been backgrounded.
             if r:
-                mb = re.search(r'Command running in background with ID:\s*(\S+)\.\s*Output is being written to:\s*(\S+)\.', r['text'])
+                mb = LAUNCH_RE.match((r['text'] or '').lstrip())
                 if mb: bg = dict(task_id=mb.group(1), output_file=mb.group(2))
             out.append(dict(tool_use_id=tu['id'], ts=tu['ts'], verb=verb, thread=th.group(1) if th else None, brief_path=brief,
                             brief_text=heredocs.get(brief), inline=short(rest, 200), background=bg,
