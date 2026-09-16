@@ -199,3 +199,13 @@ The central receipt writer starts the reminder from delivery time, records a pok
 without postponing its deadline, and never resets the window on a repeated mark.
 Wake captures the existing configured reply interval on the proposal, so either
 mark order uses the same recorded interval. No new CLI option was added.
+
+## State-writer integrity
+
+Three additional command-handler controls failed (`FAILED (failures=3)`): a
+corrupt state file was replaced by a new empty store, concurrent queue additions
+lost one item, and mutable default stores leaked between state directories. All
+now pass. Existing unreadable/non-object state refuses mutation; defaults are
+independent copies. Check, wake and reconciliation merge serialize their complete
+read/modify/write transactions with the same per-state-directory lock. This is
+not a bypass flag and does not make direct file tampering trustworthy.

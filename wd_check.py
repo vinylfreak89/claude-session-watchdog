@@ -20,6 +20,7 @@ The model does the reading; this does the measuring and the wording. It cannot e
 import os, sys, json, argparse, glob, time, collections
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wd_lib as W
+import wd_state as S
 import wd_wake as WK
 import wd_receipts as D
 import wd_turns as TD
@@ -333,7 +334,12 @@ def main():
     ap.add_argument('--state-dir', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'state')); ap.add_argument('--quiet-min', type=float, default=10.0)
     ap.add_argument('--row-pattern', default=W.DEFAULT_ROW_PATTERN)
     ap.add_argument('mode', choices=['check', 'finding', 'owed', 'relayed', 'hold', 'answered', 'ask', 'resolved', 'open', 'next', 'sent1', 'nudged', 'conditional', 'fired', 'closed']); ap.add_argument('rest', nargs=argparse.REMAINDER)
-    a = ap.parse_args(); W.set_row_pattern(a.row_pattern)
+    a = ap.parse_args()
+    with S.transaction(a.state_dir):
+        return run(a, ap)
+
+def run(a, ap):
+    W.set_row_pattern(a.row_pattern)
     sess = W.find_session(a.target); state = WK.load_state(a.state_dir)
     if TD.initialize_tracking(state):
         WK.save_state(a.state_dir, state)

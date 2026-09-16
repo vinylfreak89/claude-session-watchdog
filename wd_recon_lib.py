@@ -336,6 +336,12 @@ def stage2_disappearances(series):
 # ---------------------------------------------------------------- stage 5
 
 def stage5_repair(state_dir, restores, apply=False):
+    import wd_state as S
+    with S.transaction(state_dir):
+        return _stage5_repair(state_dir, restores, apply)
+
+
+def _stage5_repair(state_dir, restores, apply=False):
     """The MERGE. Owner, 2026-09-12: "That's why they are reconciliations. The result is a merge,
     not an overwrite." And the standing rule it rests on: "Do not clear any queues."
 

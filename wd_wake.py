@@ -15,9 +15,10 @@ under --state-dir (state.json, findings.md, wake.log).
 
 Message form (fixed):  [watchdog] turn N (<end ts>) said "<quote>" | checked: <what> | result: <what>
 """
-import os, sys, re, json, time, argparse, collections
+import os, sys, re, json, time, argparse, collections, copy
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wd_lib as W
+import wd_state as S
 
 FAIL_SIG = re.compile(r'(\bfailed\b|Traceback|queue failed|\bexit=[1-9]\d*|\[exited with code [1-9]\d*\]|\bError\b|No such file|not found|refused|thread not found)', re.I)
 NOT_PUSHED = re.compile(r"(not pushed|unpushed|haven't pushed|hasn't been pushed|without pushing|committed, not pushed|committed but not pushed|local only|not yet pushed|push(?:ed)? later)", re.I)
@@ -28,7 +29,9 @@ DEFAULT_STATE = dict(wake_count=0, finding_counter=0, seen_pids=[], ledger=None,
 def load_state(d):
     p = os.path.join(d, 'state.json')
     s = W.read_json_retry(p) if os.path.exists(p) else None
-    base = dict(DEFAULT_STATE); base.update(s or {}); return base
+    if os.path.exists(p) and not isinstance(s, dict):
+        raise SystemExit('REFUSED: existing state is unreadable or is not an object')
+    base = copy.deepcopy(DEFAULT_STATE); base.update(s or {}); return base
 
 def save_state(d, s):
     tmp = os.path.join(d, 'state.json.tmp')
@@ -583,6 +586,10 @@ def main():
     ap.add_argument('--owe-add'); ap.add_argument('--gated-on', default=''); ap.add_argument('--owe-list', action='store_true')
     ap.add_argument('--owe-clear'); ap.add_argument('--owe-ungate')
     a = ap.parse_args()
+    with S.transaction(a.state_dir):
+        return run(a)
+
+def run(a):
     a.perm_paths = [x.strip() for x in a.perm_paths.split(',') if x.strip()]
     W.set_row_pattern(a.row_pattern)
     os.makedirs(a.state_dir, exist_ok=True)
@@ -636,7 +643,7 @@ def main():
         for d in gated: print('  %s %s\n      gated behind: %s' % (d.get('id', '?'), W.short(d.get('text', ''), 200), d['gated_on']))
         return missed or 0
     if a.due:
-        if not a.target: ap.error('--due needs --target')
+        if not a.target: raise SystemExit('--due needs --target')
         sess = W.find_session(a.target); st = W.read_state(sess)
         q = state.get('owner_queue') or []; prop = state.get('proposed') or {}
         procs = W.live_children(sess); infl = state.get('in_flight') or []
@@ -826,7 +833,7 @@ def main():
             rewrite_status(a.state_dir, fid, 'vetoed', a.reason.replace('|', '/'))
             log_line(a.state_dir, '%s VETO %s %s' % (W.now_iso(), fid, a.reason))
         save_state(a.state_dir, state); print('recorded veto: %s' % ids); return 0
-    if not a.target: ap.error('--target is required')
+    if not a.target: raise SystemExit('--target is required')
     t0 = time.time()
     sess = W.find_session(a.target)
     self_sess = W.find_session(a.self_sel) if a.self_sel else None
