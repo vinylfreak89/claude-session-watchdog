@@ -351,6 +351,19 @@ def stage5_repair(state_dir, restores, apply=False):
     edit that changes something the owner put there.
 
     Idempotent: running it twice adds nothing the first run added."""
+    # Restoring an obligation is additive; restoring a discharge is not. Validate
+    # the entire persisted worklist before writing, including pre-upgrade worklists.
+    for repair in restores:
+        op, store = repair.get('op', 'append'), repair.get('store')
+        fields = repair.get('fields') or {}
+        if op == 'advance':
+            allowed = store == 'last_relay_ts'
+        elif store == 'owner_queue':
+            allowed = op in ('append', 'amend') and set(fields) <= {'text', 'ts', 'hold_until'}
+        else:
+            allowed = op in ('append', 'amend') and store in ('open_questions', 'owner_decisions')
+        if not allowed:
+            raise SystemExit('REFUSED: reconciliation cannot restore delivery, acceptance or closure state (%s %s)' % (op, store))
     p = os.path.join(state_dir, 'state.json')
     d = json.load(open(p))
     before = json.dumps(d, sort_keys=True)
@@ -1583,9 +1596,9 @@ def effect_disposition(a, state, acts=(), chains=None):
         sent = later_landed(a, acts, ('queue clear',), same_id=False) or \
             later_landed(a, acts, ('sent1',))
         if sent:
-            return RESTORABLE, 'added and later sent; neither store carries it', {
-                'op': 'append', 'store': 'owner_queue_sent', 'id': ident,
-                'fields': {'text': text, 'ts': a['ts'], 'sent_ts': sent['ts']}}
+            return RESTORABLE, 'restore the obligation to the live queue; historical sending is not acceptance', {
+                'op': 'append', 'store': 'owner_queue', 'id': ident,
+                'fields': {'text': text, 'ts': a['ts']}}
         return RESTORABLE, 'no queue row carries this text', {
             'op': 'append', 'store': 'owner_queue', 'id': ident,
             'fields': {'text': text, 'ts': a['ts']}}
@@ -1666,12 +1679,9 @@ def effect_disposition(a, state, acts=(), chains=None):
 
     if v == 'sent1':
         store, row = _queue_row(state, ident)
-        if row is None:
-            return MOOT, 'no queue row with this id', None
-        if row.get('sent') or row.get('sent_ts'):
-            return PRESENT, 'the row is marked sent', None
-        return RESTORABLE, 'the row is in the queue and is not marked sent', {
-            'op': 'amend', 'store': store, 'id': ident, 'fields': {'sent': ts}}
+        if row and (row.get('sent') or row.get('sent_ts')):
+            return PRESENT, 'historical send mark is present; no receipt is inferred', None
+        return MOOT, 'delivery must be re-established through the receipt validator; reconciliation cannot restore a send mark', None
 
     if v == 'resolved':
         if ident in rq:
@@ -1717,11 +1727,9 @@ def effect_disposition(a, state, acts=(), chains=None):
             'op': 'advance', 'store': 'last_relay_ts', 'id': ident, 'fields': {'to': ident}}
 
     if v == 'answered':
-        cur = state.get('last_send_ts') or ''
-        if cur >= ts:
-            return PRESENT, 'last_send_ts %s is at or past this action' % cur, None
-        return RESTORABLE, 'last_send_ts %r is behind this action' % cur, {
-            'op': 'advance', 'store': 'last_send_ts', 'id': None, 'fields': {'to': ts}}
+        if (state.get('last_send_ts') or '') >= ts:
+            return PRESENT, 'historical send watermark is already present; it no longer discharges turns', None
+        return MOOT, 'delivery must be re-established through the receipt validator; reconciliation cannot advance a send watermark', None
 
     return ELSEWHERE, 'this verb writes no state.json row', None
 

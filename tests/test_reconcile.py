@@ -497,8 +497,8 @@ def test_effect_dispositions():
     d, _ = dis(verb='sent1', id='Q42')
     ck('a sent mark on a row already marked sent has taken effect', d, R.PRESENT)
     d, rep = dis(verb='sent1', id='Q13')
-    ck('a sent mark on an unmarked row is MERGED onto it', (d, rep['op']),
-       (R.RESTORABLE, 'amend'))
+    ck('an unmarked send cannot be restored without a receipt', (d, rep),
+       (R.MOOT, None))
     d, _ = dis(verb='outcome', id='CITE-b7a94d5')
     ck('an outcome does not live in state.json at all', d, R.ELSEWHERE)
 

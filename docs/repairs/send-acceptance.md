@@ -45,3 +45,25 @@ and held-turn metadata cannot supply independent action evidence. These former
 exceptions no longer close turns. Legacy receipts without structural peer origin
 metadata remain unverifiable, including attachments that carry only quoted text.
 No migration flag or guessed provenance is provided.
+
+## Reconciliation
+
+The real `reconcile --stage 5 --apply` controls ran red with two failures, then
+passed all three controls after the repair. Persisted pre-upgrade worklists cannot
+advance send watermarks, manufacture receipts, mark items sent, inject acceptance
+or closure fields, or restore lost obligations directly into the sent archive.
+Lost items return to the live queue. Restoring restrictive metadata still works.
+Reconciliation cannot reconstruct delivery when the receipt cannot be verified;
+that legitimate historical repair remains impossible rather than being guessed.
+
+The full existing reconciliation script has the same six pre-existing failing
+CLI groups before and after the repair. Its old helper control expecting an
+unmarked send to be restored was updated to expect refusal. During that update,
+the old assertion produced `TypeError("'NoneType' object is not subscriptable")`;
+that was an obsolete expected repair payload, not a new runtime failure.
+
+Final existing-suite output (before and after):
+
+```
+RESULT: 6 FAILED: CRASHED test_cli_readings: FileNotFoundError(2, 'No such file or directory'), CRASHED test_reaches_a_hundred: FileNotFoundError(2, 'No such file or directory'), CRASHED test_corner_cases: FileNotFoundError(2, 'No such file or directory'), CRASHED test_robustness: FileNotFoundError(2, 'No such file or directory'), CRASHED test_cli_stages: FileNotFoundError(2, 'No such file or directory'), CRASHED test_cli_all_stages: FileNotFoundError(2, 'No such file or directory')
+```
