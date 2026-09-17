@@ -1,9 +1,18 @@
 #!/usr/bin/python3
 """Owner-authorized dispositions remain auditable and cannot retire questions."""
 import unittest
-from send_contract_support import ContractCase, C, K, ts
+from send_contract_support import ContractCase, C, K, SELF, ts
 
 class DispositionContract(ContractCase):
+    def test_current_message_question_cannot_be_held_or_closed(self):
+        self.tool('SendMessage', dict(to=SELF, recipient=SELF, type='message', message='Which option should I implement?'))
+        self.records(dict(type='assistant', timestamp=ts(22), message=dict(
+            content=[dict(type='text', text='The request was sent.')], stop_reason='end_turn')))
+        for mode in ('hold', 'closed'):
+            rc, out = self.cli(C, mode, ts(22), 'Waiting on owner')
+            self.assertNotEqual(rc, 0, out)
+            self.assertIn('question', out)
+
     def test_closed_nonquestion_is_auditable(self):
         rc, out = self.cli(C, 'closed', ts(1), 'Only confirms the preceding result')
         self.assertEqual(rc, 0, out)

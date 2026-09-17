@@ -21,6 +21,7 @@ nothing. Those are steers, they are mine, and only the record beside them shows 
               "Do not clear any queues."
 """
 import os, json, re, collections
+import wd_lib as W
 
 PROJ = os.path.expanduser('~/.claude/projects/-Users-vinylfreak89-Documents-blackmagic-usb-mac')
 
@@ -2341,11 +2342,11 @@ def artifacts(recs):
                 continue
             if b.get('type') == 'text' and b.get('text'):
                 my_text.append({'ts': r.get('timestamp') or '', 'text': b['text']})
-            elif b.get('type') == 'tool_use' and 'send_message' in (b.get('name') or ''):
-                inp = b.get('input') or {}
-                sends.append({'ts': r.get('timestamp') or '', 'msg': inp.get('message') or '',
+            elif b.get('type') == 'tool_use' and W.message_input(b) is not None:
+                inp = W.message_input(b)
+                sends.append({'ts': r.get('timestamp') or '', 'msg': inp['message'],
                               # where it went: a reply only answers what was sent to its sender
-                              'to': inp.get('session_id') or inp.get('to')})
+                              'to': inp['recipient']})
     return my_text, sends
 
 
@@ -3030,6 +3031,11 @@ def target_view(trecs, self_id):
     rx = _wrapped_from(self_id)
     view = {'deliveries': [], 'enqueued': [], 'sends_to_me': [], 'pushes': [], 'texts': [],
             'records': 0}
+    results = collections.defaultdict(list)
+    for record in trecs:
+        if record.get('type') != 'user': continue
+        for block in W._blocks((record.get('message') or {}).get('content'), 'tool_result'):
+            results[block.get('tool_use_id')].append(block)
     for r in trecs:
         view['records'] += 1
         t, ts = r.get('type'), r.get('timestamp') or ''
@@ -3052,9 +3058,12 @@ def target_view(trecs, self_id):
                 # not in a message it sends me (measured: 44 questions resolved with no reply)
                 if isinstance(b, dict) and b.get('type') == 'text' and (b.get('text') or '').strip():
                     view['texts'].append({'ts': ts, 'text': b['text'], 'uuid': r.get('uuid')})
-                if (isinstance(b, dict) and b.get('type') == 'tool_use' and 'send_message' in (b.get('name') or '')
-                        and (b.get('input') or {}).get('session_id') == self_id):
-                    view['sends_to_me'].append({'ts': ts, 'msg': ((b.get('input') or {}).get('message') or '').strip()})
+                if isinstance(b, dict) and b.get('type') == 'tool_use' and W.message_input(b) is not None:
+                    matches = results.get(b.get('id'), [])
+                    result = matches[0] if len(matches) == 1 else {}
+                    call = dict(b, ts=ts, result=W._result_text(result), is_error=result.get('is_error', False))
+                    if W.message_to_session(call, self_id):
+                        view['sends_to_me'].append({'ts': ts, 'msg': W.message_input(call)['message'].strip()})
         elif t == 'user' and isinstance(c, list):
             for b in c:
                 if isinstance(b, dict) and b.get('type') == 'tool_result':

@@ -134,7 +134,15 @@ def target_calls(sess, after):
         elif record.get('type') == 'user':
             for b in blocks:
                 use = uses.get(b.get('tool_use_id'))
-                if not use or b.get('is_error') is not False:
+                if not use: continue
+                if use['name'] in W.MESSAGE_TOOL_NAMES:
+                    if b.get('is_error', False) is not False:
+                        continue
+                    if use['name'] == 'SendMessage':
+                        if not W.message_success(W._result_text(b)): continue
+                    elif b.get('is_error') is not False and not W.legacy_message_success(use, W._result_text(b)):
+                        continue
+                elif b.get('is_error') is not False:
                     continue
                 if D.epoch(use['ts']) <= boundary or D.epoch(stamp) < D.epoch(use['ts']):
                     continue
@@ -319,8 +327,8 @@ def evaluate_message(a, sess, item, args, facts, calls):
     require_count(facts, 'count')
     sender = W.find_session(a.self_sel)
     expected = args[0]
-    sent = [c for c in calls if c['name'] == 'mcp__ccd_session_mgmt__send_message'
-            and c['input'].get('session_id') == sender['sessionId'] and c['input'].get('message') == expected]
+    sent = [c for c in calls if W.message_to_session(c, sender['sessionId'])
+            and W.message_input(c)['message'] == expected]
     if not sent: return Result(Status.NOT_YET, 'no successful matching target reply call after delivery')
     for record in D.read_records(W.transcript_path(sender)):
         try: rec = D.delivery(record, sess['sessionId'])

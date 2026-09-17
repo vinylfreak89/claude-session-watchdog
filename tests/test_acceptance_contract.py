@@ -10,6 +10,156 @@ import wd_acceptance as A
 import wd_receipts as D
 
 class AcceptanceContract(ContractCase):
+    def message_case(self, name, recipient=SELF, success=True, receive=True, socket=False):
+        q = self.queue('Reply to the watchdog', 'msg-to-watchdog "Synthetic result"')
+        self.deliver('Reply to the watchdog'); self.sent(q)
+        inp = dict(session_id=recipient, message='Synthetic result')
+        result = 'ok'
+        if name == 'mcp__ccd_session_mgmt__send_message':
+            result = 'Message delivered to session %s ("Synthetic watchdog"); its turn has started on it. (delivery: delivered; message_id: transport-control)' % recipient
+        if name == 'SendMessage':
+            inp = dict(to=recipient, recipient=recipient, type='message', message='Synthetic result',
+                       content='Synthetic transport content', summary='Synthetic summary')
+            result = json.dumps(dict(success=success, msg_id='transport-control'))
+        self.tool(name, inp, result=result)
+        # Both hosts omit is_error; their explicit acknowledgements carry success.
+        if name in ('SendMessage', 'mcp__ccd_session_mgmt__send_message'):
+            rows = [json.loads(line) for line in self.tx.read_text().splitlines()]
+            rows[-1]['message']['content'][0].pop('is_error')
+            self.tx.write_text(''.join(json.dumps(r) + '\n' for r in rows))
+        if receive:
+            origin = dict(kind='peer', **{'from': TARGET})
+            if socket:
+                origin.update({'from': 'uds:/tmp/cc-socks/43210.sock', 'verifiedPeerPid': 43210,
+                               'msg_id': 'transport-control', 'body': 'Synthetic result'})
+            self.records(dict(type='user', uuid='reply-control', timestamp=ts(22), origin=origin,
+                              message=dict(content='<cross-session-message from="%s">Synthetic result</cross-session-message>' % origin['from'])), path=self.mine)
+        return q
+
+    def check_message_count(self, expected):
+        rc, out = self.cli(C, 'check', 'msg-to-watchdog', ts(10))
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(json.loads(out)['evidence']['count'], expected, out)
+
+    def test_current_message_reply_settles_and_is_visible(self):
+        q = self.message_case('SendMessage')
+        self.check_message_count(1)
+        out = self.poll()
+        self.assertEqual(self.state()['owner_queue'], [], out)
+        self.assertEqual(self.state()['owner_queue_sent'][0]['id'], q)
+
+    def test_legacy_message_reply_still_settles_and_is_visible(self):
+        self.message_case('mcp__ccd_session_mgmt__send_message')
+        self.check_message_count(1)
+        out = self.poll()
+        self.assertEqual(self.state()['owner_queue'], [], out)
+
+    def test_bare_session_uuid_still_identifies_watchdog(self):
+        self.message_case('mcp__ccd_session_mgmt__send_message', recipient=SELF.removeprefix('local_'))
+        self.check_message_count(1)
+        out = self.poll()
+        self.assertEqual(self.state()['owner_queue'], [], out)
+
+    def test_socket_recipient_requires_delivered_transport_evidence(self):
+        self.message_case('SendMessage', recipient='uds:/tmp/cc-socks/12345.sock', socket=True)
+        self.check_message_count(1)
+        out = self.poll()
+        self.assertEqual(self.state()['owner_queue'], [], out)
+
+    def test_current_message_wrong_recipient_does_not_settle(self):
+        self.message_case('SendMessage', recipient='local_other_agent')
+        self.check_message_count(0)
+        out = self.poll()
+        self.assertEqual(len(self.state()['owner_queue']), 1, out)
+        self.assertIn('not-yet', out)
+
+    def test_legacy_message_wrong_recipient_does_not_settle(self):
+        self.message_case('mcp__ccd_session_mgmt__send_message', recipient='local_other_agent')
+        self.check_message_count(0)
+        out = self.poll()
+        self.assertEqual(len(self.state()['owner_queue']), 1, out)
+
+    def test_similar_tool_name_cannot_count_as_reply(self):
+        self.message_case('mcp__unrelated__send_message')
+        self.check_message_count(0)
+        out = self.poll()
+        self.assertEqual(len(self.state()['owner_queue']), 1, out)
+
+    def test_current_message_failed_result_cannot_settle(self):
+        self.message_case('SendMessage', success=False)
+        out = self.poll()
+        self.assertEqual(len(self.state()['owner_queue']), 1, out)
+
+    def test_current_message_without_delivery_cannot_settle(self):
+        self.message_case('SendMessage', receive=False)
+        self.check_message_count(1)
+        out = self.poll()
+        self.assertEqual(len(self.state()['owner_queue']), 1, out)
+
+    def test_socket_recipient_without_matching_receipt_does_not_count(self):
+        self.message_case('SendMessage', recipient='uds:/tmp/cc-socks/12345.sock', socket=True)
+        rows = D.read_records(str(self.mine))
+        rows[-1]['origin']['msg_id'] = 'another-transport'
+        self.mine.write_text(''.join(json.dumps(r) + '\n' for r in rows))
+        self.check_message_count(0)
+        out = self.poll()
+        self.assertEqual(len(self.state()['owner_queue']), 1, out)
+
+    def test_conflicting_current_recipients_do_not_count(self):
+        self.message_case('SendMessage')
+        rows = D.read_records(str(self.tx))
+        rows[-2]['message']['content'][0]['input']['recipient'] = 'local_other_agent'
+        self.tx.write_text(''.join(json.dumps(r) + '\n' for r in rows))
+        self.check_message_count(0)
+        out = self.poll()
+        self.assertEqual(len(self.state()['owner_queue']), 1, out)
+
+    def explicit_message_error(self, name):
+        self.message_case(name)
+        rows = D.read_records(str(self.tx))
+        rows[-1]['message']['content'][0]['is_error'] = True
+        self.tx.write_text(''.join(json.dumps(r) + '\n' for r in rows))
+        out = self.poll()
+        self.assertEqual(len(self.state()['owner_queue']), 1, out)
+        self.assertIn('not-yet', out)
+
+    def test_current_explicit_error_overrides_success_text(self):
+        self.explicit_message_error('SendMessage')
+
+    def test_legacy_explicit_error_overrides_success_text(self):
+        self.explicit_message_error('mcp__ccd_session_mgmt__send_message')
+
+    def test_legacy_queued_result_waits_for_actual_delivery(self):
+        self.message_case('mcp__ccd_session_mgmt__send_message', receive=False)
+        rows = D.read_records(str(self.tx))
+        rows[-1]['message']['content'][0]['content'] = 'Message queued for session %s ("Synthetic watchdog"): that session is holding it. (delivery: queued; message_id: transport-control)' % SELF
+        self.tx.write_text(''.join(json.dumps(r) + '\n' for r in rows))
+        out = self.poll()
+        self.assertEqual(len(self.state()['owner_queue']), 1, out)
+        self.records(dict(type='user', uuid='reply-control', timestamp=ts(22),
+            origin=dict(kind='peer', **{'from': TARGET}),
+            message=dict(content='<cross-session-message from="%s">Synthetic result</cross-session-message>' % TARGET)), path=self.mine)
+        out = self.poll()
+        self.assertEqual(self.state()['owner_queue'], [], out)
+
+    def test_reconciliation_current_reply_uses_same_reader(self):
+        import wd_recon_lib as R
+        self.message_case('SendMessage', recipient='uds:/tmp/cc-socks/12345.sock', socket=True)
+        rows = D.read_records(str(self.tx))
+        self.assertEqual(len(R.artifacts(rows)[1]), 1)
+        self.assertEqual(len(R.target_view(rows, SELF)['sends_to_me']), 1)
+
+    def test_reconciliation_excludes_other_recipients_and_similar_names(self):
+        import wd_recon_lib as R
+        self.message_case('mcp__unrelated__send_message')
+        rows = D.read_records(str(self.tx))
+        self.assertEqual(R.artifacts(rows)[1], [])
+        self.assertEqual(R.target_view(rows, SELF)['sends_to_me'], [])
+        self.tool('SendMessage', dict(to='local_other', message='Synthetic result'),
+                  result=json.dumps(dict(success=True)))
+        rows = D.read_records(str(self.tx))
+        self.assertEqual(R.target_view(rows, SELF)['sends_to_me'], [])
+
     def duplicate_use(self, at, ident='duplicated-control'):
         record = dict(type='assistant', timestamp=ts(at), message=dict(role='assistant',
                       content=[dict(type='tool_use', id=ident, name='Read', input=dict(file_path='unrelated.txt'))],

@@ -846,14 +846,85 @@ def owner_gate_hints(text):
         if OWNER_GATE_RE.search(sent): out.append(sent.strip())
     return out
 
+MESSAGE_TOOL_NAMES = frozenset(('SendMessage', 'mcp__ccd_session_mgmt__send_message'))
+
+
+def message_input(call):
+    """Known message-tool inputs only; no suffix/name guessing or fuzzy recipients."""
+    if call.get('name') not in MESSAGE_TOOL_NAMES: return None
+    inp = call.get('input')
+    if not isinstance(inp, dict) or not isinstance(inp.get('message'), str): return None
+    if call['name'] == 'SendMessage':
+        if inp.get('type', 'message') != 'message': return None
+        addresses = [inp[k] for k in ('to', 'recipient') if inp.get(k) is not None]
+        if not addresses or any(not isinstance(v, str) or not v or v != addresses[0] for v in addresses):
+            return None
+        recipient = addresses[0]
+    else:
+        recipient = inp.get('session_id')
+    if not isinstance(recipient, str) or not recipient: return None
+    return dict(recipient=recipient, message=inp['message'])
+
+
+def message_success(text):
+    """Current SendMessage returns JSON success; absent is_error alone proves nothing."""
+    try: value = json.loads(text)
+    except (ValueError, TypeError): return None
+    return value if isinstance(value, dict) and value.get('success') is True else None
+
+
+def legacy_message_success(call, text):
+    """Legacy host acknowledgement when its result omits is_error.
+
+    Queued acknowledges the call, not delivery; acceptance still requires the
+    matching actual receiver record. A printed/quoted mention is not this result.
+    """
+    inp = message_input(call)
+    if not inp or call.get('name') != 'mcp__ccd_session_mgmt__send_message' or not isinstance(text, str):
+        return False
+    match = re.fullmatch(r'Message (delivered to|queued for) session (\S+) \("[^"\n]*"\)[^\n]*'
+                         r'\(delivery: (delivered|queued); message_id: [A-Za-z0-9_-]+\)\s*', text)
+    return bool(match and match[2] == inp['recipient'] and
+                (match[1], match[3]) in (('delivered to', 'delivered'), ('queued for', 'queued')))
+
+
+def message_to_session(call, session_id):
+    """Match a recipient, resolving a socket only through its actual receiver record.
+
+    The local_ prefix and the full bare UUID identify the same session. A socket
+    address is never stored as an alias: successful transport msg_id, matching
+    delivered body and time in the selected receiver transcript establish it.
+    """
+    inp = message_input(call)
+    if inp is None: return False
+    if session_id is None: return True  # explicitly unscoped inventory, not reply credit
+    recipient = inp['recipient']
+    if recipient == session_id or (session_id.startswith('local_') and recipient == session_id[6:]):
+        return True
+    if not recipient.startswith('uds:') or call.get('name') != 'SendMessage': return False
+    value = message_success(call.get('result'))
+    if not value or call.get('is_error', False) is not False: return False
+    mid = value.get('msg_id')
+    if not isinstance(mid, str) or not mid: return False
+    import wd_receipts as D
+    receiver = find_session(session_id)
+    records = D.read_records(transcript_path(receiver))
+    hits = [r for r in records if isinstance(r.get('origin'), dict) and r['origin'].get('msg_id') == mid
+            and r.get('type') in ('user', 'attachment')]
+    if len(hits) != 1: return False
+    try: rec = D.delivery(hits[0], hits[0]['origin'].get('from'))
+    except D.EvidenceError: return False
+    return rec['body'] == inp['message'].strip() and D.epoch(rec['ts']) >= D.epoch(call.get('ts'))
+
+
 def messages_to_watchdog(turn, self_session_id=None):
-    """Messages this turn sent to the watchdog session (send_message tool inputs): [(ts, text)]."""
+    """Known message calls to the selected session: [(ts, text)], not delivery credit."""
     out = []
     for tu in turn.tool_uses:
-        if tu['name'].endswith('send_message'):
-            inp = tu['input'] or {}
-            if not self_session_id or inp.get('session_id') == self_session_id:
-                out.append((tu['ts'], inp.get('message', '')))
+        result = turn.tool_results.get(tu.get('id')) or {}
+        call = dict(tu, result=result.get('text'), is_error=result.get('is_error', False))
+        if message_to_session(call, self_session_id):
+            out.append((tu['ts'], message_input(call)['message']))
     return out
 
 def watchdog_self_session():

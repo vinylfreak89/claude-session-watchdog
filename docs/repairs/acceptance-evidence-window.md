@@ -156,14 +156,17 @@ historical corruption irrelevant:
   These artifact/history queries are not duplicate checks over the target's full
   tool-use record and were not changed.
 
-A separate existing format limitation is visible in the audit: reply acceptance
+At the time of this repair, a separate format limitation was visible: reply acceptance
 recognizes `mcp__ccd_session_mgmt__send_message` with a `session_id` recipient;
 `SendMessage` is not a qualifying call name there. This scope repair does not
 claim to fix that transport variant. The live window in the census contained
 only successful Bash calls, so no reply-call format was present to adjudicate;
 the required NOT-YET verdict is not being substituted for a known successful
-reply. Unknown timestamps and unreadable evidence remain reasons to stop, not
-permission to close an item.
+reply. This limitation is now repaired and censused in
+[Read both watchdog-message tool formats](message-tool-spellings.md), including
+the additional real-result and recipient shapes needed for those messages.
+Unknown timestamps and unreadable evidence remain reasons to stop, not permission
+to close an item.
 
 ## Suite and scope
 

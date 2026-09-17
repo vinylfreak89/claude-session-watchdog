@@ -39,8 +39,11 @@ def question_evidence(turn):
     arbitrary prose; that boundary is documented, not disguised as understanding.
     """
     texts = [text for _, text in turn.assistant_texts]
-    texts += [u.get('input', {}).get('message', '') for u in turn.tool_uses
-              if (u.get('name') or '').endswith('send_message')]
+    for use in turn.tool_uses:
+        if use.get('name') not in W.MESSAGE_TOOL_NAMES: continue
+        message = W.message_input(use)
+        if message is None: return 'unreadable request text'
+        texts.append(message['message'])
     for text in texts:
         if not isinstance(text, str):
             return 'unreadable request text'
