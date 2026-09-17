@@ -81,8 +81,13 @@ It does not verify that a promise was kept. It surfaces the agent's own account 
 whether it was, and makes silence visible. Verification of the underlying work stays
 where it already is — commits, test runs, the acceptance checks on queue items.
 
-## Open question for the owner
+## Scope: symmetric (owner's ruling)
 
-Whether the same list should cover promises made to the target, or only the
-watchdog's own. Applying it to both agents is symmetric and probably right — the
-watchdog makes promises it can drop too — but that is his call, not mine to assume.
+Asked whether this should bind only the watchdog or both agents, the owner ruled:
+**"it should apply symmetrically."**
+
+So it binds the watchdog, the target and Codex alike. Every agent lists its own open
+promises and accounts for them; no agent audits another's list while keeping its own
+private. The asymmetric version — one agent holding the others to a standard it is
+exempt from — is exactly the shape that lets an instrument drift into a stick, and it
+would have been my own convenience to propose.
