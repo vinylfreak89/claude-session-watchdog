@@ -457,7 +457,10 @@ def main():
         # a slow, dumb second hook: sleep out the window, then report state unconditionally. It shares none of
         # the event logic, so a bug or a wrong assumption in that logic cannot silence it.
         while time.time() - t0 < a.max_wait:
-            try: w.kq.control(None, 1, min(30.0, a.max_wait - (time.time() - t0)))
+            # The loop condition is checked before this call, so the remaining time can
+            # reach zero in between and kqueue rejects a negative timeout with ValueError,
+            # killing the backstop hook. Same clamp the poll loop above already uses.
+            try: w.kq.control(None, 1, max(0.05, min(30.0, a.max_wait - (time.time() - t0))))
             except OSError: pass
         st = W.read_state(sess); sj = w.state_json()
         w.last_act = st['lastActivityAt']; w.last_record_ms = w._last_record_ms()
