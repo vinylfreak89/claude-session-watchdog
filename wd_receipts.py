@@ -43,28 +43,98 @@ def text_blocks(content):
     raise EvidenceError('delivery content is not exclusively text')
 
 
-def delivery(record, sender):
-    """No inferred author: legacy records without origin metadata are undecidable."""
+def socket_sender_matches(record, sender, body):
+    """Attribute a socket delivery using the sender's existing SendMessage result.
+
+    Socket paths/PIDs and display names are not durable session identities. The
+    transport message ID occurs in both the receiver origin and the successful
+    tool result in the configured sender's transcript; no alias registry is kept.
+    """
     origin = record.get('origin')
-    if not sender or not isinstance(origin, dict) or origin.get('kind') != 'peer' or origin.get('from') != sender:
-        raise EvidenceError('delivery has no structural peer provenance for this sender')
+    if (not str(origin.get('from') or '').startswith('uds:') or
+            type(origin.get('verifiedPeerPid')) is not int or origin['verifiedPeerPid'] <= 0 or
+            not isinstance(origin.get('msg_id'), str) or not origin['msg_id']):
+        return False
+    try:
+        session = W.find_session(sender)
+        records = read_records(W.transcript_path(session))
+    except (EvidenceError, OSError, SystemExit):
+        return False
+    results = []
+    for rec in records:
+        if rec.get('type') != 'user': continue
+        message = rec.get('message')
+        if not isinstance(message, dict): continue
+        for block in W._blocks(message.get('content'), 'tool_result'):
+            if block.get('is_error', False) is not False: continue
+            try: value = json.loads(W._result_text(block))
+            except (ValueError, TypeError): continue
+            if isinstance(value, dict) and value.get('success') is True and value.get('msg_id') == origin['msg_id']:
+                results.append(block)
+    if len(results) != 1 or not results[0].get('tool_use_id'): return False
+    uses = [(rec, block) for rec in records if rec.get('type') == 'assistant' and isinstance(rec.get('message'), dict)
+            for block in W._blocks(rec['message'].get('content'), 'tool_use')
+            if block.get('id') == results[0]['tool_use_id']]
+    if len(uses) != 1: return False
+    source, use = uses[0]
+    if not isinstance(use.get('input'), dict): return False
+    message = use['input'].get('message')
+    return (use.get('name') == 'SendMessage' and isinstance(message, str) and
+            message.strip() == body and epoch(source.get('timestamp')) <= epoch(record.get('timestamp')))
+
+
+def delivered_text(record):
+    """Read only actual delivery surfaces, never queue operations or tool results."""
     if record.get('type') == 'user':
-        body = text_blocks((record.get('message') or {}).get('content'))
+        message = record.get('message')
+        if not isinstance(message, dict):
+            raise EvidenceError('delivery message is not an object')
+        body = text_blocks(message.get('content'))
     elif record.get('type') == 'attachment':
-        attachment = record.get('attachment') or {}
+        attachment = record.get('attachment')
+        if not isinstance(attachment, dict):
+            raise EvidenceError('delivery attachment is not an object')
         if attachment.get('type') != 'queued_command' or attachment.get('commandMode') != 'prompt':
             raise EvidenceError('attachment is not a delivered queued command')
         body = text_blocks(attachment.get('prompt'))
     else:
         raise EvidenceError('record is not a delivery')
-    wrapper = re.fullmatch(r'(?:Another Claude session sent a message(?: while you were working)?:\s*)?<cross-session-message\s+from="([^"]+)"(?:\s+name="[^"]*")?>\s*([\s\S]*?)\s*</cross-session-message>', body.strip())
-    if not wrapper or wrapper.group(1) != sender or '<cross-session-message' in wrapper.group(2):
+    return body
+
+
+def delivery(record, sender):
+    """Read the delivered envelope, excluding the host's appended guidance."""
+    origin = record.get('origin')
+    if not sender or not isinstance(origin, dict) or origin.get('kind') != 'peer':
+        raise EvidenceError('delivery has no structural peer provenance for this sender')
+    body = delivered_text(record)
+    # Start at the delivered message, never search inside prose for a quotation.
+    # Attributes describe the host format; only `from` is an author identity.
+    wrapper = re.fullmatch(r'(?:Another Claude session sent a message(?: while you were working)?:\s*)?'
+                          r'<cross-session-message(?P<attrs>(?:\s+[\w:-]+="[^"<>]*")*)\s*>'
+                          r'(?P<body>[\s\S]*?)</cross-session-message>(?P<tail>[\s\S]*)', body.strip())
+    if not wrapper:
         raise EvidenceError('delivery must contain one matching peer envelope')
+    pairs = re.findall(r'([\w:-]+)="([^"<>]*)"', wrapper['attrs'])
+    attrs = dict(pairs)
+    payload = wrapper['body'].strip()
+    if (len(attrs) != len(pairs) or not attrs.get('from') or attrs['from'] != origin.get('from') or
+            '<cross-session-message' in payload.lower() or
+            len(re.findall(r'</?cross-session-message\b', body, re.I)) != 2):
+        raise EvidenceError('delivery must contain one matching peer envelope')
+    tail = wrapper['tail'].strip()
+    if tail and not tail.startswith('This came from another Claude session — '):
+        raise EvidenceError('unrecognized text after the delivered peer envelope')
+    if 'body' in origin and (not isinstance(origin['body'], str) or origin['body'].strip() != payload):
+        raise EvidenceError('peer origin body disagrees with the delivered envelope')
+    if origin.get('from') != sender and not socket_sender_matches(record, sender, payload):
+        raise EvidenceError('delivery has no structural peer provenance for this sender; '
+                            'a socket peer needs a matching successful SendMessage result in the sender transcript')
     ident = record.get('uuid')
     if not isinstance(ident, str) or not ident:
         raise EvidenceError('delivery lacks a stable transcript record uuid')
     epoch(record.get('timestamp'))
-    return dict(id=ident, ts=record['timestamp'], body=wrapper.group(2))
+    return dict(id=ident, ts=record['timestamp'], body=payload)
 
 
 def receipt(path, sender, ident):
