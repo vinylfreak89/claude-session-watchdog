@@ -1,26 +1,22 @@
-"""Every agent says what it owes, and must account for it before it may speak again.
+"""Each agent says what it currently owes. Every later entry supersedes -- and thereby
+answers -- the one before it.
 
-There is deliberately NO mechanical correspondence check between a promise and its
-account. That was tried in review and it fails both ways: exact comparison flags an
-honest paraphrase, and similarity matching lets a narrower task be substituted for
-the one promised. The comparison a machine can do here is not the comparison that
-matters.
+There is no open/account pair, because they were the same act described twice: an agent
+saying where it stands. There is no refusal either. The mechanism is that the newest list
+is printed on every `owed` poll, next to the one it replaced, until the agent writes a new
+one saying what became of it. Visibility is the whole of it.
 
-What is mechanical is narrow and it is the part that bites:
+Deliberately NO machine comparison between consecutive lists. Review established that exact
+comparison flags an honest paraphrase while similarity matching lets a narrower task be
+substituted for the one promised; the comparison a machine can do is not the one that
+matters. A person reads them.
 
-  - you cannot open a new list while your last one is unaccounted for;
-  - an unaccounted list is OWED and is nagged until it is answered;
-  - nothing is overwritten, so an abandonment made while the owner was away is
-    still there when he gets back.
+Abandonment is a complete answer -- "I said I would do this, I am not going to, because X"
+-- but it has to be written, and nothing is ever overwritten, so an abandonment made while
+the owner was away is still there when he gets back.
 
-The accountability is that the words are retained and put in front of a person,
-side by side, in the agent's own voice. Abandoning a promise is allowed and is a
-complete account -- but it has to be SAID, and it stays said. Making avoidance
-visible is the mechanism, not a hole in it.
-
-Symmetric by the owner's ruling (2026-09-18, "it should apply symmetrically"):
-every agent keeps its own chain, and no agent audits another's while keeping its
-own private.
+Symmetric by the owner's ruling (2026-09-18, "it should apply symmetrically"): every agent
+keeps its own chain and none is exempt.
 """
 import wd_lib as W
 
@@ -29,63 +25,36 @@ def _log(state):
     return state.setdefault('promise_log', [])
 
 
-def chain(state, agent):
-    return [e for e in _log(state) if e.get('agent') == agent]
-
-
-def unaccounted(state, agent=None):
-    """Entries still owing an account. The nagger's question, and the gate's."""
-    return [e for e in _log(state)
-            if (agent is None or e.get('agent') == agent) and e.get('account') is None]
-
-
-def _lines(text):
-    out = [l.strip().lstrip('-').strip() for l in (text or '').splitlines()]
-    return [l for l in out if l]
-
-
-def open_list(state, agent, text):
-    """Record what this agent currently owes. Refused while the last list is unanswered."""
+def say(state, agent, text):
+    """Append what this agent owes now. Supersedes its previous entry."""
     if not agent:
         raise ValueError('an agent name is required; a promise nobody made is not a promise')
-    owing = unaccounted(state, agent)
-    if owing:
-        raise ValueError('account for the previous list first (opened %s, %d line(s))'
-                         % (owing[0]['ts'], len(owing[0]['open'])))
-    lines = _lines(text)
-    entry = dict(ts=W.now_iso(), agent=agent, open=lines, account=None, account_ts=None)
+    lines = [l.strip().lstrip('-').strip() for l in (text or '').splitlines()]
+    lines = [l for l in lines if l]
+    if not lines:
+        raise ValueError('an empty list is not an answer; say "nothing outstanding" if that is true')
+    entry = dict(ts=W.now_iso(), agent=agent, open=lines)
     _log(state).append(entry)
     return entry
 
 
-def account(state, agent, text):
-    """Answer the open list in the agent's own words. Never overwrites an earlier one."""
-    owing = unaccounted(state, agent)
-    if not owing:
-        raise ValueError('nothing open for %s to account for' % agent)
-    lines = _lines(text)
-    if not lines:
-        raise ValueError('an empty account is not an account')
-    entry = owing[0]
-    entry['account'] = lines
-    entry['account_ts'] = W.now_iso()
-    return entry
+def current(state):
+    """The newest entry per agent -- what each one last said it owed."""
+    latest = {}
+    for e in _log(state):
+        latest[e['agent']] = e
+    return [latest[k] for k in sorted(latest)]
 
 
-def render(state, agent=None, limit=5):
-    """Promise beside account, for a person to read. The judging happens here, by them."""
-    rows = [e for e in _log(state) if agent is None or e.get('agent') == agent]
+def render(state, agent=None, limit=6):
+    """Consecutive entries, so a person can see what changed and judge it."""
+    rows = [e for e in _log(state) if agent is None or e['agent'] == agent]
     if not rows:
-        return 'no promises recorded'
+        return 'nothing said yet'
     out = []
     for e in rows[-limit:]:
         out.append('%s  %s' % (e['ts'], e['agent']))
         for line in e['open']:
-            out.append('    SAID: %s' % line)
-        if e['account'] is None:
-            out.append('    ---- NOT YET ACCOUNTED FOR ----')
-        else:
-            for line in e['account']:
-                out.append('    THEN: %s' % line)
+            out.append('    %s' % line)
         out.append('')
     return '\n'.join(out).rstrip()

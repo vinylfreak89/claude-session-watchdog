@@ -1,0 +1,60 @@
+THE SEND GATE  —  wd.sh next / due.  One function, checked top to bottom, first match wins.
+Only "SEND" hands anything over. Everything else is a refusal with a named reason.
+
+   receipt layer can't record?  ───────────────────► STUCK      human review required
+   two queue items share an id? ───────────────────► AMBIGUOUS
+   nothing queued?             ───────────────────► NONE
+   owner marked it URGENT?     ───────────────────► SEND        (only override; beats 1-3 below)
+ 1 an item is sent, unverified?───────────────────► OWED        finish it before the next
+   target turn open?           ───────────────────► BUSY
+   findings undelivered?       ───────────────────► OWED
+   work in flight / live procs?───────────────────► BUSY
+   target active <30s ago?     ───────────────────► BUSY
+ 2 target's reply unrelayed?   ───────────────────► OWED        relay to the owner first
+ 3 every item held?            ───────────────────► HELD        names the condition
+   acceptance missing/invalid? ───────────────────► HELD
+   else                        ───────────────────► SEND  ──► then: wd.sh sent1 <id> <uuid>
+
+                      ── currently at "1": the engine-test item ──
+
+
+QUEUE ITEM LIFECYCLE
+
+   queue add ──► UNSENT ──────────────► SEND ──► SENT ──────────────────► SETTLED
+   (needs an        │                            (needs a real delivery      │
+    acted-when)     │                             receipt AND an             │ acceptance
+                    │ queue hold                  acted-when)                │ check passes
+                    ▼                                                        │ on its own poll
+                  HELD ──► only the owner's condition lifts it               ▼
+                    │                                          nothing closes it by hand
+                    │ queue drop  (UNSENT only, never a sent item)
+                    ▼
+                 DROPPED  (kept, with the reason)
+
+
+TARGET TURN LIFECYCLE   —  owner's formula: RELAY AND (RESPOND OR HOLD)
+
+   turn ends ──► OWED ──┬── relayed <ts> ──────┐
+                        │                      ├──► DISCHARGED
+                        └── answered <uuid> ───┤    (both halves)
+                            hold <ts> "why" ───┤
+                            closed <ts> "why" ─┘
+                            └─ hold/closed refused if the turn asked a question
+
+
+PROMISES  —  symmetric, one entry per agent, no sub-verbs
+
+   promise <agent> "<what you owe now>" ──► entry ──► the NEXT entry answers it
+
+                                 the newest entry is printed by `owed` every poll
+                                 an entry may say "abandoned, because X" — that is complete
+                                 nothing is overwritten; `promise show` prints them in sequence
+                                 there is no refusal: being read is the mechanism
+
+   no machine compares consecutive entries. a person reads them.
+
+
+WHAT GOT DELETED TODAY
+   declared_actions        regex that GUESSED promises from prose  → 3 standing false alarms
+   turn_made_a_dispatch    "did it dispatch in the same turn?"     → unanswerable by design
+   the DECLARED report line                                        → replaced by PROMISES

@@ -389,23 +389,18 @@ def run(a, ap):
             WK.save_state(a.state_dir, state)
         print('%s %s with recorded attribution and turn evidence' % (a.mode, a.rest[0])); return 0
     if a.mode == 'promise':
-        # Symmetric by the owner's ruling. An agent names what it owes, then must answer
-        # for it before it may name anything else. No machine judges the correspondence.
-        if not a.rest:
-            print('wd.sh promise open <agent> "<lines>" | account <agent> "<lines>" | show [agent]'); return 2
-        sub = a.rest[0]
-        if sub == 'show':
+        # One act: an agent says what it owes now, superseding what it said before.
+        # No sub-verbs, no refusal -- `owed` prints it every poll until it is replaced.
+        if a.rest and a.rest[0] == 'show':
             print(PR.render(state, a.rest[1] if len(a.rest) > 1 else None)); return 0
-        if sub not in ('open', 'account') or len(a.rest) < 3:
-            print('wd.sh promise open <agent> "<lines>" | account <agent> "<lines>" | show [agent]'); return 2
-        who, body = a.rest[1], ' '.join(a.rest[2:])
+        if len(a.rest) < 2:
+            print('wd.sh promise <agent> "<what you owe now>"  |  wd.sh promise show [agent]'); return 2
         try:
-            entry = (PR.open_list if sub == 'open' else PR.account)(state, who, body)
+            entry = PR.say(state, a.rest[0], ' '.join(a.rest[1:]))
         except ValueError as exc:
             print('REFUSED: %s' % exc); return 1
         WK.save_state(a.state_dir, state)
-        print('%s %s: %d line(s) at %s' % (who, sub, len(entry['open'] if sub == 'open' else entry['account']),
-                                           entry['ts'] if sub == 'open' else entry['account_ts']))
+        print('%s: %d line(s) at %s' % (entry['agent'], len(entry['open']), entry['ts']))
         return 0
     if a.mode == 'relayed':
         ts = a.rest[0] if a.rest else ''
@@ -585,10 +580,10 @@ def run(a, ap):
         # What each agent SAID it owed and has not answered for. There is no correspondence
         # check: the words are retained and put in front of the owner, who judges them. The
         # mechanical part is only that an unanswered list is loud and blocks opening another.
-        owing = PR.unaccounted(state)
-        print('PROMISES NOT ACCOUNTED FOR: %d' % len(owing))
-        for e in owing:
-            print('   %s %s said: %s' % (e['ts'], e['agent'], ' | '.join(e['open'])))
+        cur = PR.current(state)
+        print('WHAT EACH AGENT SAYS IT OWES: %d' % len(cur))
+        for e in cur:
+            print('   %s %s: %s' % (e['ts'], e['agent'], ' | '.join(e['open'])))
         # In the headline the monitor already reads, for the same reason the nudge is: a section
         # further down is not an alarm.
         print('SENT, NOT YET ACTED ON: %d%s' % (len(unacted),
