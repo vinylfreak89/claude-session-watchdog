@@ -1,12 +1,85 @@
 #!/usr/bin/python3
 """Every supported kind has real-producer, real-handler positive and negative controls."""
+import json
 import os
 import subprocess
 import unittest
 from unittest.mock import patch
 from send_contract_support import ContractCase, C, K, W, SELF, TARGET, ts
+import wd_acceptance as A
+import wd_receipts as D
 
 class AcceptanceContract(ContractCase):
+    def duplicate_use(self, at, ident='duplicated-control'):
+        record = dict(type='assistant', timestamp=ts(at), message=dict(role='assistant',
+                      content=[dict(type='tool_use', id=ident, name='Read', input=dict(file_path='unrelated.txt'))],
+                      stop_reason='tool_use'))
+        self.records(record, record)
+
+    def historical_duplicates(self, kind):
+        self.duplicate_use(2)
+        self.turn('after-history', 3, 4)
+        if kind == 'row':
+            # An available ledger lacking the requested row is NOT-YET. A missing
+            # ledger is correctly UNDECIDED and would test a different property.
+            (self.root / 'ledger.md').write_text('| ID | Result |\n|---|---|\n')
+        q = self.queue('Perform synthetic action', self.spec(kind))
+        self.deliver('Perform synthetic action'); self.sent(q)
+        out = self.poll()
+        self.assertIn('not-yet', out, 'clean evidence window must reach the kind evaluator')
+        self.assertNotIn('undecided', out)
+        self.assertEqual(len(self.state()['owner_queue']), 1, out)
+        self.act(kind)
+        out = self.poll()
+        self.assertEqual(self.state()['owner_queue'], [], out)
+        self.assertEqual(self.state()['owner_queue_sent'][0]['id'], q)
+        self.assertEqual(self.state()['owner_queue_sent'][0]['acted_status'], 'pass')
+
+    def test_window_duplicate_refuses_even_with_satisfied_artifact(self):
+        q = self.queue(); self.deliver('Create artifact'); self.sent(q)
+        self.write_target('artifact.txt', 'created')
+        for at in (10, 25):
+            with self.subTest(duplicate_at=at):
+                original = self.tx.read_text()
+                self.duplicate_use(at)
+                with self.assertRaisesRegex(D.EvidenceError, 'duplicate target tool-use id'):
+                    A.target_calls(self.sess, ts(10))
+                out = self.poll()
+                self.assertIn('undecided', out)
+                self.assertIn('duplicate target tool-use id', out)
+                self.assertEqual(len(self.state()['owner_queue']), 1, out)
+                self.tx.write_text(original)
+
+    def test_late_appended_old_duplicates_do_not_poison_window(self):
+        q = self.queue(); self.deliver('Create artifact'); self.sent(q)
+        self.write_target('artifact.txt', 'created')
+        self.duplicate_use(2)
+        out = self.poll()
+        self.assertEqual(self.state()['owner_queue'], [], out)
+
+    def test_predelivery_call_with_late_result_does_not_settle(self):
+        q = self.queue(); self.deliver('Create artifact'); self.sent(q)
+        self.write_target('artifact.txt', 'created')
+        records = [json.loads(line) for line in self.tx.read_text().splitlines()]
+        for stamp in (ts(9), ts(10)):
+            with self.subTest(call_timestamp=stamp):
+                for r in records:
+                    if any(b.get('name') == 'Write' for b in W._blocks((r.get('message') or {}).get('content'), 'tool_use')):
+                        r['timestamp'] = stamp
+                self.tx.write_text(''.join(json.dumps(r) + '\n' for r in records))
+                out = self.poll()
+                self.assertIn('not-yet', out)
+                self.assertEqual(len(self.state()['owner_queue']), 1, out)
+
+    def test_undated_tool_use_cannot_be_assumed_historical(self):
+        q = self.queue(); self.deliver('Create artifact'); self.sent(q)
+        self.write_target('artifact.txt', 'created')
+        self.records(dict(type='assistant', message=dict(content=[dict(type='tool_use', id='undated', name='Read', input={})])))
+        out = self.poll()
+        self.assertIn('undecided', out)
+        self.assertIn('timestamp', out)
+        self.assertEqual(len(self.state()['owner_queue']), 1, out)
+
     def git(self, *args):
         return subprocess.check_output(['git', '-C', str(self.root)] + list(args), stderr=subprocess.STDOUT, text=True).strip()
 
@@ -137,6 +210,8 @@ class AcceptanceContract(ContractCase):
         self.assertIn('undecided', out.lower())
 
 for _kind in ('file', 'grep', 'csv', 'row', 'commit', 'task', 'msg-to-watchdog'):
+    def historical_control(self, kind=_kind): self.historical_duplicates(kind)
+    setattr(AcceptanceContract, 'test_%s_historical_duplicates' % _kind.replace('-', '_'), historical_control)
     for _mode in ('positive', 'preexisting', 'unattributed'):
         def control(self, kind=_kind, mode=_mode): self.exercise(kind, mode)
         setattr(AcceptanceContract, 'test_%s_%s' % (_kind.replace('-', '_'), _mode), control)

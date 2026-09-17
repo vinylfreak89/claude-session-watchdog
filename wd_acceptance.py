@@ -104,25 +104,39 @@ def baseline(a, sess, spec):
 
 
 def target_calls(sess, after):
-    """Successful tool calls with both call and result after the receipt, from the target."""
+    """Successful post-receipt calls, checking duplicate IDs only in that window.
+
+    Inspect every record: replayed old records can appear later in the file, so
+    transcript order is not a time boundary. Unknown tool timestamps cannot be
+    assumed historical. The boundary is inclusive for integrity checks; action
+    credit still requires the call to be strictly later than the receipt.
+    """
+    boundary = D.epoch(after)
     records = D.read_records(W.transcript_path(sess))
     uses = {}
     complete = []
     for record in records:
         content = (record.get('message') or {}).get('content')
+        role = record.get('type')
+        block_kind = {'assistant': 'tool_use', 'user': 'tool_result'}.get(role)
+        blocks = W._blocks(content, block_kind) if block_kind else []
+        if not blocks:
+            continue
+        stamp = record.get('timestamp')
+        if D.epoch(stamp) < boundary:
+            continue
         if record.get('type') == 'assistant':
-            for b in W._blocks(content, 'tool_use'):
+            for b in blocks:
                 ident = b.get('id')
                 if ident in uses:
-                    raise D.EvidenceError('duplicate target tool-use id')
-                uses[ident] = dict(id=ident, name=b.get('name'), input=b.get('input') or {}, ts=record.get('timestamp'))
+                    raise D.EvidenceError('duplicate target tool-use id %r in receipt window at or after %s' % (ident, after))
+                uses[ident] = dict(id=ident, name=b.get('name'), input=b.get('input') or {}, ts=stamp)
         elif record.get('type') == 'user':
-            for b in W._blocks(content, 'tool_result'):
+            for b in blocks:
                 use = uses.get(b.get('tool_use_id'))
                 if not use or b.get('is_error') is not False:
                     continue
-                stamp = record.get('timestamp')
-                if D.epoch(use['ts']) <= D.epoch(after) or D.epoch(stamp) < D.epoch(use['ts']):
+                if D.epoch(use['ts']) <= boundary or D.epoch(stamp) < D.epoch(use['ts']):
                     continue
                 complete.append(dict(use, result=W._result_text(b), result_ts=stamp))
     return complete
