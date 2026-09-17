@@ -38,7 +38,7 @@ class OwnerAckContract(ContractCase):
         before = self.state()
         rc, out = self.cli(C, 'answered', 'Owner authorizes acknowledgement')
         self.assertNotEqual(rc, 0, out)
-        self.assertEqual(self.state(), before)
+        self.assert_receipt_refusal_preserves_obligations(before)
 
     def test_owner_ack_does_not_archive_sent_work(self):
         q = self.queue(); self.deliver('Create artifact'); self.sent(q)

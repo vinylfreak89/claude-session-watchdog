@@ -10,6 +10,62 @@ class EvidenceError(ValueError):
     pass
 
 
+def recording_failed(state, operation, reason, item_id=None, message_id=None):
+    """Retain the first recording failure for human review; never credit or reset it."""
+    state.setdefault('receipt_recording_failure', dict(operation=operation, reason=str(reason),
+                     item_id=item_id, message_id=message_id, at=W.now_iso()))
+
+
+def recording_problem(sess, state):
+    """Read-only receipt health for the single send gate. Unknown is a stop.
+
+    A delivery left unrecorded is never repaired here. In particular, finding its
+    text in the target record is a reason to stop sending, not permission to mark it.
+    """
+    fault = state.get('receipt_recording_failure')
+    if 'receipt_recording_failure' in state:
+        if not isinstance(fault, dict) or not fault.get('reason'):
+            return 'receipt recording failure metadata is unreadable; human review required'
+        return 'receipt recording refused (%s, item %s, message %s): %s; human review required' % (
+            fault.get('operation'), fault.get('item_id') or '-', fault.get('message_id') or '-', fault.get('reason'))
+    try:
+        records = read_records(W.transcript_path(sess))
+    except EvidenceError as exc:
+        return 'receipt validation unavailable: %s' % exc
+    pending = [(str(q.get('id')), q.get('text'), q.get('ts'))
+               for q in state.get('owner_queue') or [] if not q.get('sent')]
+    pending += [(str(fid), f.get('message'), f.get('ts'))
+                for fid, f in (state.get('proposed') or {}).items()]
+    peers, validated, errors = 0, 0, []
+    for record in records:
+        origin = record.get('origin') or {}
+        if not isinstance(origin, dict) or origin.get('kind') != 'peer' or record.get('type') not in ('user', 'attachment'):
+            continue
+        peers += 1
+        try:
+            # Health checks the observed transport format. This supplies NO sender
+            # credit: attribution to configured self still happens at recording.
+            rec = delivery(record, origin.get('from'))
+            validated += 1
+            body = rec['body']
+        except EvidenceError as exc:
+            errors.append(str(exc))
+            # Preserve multiline text even when its envelope is malformed. A
+            # possible duplicate stops the gate; it never supplies receipt credit.
+            try:
+                body = delivered_text(record)
+            except EvidenceError as unreadable:
+                return 'receipt validation unavailable: %s' % unreadable
+        for ident, text, stamp in pending:
+            try: after = epoch(record.get('timestamp')) > epoch(stamp)
+            except EvidenceError as exc: return 'receipt timing unavailable: %s' % exc
+            if after and text and text in body:
+                return 'possible unrecorded delivery of %s in target record %s; do not resend or backfill' % (ident, record.get('uuid') or '(no uuid)')
+    if peers and not validated:
+        return 'receipt validation unavailable: none of %d peer deliveries validate (%s)' % (peers, '; '.join(sorted(set(errors))))
+    return None
+
+
 def read_records(path):
     records = []
     try:

@@ -250,7 +250,10 @@ def settle_acted(a, sess, state):
 def next_item(sess, state):
     """The send gate, as ONE function so a control can exercise IT rather than re-derive it.
 
-    Refuses on four grounds, and the middle two were both missing (owner, 2026-09-11: "you're not
+    Receipt recording must be usable before any pacing decision. A recording
+    refusal or unavailable evidence is STUCK, including for urgent items.
+
+    Pacing refuses on four grounds, and the middle two were both missing (owner, 2026-09-11: "you're not
     waiting for turns to close... don't rapid fire the queue"):
 
       1. the target is MID-TURN                      -- it cannot read a second item
@@ -267,6 +270,9 @@ def next_item(sess, state):
     did not, and THIS is the one that gates the send. The gate is the reading side.
     """
     q = [x for x in (state.get('owner_queue') or []) if not x.get('sent')]
+    problem = D.recording_problem(sess, state)
+    if problem:
+        return 'stuck', None, 'STUCK: %s. SEND NOTHING.' % problem, len(q)
     identities = [x.get('id') for x in state.get('owner_queue') or []]
     if len(identities) != len(set(identities)):
         return 'held', None, 'AMBIGUOUS QUEUE IDS. SEND NOTHING.', len(q)
@@ -280,6 +286,17 @@ def next_item(sess, state):
     _, turns = W.last_turns(sess, n=1)
     if turns and turns[-1].end_state == 'open':
         return 'busy', None, 'TARGET BUSY (turn open). %d queued. SEND NOTHING.' % len(q), len(q)
+    # Preserve due's existing work-set/receptivity checks in the one gate;
+    # consolidating the readers must not make nomination more permissive.
+    if state.get('proposed'):
+        return 'owed', None, 'FINDINGS STILL OWED. SEND NOTHING FROM THE OWNER QUEUE.', len(q)
+    if state.get('in_flight') or W.live_children(sess):
+        return 'busy', None, 'TARGET BUSY (work in flight). SEND NOTHING.', len(q)
+    activity = W.read_state(sess)
+    last_record = W.ms_of_iso(turns[-1].end_ts) if turns else None
+    last_activity = max(activity['lastActivityAt'] or 0, last_record or 0)
+    if (time.time() - last_activity / 1000.0) <= 30:
+        return 'busy', None, 'TARGET BUSY (activity within 30 seconds). SEND NOTHING.', len(q)
     # Only the RELAY half gates a send, and the reason is a deadlock this hit within the hour:
     # `owed` counts a turn unhandled until it is BOTH relayed and answered, and the thing that
     # answers it is usually the next queued item -- so blocking on "not answered" blocked the only
@@ -360,6 +377,8 @@ def run(a, ap):
             return 1
         ok, why = answered_allowed(W.transcript_path(sess), a.self_sel, state, None, a.rest[0])
         if not ok:
+            D.recording_failed(state, 'answered', why, message_id=a.rest[0])
+            WK.save_state(a.state_dir, state)
             print('REFUSED: %s' % why); return 1
         WK.save_state(a.state_dir, state)
         print('answered: %s' % why); return 0
@@ -493,11 +512,17 @@ def run(a, ap):
         mid = rest[1] if len(rest) > 1 else ''
         matches = [x for x in state.get('owner_queue') or [] if str(x.get('id')) == i]
         if len(matches) > 1:
+            D.recording_failed(state, 'sent1', 'ambiguous queue id', item_id=i, message_id=mid)
+            WK.save_state(a.state_dir, state)
             print('REFUSED: ambiguous queue id'); return 1
         item = matches[0] if matches else None
         if item is None:
+            D.recording_failed(state, 'sent1', 'no queued item %s' % i, item_id=i, message_id=mid)
+            WK.save_state(a.state_dir, state)
             print('no queued item %s' % i); return 1
         if not mid:
+            D.recording_failed(state, 'sent1', 'missing target delivery uuid', item_id=i)
+            WK.save_state(a.state_dir, state)
             print('REFUSED: sent1 <id> <message_id>. The message id is what ties this mark to a '
                   'delivery that can be checked.'); return 1
         # The acceptance lives on the ITEM, set when it was queued or with `queue acted-when`.
@@ -507,6 +532,8 @@ def run(a, ap):
         spec = item.get('acted_when')
         ok, why = acceptance_valid(spec)
         if not ok:
+            D.recording_failed(state, 'sent1', why, item_id=i, message_id=mid)
+            WK.save_state(a.state_dir, state)
             print('REFUSED: %s. Set it first:  wd.sh queue acted-when %s "<check> <args>"  '
                   '(e.g. "commit <sha>", "grep <path> <regex>", "file <path> <since>", '
                   '"msg-to-watchdog <exact reply>")' % (why, i))
@@ -514,6 +541,8 @@ def run(a, ap):
         try:
             rec, changed = D.record_delivery(W.transcript_path(sess), a.self_sel, state, mid, queue_id=i)
         except D.EvidenceError as exc:
+            D.recording_failed(state, 'sent1', exc, item_id=i, message_id=mid)
+            WK.save_state(a.state_dir, state)
             print('REFUSED: %s' % exc); return 1
         if changed:
             WK.save_state(a.state_dir, state)

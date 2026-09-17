@@ -76,7 +76,7 @@ class ReceiptContract(ContractCase):
                 before = self.state()
                 rc, out = self.cli(C, 'answered', rec['uuid'])
                 self.assertNotEqual(rc, 0, out)
-                self.assertEqual(self.state(), before)
+                self.assert_receipt_refusal_preserves_obligations(before)
 
     def test_duplicate_source_result_is_not_sender_evidence(self):
         self.queue()
@@ -97,7 +97,7 @@ class ReceiptContract(ContractCase):
         rc, out = self.cli(C, 'answered', rec['uuid'])
         self.assertNotEqual(rc, 0, out)
         self.assertIn('matching successful SendMessage', out)
-        self.assertEqual(self.state(), before)
+        self.assert_receipt_refusal_preserves_obligations(before)
 
     def test_nested_or_second_envelope_is_refused(self):
         self.queue()
@@ -111,7 +111,7 @@ class ReceiptContract(ContractCase):
                 before = self.state()
                 rc, out = self.cli(C, 'answered', rec['uuid'])
                 self.assertNotEqual(rc, 0, out)
-                self.assertEqual(self.state(), before)
+                self.assert_receipt_refusal_preserves_obligations(before)
 
     def test_different_sender_is_still_refused(self):
         self.queue()
@@ -165,7 +165,7 @@ class ReceiptContract(ContractCase):
         before = self.state()
         rc, out = self.cli(C, 'sent1', q, 'caller-invented-id')
         self.assertNotEqual(rc, 0, out)
-        self.assertEqual(self.state(), before)
+        self.assert_receipt_refusal_preserves_obligations(before)
 
     def test_mark_order_is_identical(self):
         for order in ('item-first', 'finding-first'):

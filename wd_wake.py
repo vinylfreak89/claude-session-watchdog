@@ -489,7 +489,7 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
                 ledger_diff=ledger_diff, for_owner=for_owner, for_owner_all=for_owner_all, to_wd=to_wd, bypass_hint=bypass_hint)
 
 def sendable_items(q):
-    """Queue items that may be offered for sending: neither ALREADY SENT nor HELD.
+    """Legacy inventory filter, not send authorization; use wd_check.next_item.
 
     Both conditions, and the `sent` half is the one that was missing. This filtered on
     `hold_until` alone, so every item ever delivered came back on every wake under a heading
@@ -505,12 +505,16 @@ def sendable_items(q):
 def print_report(a, sess, st, state, R, trigger, wall, bytes_read):
     T = R['T']
     q = state.get('owner_queue') or []
-    sendable = sendable_items(q)
+    import wd_check as C
+    verdict, chosen, reason, _ = C.next_item(sess, state)
+    sendable = [chosen] if verdict == 'send' else []
     held = [it for it in q if it.get('hold_until')]
     if sendable:
-        print('=== OWNER ITEMS, SENDABLE NOW (%d) -- send with this wake, as ONE message with any findings ===' % len(sendable))
+        print('=== OWNER ITEM SELECTED BY THE SEND GATE ===')
         for it in sendable: print('  %s [%s]%s %s' % (it['id'], it['ts'], ' URGENT' if it.get('urgent') else '', it['text']))
-        print('  (after sending: wd.sh queue clear <message_id>)')
+        print('  (send only this item; then: wd.sh sent1 %s <target-delivery-uuid>)' % chosen['id'])
+    else:
+        print('GATE: %s' % reason)
     if held:
         print('=== OWNER ITEMS, HELD (%d) -- do NOT send; each waits on the work named ===' % len(held))
         for it in held: print('  %s HELD UNTIL: %s\n      %s' % (it['id'], it['hold_until'], it['text']))
@@ -661,7 +665,9 @@ def run(a):
         # spawning anything. Treating that as idle nudged a session that was mid-answer.
         _open_turn = turns[-1] if turns and turns[-1].end_state == 'open' else None
         receptive = (not procs) and (not infl) and idle_min > 0.5 and _open_turn is None
-        sendable = sendable_items(q)
+        import wd_check as C
+        verdict, chosen, reason, _ = C.next_item(sess, state)
+        sendable = [chosen] if verdict == 'send' else []
         held = [it for it in q if it.get('hold_until')]
         print('OWNER ITEMS SENDABLE NOW: %d' % len(sendable))
         for it in sendable: print('  %s%s %s' % (it['id'], ' URGENT' if it.get('urgent') else '', W.short(it['text'], 220)))
@@ -675,17 +681,9 @@ def run(a):
               'not mid-turn' if receptive else 'BUSY: mid-work'))
         # An idle target is not the gate. The gate is the CURRENT WORK SET: everything it is doing plus
         # every finding still owed to it. A queued item goes only when that set is finished.
-        if prop:
-            print('GATE: %d finding(s) still owed to it. Those are part of tonight\'s work set -- they go FIRST,'
-                  ' and the sendable queue goes only once the work they name is done.' % len(prop))
-        elif not sendable:
-            print('GATE: nothing sendable.')
-        elif receptive:
-            print('GATE: receptive snapshot only. Run wd.sh next for the one-item send decision.')
-        else:
-            print('GATE: it is mid-work -> hold.')
+        print('GATE: %s' % (reason or ('SEND only %s; record its target delivery uuid afterwards.' % chosen['id'])))
         if openq: print('note: it has a question outstanding to the owner (%s) -- it is waiting, not stopped' % W.short(openq[-1], 90))
-        return 0
+        return 1 if verdict == 'stuck' else 0
     if a.outcome:
         fid, verdict = a.outcome
         if verdict not in ('accepted', 'partly', 'wrong'):
@@ -800,6 +798,9 @@ def run(a):
     if a.sent:
         import wd_receipts as D
         if not a.target or not a.self_sel or not a.message_id:
+            D.recording_failed(state, 'sent', 'sent requires target, sender and target transcript delivery uuid',
+                               message_id=a.message_id)
+            save_state(a.state_dir, state)
             print('REFUSED: sent requires target, sender and target transcript delivery uuid'); return 1
         ids = [x.strip() for x in a.sent.split(',') if x.strip()]
         try:
@@ -807,6 +808,8 @@ def run(a):
             rec, changed = D.record_delivery(W.transcript_path(sess), a.self_sel, state, a.message_id,
                                              finding_ids=ids)
         except D.EvidenceError as exc:
+            D.recording_failed(state, 'sent', exc, message_id=a.message_id)
+            save_state(a.state_dir, state)
             print('REFUSED: %s' % exc); return 1
         if changed:
             save_state(a.state_dir, state)

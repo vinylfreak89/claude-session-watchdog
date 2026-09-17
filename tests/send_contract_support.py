@@ -87,6 +87,16 @@ class ContractCase(unittest.TestCase):
     def state(self):
         return K.load_state(str(self.state_dir))
 
+    def assert_receipt_refusal_preserves_obligations(self, before):
+        """A refusal now retains gate-health evidence, never delivery credit."""
+        after = self.state()
+        failure = after.pop('receipt_recording_failure', None)
+        self.assertIsInstance(failure, dict)
+        self.assertTrue(failure.get('reason'))
+        prior = dict(before)
+        prior.pop('receipt_recording_failure', None)
+        self.assertEqual(after, prior)
+
     def cli(self, module, *args):
         base = [module.__file__, '--state-dir', str(self.state_dir), '--target', TARGET, '--self', SELF,
                 '--repo', str(self.root), '--ledger', 'ledger.md']

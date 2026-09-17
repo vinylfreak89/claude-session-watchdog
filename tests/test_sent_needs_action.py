@@ -11,7 +11,7 @@ class SendContract(ContractCase):
         before = self.state()
         rc, out = self.cli(K, '--sent', 'F999', '--message-id', 'absent')
         self.assertNotEqual(rc, 0, out)
-        self.assertEqual(self.state(), before)
+        self.assert_receipt_refusal_preserves_obligations(before)
 
     def test_finding_without_delivery_cannot_record_send(self):
         s = self.state()
