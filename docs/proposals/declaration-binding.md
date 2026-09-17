@@ -1,6 +1,21 @@
 # Declaration-to-dispatch binding: finding and proposed contract
 
-**Status: proposal, not an implemented repair.** The existing transcript permits
+**Status: REJECTED by the owner. Do not implement or re-propose this contract.**
+
+The owner's ruling:
+
+> I reject this proposal. the entire point of this tool is it is supposed to be controlled by natural language, not a strict rule hirearchy. A strict rule hirearchy an AI can route around. having to answer honestly and truthfully to adhere to the contract is harder. Codex needs to understand this is not a program protocol to be run. it is not a human, but it is human like and has a human-in-the-loop mechanism.
+
+The instrument supports truthful reporting to a human in the loop. This proposal
+mistook that purpose for mechanically proving compliance through a finite schema.
+The declaration identities, protected subject mappings, receiver-receipt contract
+and migration machinery proposed below are rejected, not pending implementation.
+The review's "binding, not a wider window" framing is also withdrawn. The nine
+reproductions remain evidence of what the existing machinery does; they do not
+authorize this design. The original proposal is retained below as historical
+context, with all implementation recommendations superseded by this ruling.
+
+**Original proposal (rejected):** The existing transcript permits
 a human to establish that the two reported promises were kept. It does not
 contain a machine-verifiable declaration-to-dispatch relationship. Automatically
 clearing them under the current schema would require semantic inference by the
