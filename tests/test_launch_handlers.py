@@ -38,24 +38,6 @@ class LaunchHandlers(ContractCase):
         self.wake_launch("cat > /tmp/notes.md <<'EOF'\ncodex-run task " + THREAD + " /tmp/control.md\nEOF\n")
         self.assertEqual(self.state()['dispatch_log'], [])
 
-    def test_failed_direct_call_has_no_credit(self):
-        self.wake_launch('codex-run task ' + THREAD + ' /tmp/control.md', error=True)
-        self.records(dict(type='assistant', timestamp=ts(26), message=dict(role='assistant',
-            content=[dict(type='text', text="I'll send the review to Codex.")], stop_reason='end_turn')))
-        rc, out = self.cli(C, 'owed')
-        self.assertEqual(rc, 0, out)
-        self.assertIn('DECLARED an action and made no dispatch: 1', out)
-
-    def test_compound_reader_is_shared_with_owed(self):
-        self.wake_launch("S=/tmp; cat > $S/control.md <<'EOF'\nReview synthetic case\nEOF\n"
-                         'codex-run task ' + THREAD + ' $S/control.md', True)
-        self.records(dict(type='assistant', timestamp=ts(26), message=dict(role='assistant',
-            content=[dict(type='text', text="I'll send the review to Codex.")], stop_reason='end_turn')))
-        rc, out = self.cli(C, 'owed')
-        self.assertEqual(rc, 0, out)
-        self.assertTrue(any(x.get('thread') == THREAD for x in self.state()['in_flight']))
-        self.assertIn('DECLARED an action and made no dispatch: 0', out)
-
     def test_pipe_does_not_turn_data_into_commands(self):
         self.wake_launch('codex-run task ' + THREAD + " /tmp/control.md 2>&1 | tee /tmp/reply.txt", True,
                          bootstrap=False)
@@ -66,9 +48,6 @@ class LaunchHandlers(ContractCase):
                   result='REFUSED: cannot submit this request')
         self.records(dict(type='assistant', timestamp=ts(25), message=dict(role='assistant',
             content=[dict(type='text', text="I'll send the review to Codex.")], stop_reason='end_turn')))
-        rc, out = self.cli(C, 'owed')
-        self.assertEqual(rc, 0, out)
-        self.assertIn('DECLARED an action and made no dispatch: 1', out)
         rc, out = self.cli(K, '--replay', '1', '--json')
         self.assertEqual(rc, 0, out)
         self.assertIn('dispatch_failed', [f['cls'] for f in json.loads(out)['findings']])
@@ -79,9 +58,6 @@ class LaunchHandlers(ContractCase):
                  input=dict(command='codex-run task ' + THREAD + ' /tmp/control.md'))])))
         self.records(dict(type='assistant', timestamp=ts(25), message=dict(role='assistant',
             content=[dict(type='text', text="I'll send the review to Codex.")], stop_reason='end_turn')))
-        rc, out = self.cli(C, 'owed')
-        self.assertEqual(rc, 0, out)
-        self.assertIn('DECLARED an action and made no dispatch: 1', out)
         rc, out = self.cli(K, '--trigger', 'manual-control')
         self.assertEqual(rc, 0, out)
         self.assertFalse(any(x.get('thread') == THREAD for x in self.state()['in_flight']))
@@ -109,6 +85,12 @@ class LaunchHandlers(ContractCase):
         self.assertEqual(len(self.state()['dispatch_log']), 1)
 
     def test_hidden_shell_text_cannot_credit_dispatch(self):
+        """Quoted, expanded, defined or piped text naming codex-run is DATA, never a dispatch.
+
+        Observed through the wake handler's dispatch_log. It used to be observed through
+        owed's declared/dispatched alarm; that alarm was removed with the guessed-declaration
+        path, but this requirement is about the READER and still holds.
+        """
         commands = [
             "printf '%s' 'codex-run task " + THREAD + " /tmp/control.md'",
             "cat <<'EOF'\nEOF-not-the-terminator\ncodex-run task " + THREAD + " /tmp/control.md\nEOF\n",
@@ -123,14 +105,8 @@ class LaunchHandlers(ContractCase):
         for command in commands:
             with self.subTest(command=command):
                 self.tx.write_text('')
-                self.turn('initial', 0, 1)
                 self.wake_launch(command)
-                self.records(dict(type='assistant', timestamp=ts(26), message=dict(role='assistant',
-                    content=[dict(type='text', text="I'll send the review to Codex.")], stop_reason='end_turn')))
-                rc, out = self.cli(C, 'owed')
-                self.assertEqual(rc, 0, out)
-                self.assertIn('DECLARED an action and made no dispatch: 1', out)
-
+                self.assertEqual(self.state()['dispatch_log'], [], command)
     def test_quoted_command_is_not_dispatch(self):
         items = self.wake_launch("printf '%s' 'codex-run task " + THREAD + " /tmp/control.md'")
         self.assertEqual(items, [])

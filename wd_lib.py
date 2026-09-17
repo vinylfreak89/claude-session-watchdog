@@ -558,41 +558,10 @@ _INTENT_VERB_RE = re.compile(
     r"kick(?:ing)?|getting|running)\b", re.I)
 
 
-def declared_actions(text, limit=3):
-    """Intentions stated in `text`, with NEGATED ones dropped.
 
-    A negator counts only where it sits before the action verb inside the matched span, so
-    "I'm not re-dispatching" is rejected while "I'm dispatching it, not waiting" survives.
-    """
-    out = []
-    for m in INTENT_RE.finditer(text):
-        span = m.group(0)
-        verb = _INTENT_VERB_RE.search(span)
-        if verb:
-            head = span[:verb.start()]
-        else:
-            # THE NEGATION GUARD WAS STRUCTURALLY INERT ON THE VERBLESS BRANCHES. `to codex for`
-            # and `with codex for` match a three-word prepositional phrase carrying no verb, no
-            # subject and no tense -- so `head` was the whole phrase, which can never contain the
-            # negator sitting outside it. Measured: "Still owed and not yet built ... so it goes to
-            # Codex for review before I write it rather than after" was reported as a DECLARED
-            # ACTION, in a sentence naming the thing as not yet built. That is the false accusation
-            # this guard exists to prevent, surviving inside the guard.
-            # For those branches the head is the SENTENCE up to the match. Clause boundaries were
-            # tried first and are wrong here: a colon or semicolon does not separate independent
-            # assertions, and cutting at one dropped the very negation ("Still owed and not yet
-            # built: ...") that governs the statement. A match with no verb has no sub-sentence
-            # structure to localise a negator against, so the sentence is the defensible floor.
-            # Control: tests/test_declared_negation.py.
-            start = max((text.rfind(c, 0, m.start()) for c in '.!?\n'), default=-1)
-            head = text[start + 1:m.start()]
-        if NEGATOR_RE.search(head):
-            continue
-        out.append(span.strip())
-        if len(out) >= limit:
-            break
-    return out
-
+def sentences(text):
+    text = re.sub(r'```.*?```', ' ', text or '', flags=re.S)
+    return [s.strip() for s in SENT_SPLIT.split(text) if s and s.strip()]
 
 PUSH_CLAIM_RE = re.compile(r'\b(pushed|push(?:ed)? to origin|committed and pushed|commit(?:ted)?/pushed)\b', re.I)
 COMMIT_CLAIM_RE = re.compile(r'\b(committed|commit(?:ted)? (?:as|at|in)|landed (?:as|at|in)|is at|now at|HEAD)\b', re.I)
@@ -600,10 +569,6 @@ FILE_CLAIM_RE = re.compile(r'\b(wrote|written|saved|created|rendered|produced|ge
 LEDGER_CLAIM_RE = re.compile(r'\b(delet\w*|clos\w*|remov\w*|reconcil\w*|dropp\w*|struck|retir\w*)\b', re.I)
 LEDGER_WORD_RE = re.compile(r'\b(row|rows|ledger|tracker|pending)\b', re.I)
 NEG_RE = re.compile(r"\b(not|never|no|n't|did not|failed|cannot|unable|without|instead of|rather than)\b|\w+n't\b", re.I)
-
-def sentences(text):
-    text = re.sub(r'```.*?```', ' ', text or '', flags=re.S)
-    return [s.strip() for s in SENT_SPLIT.split(text) if s and s.strip()]
 
 def extract_claims(turn):
     """Checkable assertions from the turn's own prose (final text weighted; all assistant texts scanned)."""

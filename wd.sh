@@ -26,6 +26,8 @@
 #   wd.sh reconcile <start> <end> --init | --next | --hour ... | --complete
 #                                   rebuild state from the record hour by hour and restore what was dropped;
 #                                   aborts with no action if any other hook is running; local/reconcile.md is the procedure
+#   wd.sh promise open <agent> "<lines>" | account <agent> "<lines>" | show [agent]
+#                                   every agent names what it owes and must answer for it before naming more
 #   wd.sh check <kind> [args]       verify one thing now (running | commit <sha> | file <path> [since] | task <id> | row <ID> | msg-to-watchdog [since] | dispatch <thread> | tree [path] | grep <path> <regex> | csv <path> <col><op><val> [idcol])
 #   wd.sh finding <class> "<quote>" check <kind> [args]   build a fixed-form finding from a check the model chose; the result text is the script's
 # Overrides: WD_STATE (state dir), WD_CONFIG (config file). Everything is read-only except the state dir.
@@ -71,6 +73,7 @@ case "$cmd" in
   fired)  exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" fired "$@" ;;
   closed) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" closed "$@" ;;
   hold)   exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" hold "$@" ;;
+  promise) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" promise "$@" ;;
   check)  exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" check "$@" ;;
   finding) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" finding "$@" ;;
   queue)  sub=$1; shift

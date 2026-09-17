@@ -25,6 +25,7 @@ import wd_wake as WK
 import wd_receipts as D
 import wd_turns as TD
 import wd_acceptance as A
+import wd_promises as PR
 
 def check(a, sess, kind, args, state):
     repo = a.repo or sess['cwd']
@@ -145,10 +146,6 @@ def check(a, sess, kind, args, state):
         return 'rollout %s' % ts_.get('rollout'), 'in_flight %s; last task_started %s; last task_complete %s; last event %s; last message: %s' % (ts_.get('in_flight'), ts_.get('last_started'), ts_.get('last_complete'), ts_.get('last_event'), W.short(ts_.get('last_agent_message') or '', 160)), dict(in_flight=ts_.get('in_flight'), lifecycle_known=ts_.get('lifecycle_known'), last_started=ts_.get('last_started'), last_complete=ts_.get('last_complete'))
     raise SystemExit('unknown check kind %r' % kind)
 
-def turn_made_a_dispatch(turn, session_cli=None):
-    """Same executable-call evidence as wake; promise binding remains separate."""
-    return bool(W.dispatches_in(turn, session_cli))
-
 
 def answered_allowed(tx_path, self_sel, state, owner_ack, message_id=None):
     """Receipt evidence, or the explicitly retained owner-acknowledgement exception."""
@@ -196,8 +193,6 @@ def owed(sess, state, self_sel=None):
         if not why: continue
         text = ' '.join(x for _, x in t.assistant_texts)
         rows.append(dict(ts=t.end_ts, why=' + '.join(why),
-                         declared=W.declared_actions(text),
-                         dispatched=turn_made_a_dispatch(t, sess.get('cli')),
                          head=W.short(t.final_text or '', 130)))
     return rows
 
@@ -353,7 +348,7 @@ def main():
     ap.add_argument('--target', required=True); ap.add_argument('--self', dest='self_sel'); ap.add_argument('--repo'); ap.add_argument('--ledger')
     ap.add_argument('--state-dir', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'state')); ap.add_argument('--quiet-min', type=float, default=10.0)
     ap.add_argument('--row-pattern', default=W.DEFAULT_ROW_PATTERN)
-    ap.add_argument('mode', choices=['check', 'finding', 'owed', 'relayed', 'hold', 'answered', 'ask', 'resolved', 'open', 'next', 'sent1', 'nudged', 'conditional', 'fired', 'closed']); ap.add_argument('rest', nargs=argparse.REMAINDER)
+    ap.add_argument('mode', choices=['check', 'finding', 'owed', 'relayed', 'hold', 'answered', 'ask', 'resolved', 'open', 'next', 'sent1', 'nudged', 'conditional', 'fired', 'closed', 'promise']); ap.add_argument('rest', nargs=argparse.REMAINDER)
     a = ap.parse_args()
     with S.transaction(a.state_dir):
         return run(a, ap)
@@ -393,6 +388,25 @@ def run(a, ap):
         if changed:
             WK.save_state(a.state_dir, state)
         print('%s %s with recorded attribution and turn evidence' % (a.mode, a.rest[0])); return 0
+    if a.mode == 'promise':
+        # Symmetric by the owner's ruling. An agent names what it owes, then must answer
+        # for it before it may name anything else. No machine judges the correspondence.
+        if not a.rest:
+            print('wd.sh promise open <agent> "<lines>" | account <agent> "<lines>" | show [agent]'); return 2
+        sub = a.rest[0]
+        if sub == 'show':
+            print(PR.render(state, a.rest[1] if len(a.rest) > 1 else None)); return 0
+        if sub not in ('open', 'account') or len(a.rest) < 3:
+            print('wd.sh promise open <agent> "<lines>" | account <agent> "<lines>" | show [agent]'); return 2
+        who, body = a.rest[1], ' '.join(a.rest[2:])
+        try:
+            entry = (PR.open_list if sub == 'open' else PR.account)(state, who, body)
+        except ValueError as exc:
+            print('REFUSED: %s' % exc); return 1
+        WK.save_state(a.state_dir, state)
+        print('%s %s: %d line(s) at %s' % (who, sub, len(entry['open'] if sub == 'open' else entry['account']),
+                                           entry['ts'] if sub == 'open' else entry['account_ts']))
+        return 0
     if a.mode == 'relayed':
         ts = a.rest[0] if a.rest else ''
         if not ts: ap.error('relayed <turn end_ts>')
@@ -556,7 +570,6 @@ def run(a, ap):
         if closed:
             WK.save_state(a.state_dir, state)
         rows = owed(sess, state, a.self_sel)
-        broken = [r for r in rows if r['declared'] and not r['dispatched']]
         due_now = due_questions(sess, state, a.quiet_min)
         # The nudge rides INSIDE owed, in the headline the monitor already reads (owner,
         # 2026-09-11: "throw nudge inside owed so it fires consistently... You should be as
@@ -568,9 +581,14 @@ def run(a, ap):
         for k, q, why, age in due_now:
             print('   NUDGE %-22s %s  (%d resend(s))  -- re-send it, then: wd.sh nudged %s'
                   % (k, why, q.get('resends', 0), k))
-        print('DECLARED an action and made no dispatch: %d' % len(broken))
-        for r in broken: print('   %s  declared: %s' % (r['ts'], ' | '.join(r['declared'])))
         if not rows: print('   nothing owed')
+        # What each agent SAID it owed and has not answered for. There is no correspondence
+        # check: the words are retained and put in front of the owner, who judges them. The
+        # mechanical part is only that an unanswered list is loud and blocks opening another.
+        owing = PR.unaccounted(state)
+        print('PROMISES NOT ACCOUNTED FOR: %d' % len(owing))
+        for e in owing:
+            print('   %s %s said: %s' % (e['ts'], e['agent'], ' | '.join(e['open'])))
         # In the headline the monitor already reads, for the same reason the nudge is: a section
         # further down is not an alarm.
         print('SENT, NOT YET ACTED ON: %d%s' % (len(unacted),
