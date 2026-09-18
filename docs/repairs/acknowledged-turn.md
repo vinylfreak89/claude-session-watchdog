@@ -28,8 +28,9 @@ proof that the message substantively answers a question. Question detection
 therefore does not veto this route; it still vetoes hold and closed.
 
 Credit is limited to the named turn's RESPOND duty. It neither grants a relay
-exemption nor moves a global answer watermark, settles queued work, reconstructs
-an item receipt, or clears an existing receipt-recording failure. The retained
+exemption nor moves a global answer watermark, settles queued work, or reconstructs
+an item receipt. The follow-up [receipt recovery repair](receipt-recording-recovery.md)
+allows a successful retry to clear its own failure while retaining the episode. The retained
 owner-ack exception and the existing delivery/evidence routes are unchanged.
 
 ## Controls and falsifications

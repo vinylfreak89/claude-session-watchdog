@@ -34,7 +34,7 @@ class AcknowledgementContract(ContractCase):
                 before = self.state()
                 rc, out = self.answer(ident=ident)
                 self.assertNotEqual(rc, 0, out)
-                self.assertEqual(self.state(), before)
+                self.assert_receipt_refusal_preserves_obligations(before)
 
     def test_non_delivery_and_wrong_sender_refused(self):
         self.deliver('Ordinary text', ident='not-peer', origin=False)
@@ -135,6 +135,89 @@ class AcknowledgementContract(ContractCase):
         self.assertIn('another turn', out)
         rc, out = self.answer(stamp=ts(7))
         self.assertEqual(rc, 0, out)
+
+
+class RecordingRecoveryContract(ContractCase):
+    def setUp(self):
+        super().setUp()
+        self.deliver('Standalone acknowledgement', ident='ack')
+        self.clock = 30
+
+    def latch(self):
+        rc, out = self.cli(C, 'answered', 'ack')
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn('receipt_recording_failure', self.state())
+        rc, out = self.cli(C, 'next')
+        self.assertIn('STUCK', out)
+        return self.state()['receipt_recording_failure']
+
+    def retry(self):
+        return self.cli(C, 'answered', ts(1), '--acknowledged', 'ack', 'Acknowledged the synthetic result')
+
+    def test_validated_retry_clears_and_archives_failure_then_can_latch_again(self):
+        failure = self.latch()
+        rc, out = self.retry()
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn('receipt_recording_failure', self.state())
+        episode = self.state()['receipt_recording_recoveries'][0]
+        self.assertEqual(episode['failure'], failure)
+        self.assertTrue(episode['cleared_at'])
+        self.assertEqual(episode['message_id'], 'ack')
+        self.assertNotIn('STUCK', self.cli(C, 'next')[1])
+        self.latch()
+        self.assertEqual(self.state()['receipt_recording_recoveries'][0], episode)
+
+    def test_elapsed_time_owner_ack_and_other_delivery_do_not_clear(self):
+        failure = self.latch()
+        self.clock = 599
+        self.poll()
+        self.assertEqual(self.cli(C, 'answered', '--owner-ack', 'Synthetic owner acknowledgement')[0], 0)
+        self.deliver('Another acknowledgement', ident='different', at=12)
+        rc, out = self.cli(C, 'answered', ts(1), '--acknowledged', 'different', 'Another reply')
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.state()['receipt_recording_failure'], failure)
+        self.assertIn('STUCK', self.cli(C, 'next')[1])
+
+    def test_same_delivery_different_operation_does_not_clear(self):
+        # Latch an answered refusal before the record exists. Later sent1 proves
+        # that delivery but is a different operation, so cannot clear answered.
+        self.clock = 5
+        qid = self.queue()
+        rc, out = self.cli(C, 'answered', 'queued')
+        self.assertNotEqual(rc, 0, out)
+        failure = self.state()['receipt_recording_failure']
+        self.deliver('Create artifact', ident='queued', at=11)
+        self.clock = 30
+        rc, out = self.cli(C, 'sent1', qid, 'queued')
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.state()['receipt_recording_failure'], failure)
+        # An idempotent retry of the actual failed operation must still recover.
+        rc, out = self.cli(C, 'answered', 'queued')
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn('receipt_recording_failure', self.state())
+
+    def test_sent1_validated_retry_clears_its_own_failure(self):
+        self.clock = 5
+        qid = self.queue()
+        rc, out = self.cli(C, 'sent1', qid, 'queued')
+        self.assertNotEqual(rc, 0, out)
+        self.deliver('Create artifact', ident='queued', at=11)
+        self.clock = 30
+        rc, out = self.cli(C, 'sent1', qid, 'queued')
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn('receipt_recording_failure', self.state())
+
+    def test_finding_validated_retry_clears_its_own_failure(self):
+        state = self.state()
+        state['proposed']['F1'] = dict(key='control', evidence_hash='hash', ts=ts(5), message='Synthetic finding')
+        K.save_state(str(self.state_dir), state)
+        rc, out = self.cli(K, '--sent', 'F1', '--message-id', 'finding-delivery')
+        self.assertNotEqual(rc, 0, out)
+        self.deliver('Synthetic finding', ident='finding-delivery', at=11)
+        rc, out = self.cli(K, '--sent', 'F1', '--message-id', 'finding-delivery')
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn('receipt_recording_failure', self.state())
+        self.assertEqual(self.state()['receipt_recording_recoveries'][0]['operation'], 'sent')
 
 
 if __name__ == '__main__':

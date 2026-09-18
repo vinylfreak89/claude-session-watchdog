@@ -11,9 +11,33 @@ class EvidenceError(ValueError):
 
 
 def recording_failed(state, operation, reason, item_id=None, message_id=None):
-    """Retain the first recording failure for human review; never credit or reset it."""
+    """Retain the first failure until that exact recording succeeds with evidence."""
     state.setdefault('receipt_recording_failure', dict(operation=operation, reason=str(reason),
                      item_id=item_id, message_id=message_id, at=W.now_iso()))
+
+
+def recording_succeeded(state, operation, receipt, actor, item_id=None):
+    """Called only after a recording handler fully validates and records delivery.
+
+    A healthy unrelated send is not recovery of the failed operation. Preserve
+    the failure verbatim before removing its latch, even for idempotent retries.
+    There is no command, timeout or owner-ack bypass for this transition.
+    """
+    fault = state.get('receipt_recording_failure')
+    if (not isinstance(fault, dict) or not fault.get('reason') or not actor
+            or fault.get('operation') != operation or fault.get('item_id') != item_id
+            or not fault.get('message_id') or fault['message_id'] != receipt['id']):
+        return False
+    history = state.get('receipt_recording_recoveries', [])
+    if not isinstance(history, list):
+        print('STUCK: receipt recovery history is unreadable; cannot clear failure')
+        return False
+    state.setdefault('receipt_recording_recoveries', []).append(dict(
+        failure=dict(fault), cleared_at=W.now_iso(), actor=actor,
+        operation=operation, item_id=item_id, message_id=receipt['id'], delivery_ts=receipt['ts']))
+    del state['receipt_recording_failure']
+    print('RECEIPT RECORDING RECOVERED: %s, message %s; prior failure retained' % (operation, receipt['id']))
+    return True
 
 
 def recording_problem(sess, state):

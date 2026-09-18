@@ -159,6 +159,7 @@ def answered_allowed(tx_path, self_sel, state, owner_ack, message_id=None):
         return True, 'owner acknowledged: %s' % W.short(str(owner_ack).strip(), 80)
     try:
         rec, changed = D.record_delivery(tx_path, self_sel, state, message_id)
+        D.recording_succeeded(state, 'answered', rec, self_sel)
         return True, 'delivered record %s at %s' % (rec['id'], rec['ts'])
     except D.EvidenceError as exc:
         return False, str(exc)
@@ -480,7 +481,11 @@ def run(a, ap):
             try:
                 actor = W.find_session(a.self_sel)['sessionId'] if a.self_sel else None
                 entry = TD.record_acknowledgement(sess, actor, state, a.rest[0], a.rest[2], a.rest[3])
+                D.recording_succeeded(state, 'answered',
+                                      dict(id=entry['message_id'], ts=entry['delivery_ts']), actor)
             except (D.EvidenceError, OSError, SystemExit) as exc:
+                D.recording_failed(state, 'answered', exc, message_id=a.rest[2])
+                WK.save_state(a.state_dir, state)
                 print('REFUSED: %s' % exc); return 1
             WK.save_state(a.state_dir, state)
             print('answered %s by %s with target delivery %s\nACKNOWLEDGED: %s' %
@@ -696,11 +701,12 @@ def run(a, ap):
             return 1
         try:
             rec, changed = D.record_delivery(W.transcript_path(sess), a.self_sel, state, mid, queue_id=i)
+            recovered = D.recording_succeeded(state, 'sent1', rec, a.self_sel, item_id=i)
         except D.EvidenceError as exc:
             D.recording_failed(state, 'sent1', exc, item_id=i, message_id=mid)
             WK.save_state(a.state_dir, state)
             print('REFUSED: %s' % exc); return 1
-        if changed:
+        if changed or recovered:
             WK.save_state(a.state_dir, state)
         print('item %s delivered at %s; OWED until %s' % (i, rec['ts'], spec)); return 0
     if a.mode == 'owed':
@@ -726,6 +732,8 @@ def run(a, ap):
             print('   NUDGE %-22s %s  (%d resend(s))  -- re-send it, then: wd.sh nudged %s'
                   % (k, why, q.get('resends', 0), k))
         if not rows: print('   nothing owed')
+        for episode in state.get('receipt_recording_recoveries', []):
+            print('RECEIPT RECORDING RECOVERY: %s' % json.dumps(episode, ensure_ascii=False, sort_keys=True))
         for entry in state.get('acknowledged_turns', []) if isinstance(state.get('acknowledged_turns', []), list) else []:
             print('RECORDED TURN ACKNOWLEDGEMENT (operator report, revalidated above): %s' %
                   json.dumps(entry, ensure_ascii=False, sort_keys=True))

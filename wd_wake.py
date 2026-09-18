@@ -807,12 +807,14 @@ def run(a):
             sess = W.find_session(a.target)
             rec, changed = D.record_delivery(W.transcript_path(sess), a.self_sel, state, a.message_id,
                                              finding_ids=ids)
+            recovered = D.recording_succeeded(state, 'sent', rec, a.self_sel)
         except D.EvidenceError as exc:
             D.recording_failed(state, 'sent', exc, message_id=a.message_id)
             save_state(a.state_dir, state)
             print('REFUSED: %s' % exc); return 1
-        if changed:
+        if changed or recovered:
             save_state(a.state_dir, state)
+        if changed:
             for fid in ids:
                 rewrite_status(a.state_dir, fid, 'sent', a.message_id)
                 log_line(a.state_dir, '%s SENT %s %s' % (rec['ts'], fid, a.message_id))
