@@ -2,6 +2,7 @@
 import hashlib
 import json
 import math
+import os
 import re
 
 import wd_lib as W
@@ -98,7 +99,35 @@ def recording_problem(sess, state):
     return None
 
 
+_RECORDS_CACHE = {}
+
+
 def read_records(path):
+    """Parse a transcript once per process per file version.
+
+    A single `owed` pass re-read the two transcripts 204 times (measured
+    2026-09-18: 171 of 188 seconds, files of 104 and 322 MB), because every
+    check opens the whole file. The key is the file's identity AND its size and
+    mtime, so an appended record invalidates the cache and a stale view can never
+    be served. Callers get a fresh list over shared record dicts; nothing in the
+    watchdog mutates a transcript record (audited when this was added).
+    """
+    try:
+        st = os.stat(path)
+    except OSError as exc:
+        raise EvidenceError('cannot read complete transcript: %s' % exc)
+    key = (os.path.realpath(path), st.st_size, st.st_mtime_ns)
+    cached = _RECORDS_CACHE.get(key)
+    if cached is not None:
+        return list(cached)
+    records = _read_records_uncached(path)
+    for stale in [k for k in _RECORDS_CACHE if k[0] == key[0]]:
+        del _RECORDS_CACHE[stale]
+    _RECORDS_CACHE[key] = records
+    return list(records)
+
+
+def _read_records_uncached(path):
     records = []
     try:
         with open(path, encoding='utf-8') as f:
