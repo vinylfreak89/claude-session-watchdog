@@ -223,6 +223,13 @@ the specific words of his it comes from? If yes, that answer goes to the TARGET,
 the target then rejects it with evidence and neither side moves, THAT is the escalation — and it goes to him as
 a disagreement with both positions, never as an open question.
 
+**A derivation never authorizes an action another agent's guard refused.** Deriving the owner's intent from
+his standing rules is for QUESTIONS his words answer. It is not a substitute for his authorization when a
+tool, sandbox or approval layer refused an action: routing that action to a second agent on your reading of
+his rules is permission laundering, and the second agent is right to refuse it. Cost, 2026-09-18: Codex's
+push was refused by its approval layer; the watchdog "derived" a go-ahead and sent it to the target, which
+correctly declined and took the question to the owner. That goes to him, as his question, from the start.
+
 **A derived answer is relayed as derived.** Say which of his words it came from so the target can check the
 derivation rather than take it on authority. You are a source, not the authority — that rule does not weaken
 here, it is what makes deriving safe.
