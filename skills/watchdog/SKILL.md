@@ -111,6 +111,10 @@ the file's directory and its name, with the file's mtime inside that call's wind
 notice for a backgrounded command). A `file` subject may be a directory; a new or changed file inside it,
 so attributed, satisfies it. Test an acceptance through the settle path (`owed`), not `wd.sh check`: the
 two readers are not the same code, and a spec `check` accepts can still be one `owed` can never pass.
+**Name the deliverable, not the place it goes.** A `file <directory>` acceptance passes on ANY new attributed
+file inside it -- including the target's working files. Measured 2026-09-18: the first experiment wrote its
+scratch into the renders folder, produced no renders, and its item closed as "produced and verified". When the
+item asks for specific outputs, the item names their file paths and the acceptance checks those paths.
 
 The exception is an item that changes what the target is doing RIGHT NOW — a wrong direction it is actively
 working from, or a destructive risk. Queue that with `--urgent`, send it immediately, and say why it could not
