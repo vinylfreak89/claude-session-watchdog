@@ -22,6 +22,14 @@ def recording_succeeded(state, operation, receipt, actor, item_id=None):
     A healthy unrelated send is not recovery of the failed operation. Preserve
     the failure verbatim before removing its latch, even for idempotent retries.
     There is no command, timeout or owner-ack bypass for this transition.
+
+    The recovering delivery id MUST equal the one that failed. That makes a latch
+    caused by a wrong id unreachable by a corrected retry, which was briefly
+    treated here as a defect and relaxed. It is not one: a refused recording means
+    a send whose record is in an unknown state, and a different id is a different
+    delivery, so the stop is correct and the review is the owner's. The recurrence
+    it was blamed for had another cause entirely -- a delivery absorbed mid-turn
+    carries no uuid, so no correct id existed to retry with (see `absorbed_id`).
     """
     fault = state.get('receipt_recording_failure')
     if (not isinstance(fault, dict) or not fault.get('reason') or not actor
@@ -163,9 +171,71 @@ def socket_sender_matches(record, sender, body):
             message.strip() == body and epoch(source.get('timestamp')) <= epoch(record.get('timestamp')))
 
 
+def absorbed_id(record):
+    """Address a delivery the host recorded without a uuid, by its own content.
+
+    A message that arrives while the target is mid-turn is written as a
+    queue-operation carrying no `uuid`, so it cannot be cited by one. The id is
+    derived from the record itself -- session, timestamp and exact content -- so
+    it is reproducible by anyone reading the same transcript and cannot be chosen
+    by the caller, which is the property `uuid` was relied on for.
+    """
+    seed = '\x00'.join([str(record.get('sessionId') or ''), str(record.get('timestamp') or ''),
+                        str(record.get('content') or '')])
+    return 'absorbed:' + hashlib.sha256(seed.encode('utf-8')).hexdigest()[:32]
+
+
+def is_absorbed_delivery(record):
+    return (record.get('type') == 'queue-operation' and record.get('operation') == 'remove'
+            and record.get('reason') == 'absorbed_mid_turn' and isinstance(record.get('content'), str))
+
+
+def sender_sent_text(sender, payload, not_after):
+    """Attribute an origin-less delivery by the sender's own successful send.
+
+    The absorbed record proves ARRIVAL by existing in the target transcript; this
+    establishes only that the configured sender is the author. It requires a
+    SendMessage whose message is exactly this payload and whose tool_result did
+    not error, at or before the arrival -- two independent transcripts agreeing,
+    never this session's assertion.
+    """
+    try:
+        records = read_records(W.transcript_path(W.find_session(sender)))
+    except (EvidenceError, OSError, SystemExit):
+        return False
+    failed = set()
+    for rec in records:
+        if rec.get('type') != 'user' or not isinstance(rec.get('message'), dict):
+            continue
+        for block in W._blocks(rec['message'].get('content'), 'tool_result'):
+            if block.get('is_error', False) is not False and block.get('tool_use_id'):
+                failed.add(block['tool_use_id'])
+    for rec in records:
+        if rec.get('type') != 'assistant' or not isinstance(rec.get('message'), dict):
+            continue
+        for use in W._blocks(rec['message'].get('content'), 'tool_use'):
+            if use.get('name') not in ('SendMessage', 'send_message') or use.get('id') in failed:
+                continue
+            message = (use.get('input') or {}).get('message')
+            if not isinstance(message, str) or message.strip() != payload:
+                continue
+            if epoch(rec.get('timestamp')) <= epoch(not_after):
+                return True
+    return False
+
+
 def delivered_text(record):
-    """Read only actual delivery surfaces, never queue operations or tool results."""
-    if record.get('type') == 'user':
+    """Read actual delivery surfaces only, never an enqueue or a tool result.
+
+    `absorbed_mid_turn` IS a delivery surface: the host removes the item from the
+    pending queue because it handed it to the running turn. An `add` is not, and
+    is still refused -- an enqueued message has not arrived.
+    """
+    if is_absorbed_delivery(record):
+        body = record['content']
+    elif record.get('type') == 'queue-operation':
+        raise EvidenceError('queue operation %r is not a delivery' % record.get('operation'))
+    elif record.get('type') == 'user':
         message = record.get('message')
         if not isinstance(message, dict):
             raise EvidenceError('delivery message is not an object')
@@ -184,9 +254,14 @@ def delivered_text(record):
 
 def delivery(record, sender):
     """Read the delivered envelope, excluding the host's appended guidance."""
+    absorbed = is_absorbed_delivery(record)
     origin = record.get('origin')
-    if not sender or not isinstance(origin, dict) or origin.get('kind') != 'peer':
+    if not sender or (not absorbed and (not isinstance(origin, dict) or origin.get('kind') != 'peer')):
         raise EvidenceError('delivery has no structural peer provenance for this sender')
+    if absorbed:
+        # The host writes no origin block on an absorbed record. Authorship comes
+        # from the sender's own transcript instead; every other check is unchanged.
+        origin = {}
     body = delivered_text(record)
     # Start at the delivered message, never search inside prose for a quotation.
     # Attributes describe the host format; only `from` is an author identity.
@@ -198,7 +273,8 @@ def delivery(record, sender):
     pairs = re.findall(r'([\w:-]+)="([^"<>]*)"', wrapper['attrs'])
     attrs = dict(pairs)
     payload = wrapper['body'].strip()
-    if (len(attrs) != len(pairs) or not attrs.get('from') or attrs['from'] != origin.get('from') or
+    if (len(attrs) != len(pairs) or not attrs.get('from') or
+            (not absorbed and attrs['from'] != origin.get('from')) or
             '<cross-session-message' in payload.lower() or
             len(re.findall(r'</?cross-session-message\b', body, re.I)) != 2):
         raise EvidenceError('delivery must contain one matching peer envelope')
@@ -207,6 +283,15 @@ def delivery(record, sender):
         raise EvidenceError('unrecognized text after the delivered peer envelope')
     if 'body' in origin and (not isinstance(origin['body'], str) or origin['body'].strip() != payload):
         raise EvidenceError('peer origin body disagrees with the delivered envelope')
+    if absorbed:
+        epoch(record.get('timestamp'))
+        # Same evidence standard as the origin-bearing path: the host-rendered
+        # `from` identifies the sender, and a socket alias falls back to the
+        # sender's own successful send. Neither is this session's assertion.
+        if attrs['from'] != sender and not sender_sent_text(sender, payload, record['timestamp']):
+            raise EvidenceError('absorbed delivery is not attributable to this sender; a socket alias '
+                                'needs a matching successful send in the sender transcript')
+        return dict(id=absorbed_id(record), ts=record['timestamp'], body=payload)
     if origin.get('from') != sender and not socket_sender_matches(record, sender, payload):
         raise EvidenceError('delivery has no structural peer provenance for this sender; '
                             'a socket peer needs a matching successful SendMessage result in the sender transcript')
@@ -221,7 +306,8 @@ def receipt(path, sender, ident):
     if not ident:
         raise EvidenceError('a target transcript delivery uuid is required')
     records = read_records(path)
-    hits = [(i, r) for i, r in enumerate(records) if r.get('uuid') == ident]
+    hits = [(i, r) for i, r in enumerate(records)
+            if r.get('uuid') == ident or (is_absorbed_delivery(r) and absorbed_id(r) == ident)]
     if len(hits) != 1:
         raise EvidenceError('delivery uuid must identify exactly one transcript record')
     index, record = hits[0]
