@@ -4,6 +4,34 @@ import unittest
 from send_contract_support import ContractCase, C, K, SELF, ts
 
 class DispositionContract(ContractCase):
+    def test_later_completed_turn_supersedes_narration_only(self):
+        self.turn('later', 2, 3)
+        out = self.poll()
+        self.assertNotIn(ts(1) + '  [', out)
+        self.assertIn(ts(3) + '  [not answered or held]', out)
+
+    def test_question_survives_later_completed_turn(self):
+        self.records(dict(type='assistant', timestamp=ts(2), message=dict(
+            content=[dict(type='text', text='Which option should I use?')], stop_reason='end_turn')))
+        self.turn('later', 3, 4)
+        out = self.poll()
+        self.assertIn(ts(2) + '  [not answered or held]', out)
+        self.assertIn(ts(4) + '  [not answered or held]', out)
+
+    def test_open_later_turn_does_not_supersede_head(self):
+        self.records(dict(type='user', uuid='open', promptId='open', timestamp=ts(2),
+                          origin=dict(kind='human'), message=dict(content='Synthetic new work')))
+        out = self.poll()
+        self.assertIn(ts(1) + '  [not answered or held]', out)
+
+    def test_supersession_preserves_relay_duty(self):
+        self.turn('later', 2, 3)
+        state = self.state(); state['last_relay_ts'] = ''
+        K.save_state(str(self.state_dir), state)
+        out = self.poll()
+        self.assertIn(ts(1) + '  [not relayed]', out)
+        self.assertIn(ts(3) + '  [not relayed + not answered or held]', out)
+
     def test_current_message_question_cannot_be_held_or_closed(self):
         self.tool('SendMessage', dict(to=SELF, recipient=SELF, type='message', message='Which option should I implement?'))
         self.records(dict(type='assistant', timestamp=ts(22), message=dict(

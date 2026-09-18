@@ -17,7 +17,7 @@
         runs the check, builds the fixed-form message from ITS output (the model supplies class and quote only),
         applies dedupe and the quiet rule, logs it to findings.md and proposes it. Then: wd.sh sent Fn <message_id>.
 The model does the reading; this does the measuring and the wording. It cannot emit a result it did not compute."""
-import os, sys, json, argparse, glob, time, collections
+import os, sys, json, argparse, glob, time, collections, copy
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wd_lib as W
 import wd_state as S
@@ -175,6 +175,7 @@ def owed(sess, state, self_sel=None):
     since = tracking.get('since')
     done = [t for t in turns if t.end_state != 'open'
             and (not since or D.epoch(t.end_ts) >= D.epoch(since))]
+    latest = max((D.epoch(t.end_ts) for t in done), default=None)
     relayed = state.get('last_relay_ts') or ''
     answered = D.answered_turns(W.transcript_path(sess), self_sel, state)
     rows = []
@@ -188,7 +189,12 @@ def owed(sess, state, self_sel=None):
         owner_ack = state.get('owner_ack') or {}
         owner_acknowledged = bool(str(owner_ack.get('words') or '').strip() and owner_ack.get('at')
                                   and D.epoch(t.end_ts) <= D.epoch(owner_ack['at']))
-        if not (historical or t.end_ts in answered or held or closed or owner_acknowledged):
+        # Owner's structural supersession rule: older narration needs no separate
+        # response after a later completed turn. Reuse the conservative request
+        # reader; questions survive. This answers RESPOND only, never RELAY.
+        superseded = (latest is not None and D.epoch(t.end_ts) < latest
+                      and not TD.question_evidence(t))
+        if not (historical or t.end_ts in answered or held or closed or owner_acknowledged or superseded):
             why.append('not answered or held')
         if not why: continue
         text = ' '.join(x for _, x in t.assistant_texts)
@@ -242,6 +248,71 @@ def settle_acted(a, sess, state):
     return closed
 
 
+def verified_item_receipt(sess, state, item, actor):
+    """Read the existing delivery binding; never reconstruct a missing receipt."""
+    ident = item.get('message_id')
+    if not item.get('sent') or not ident or ident not in (state.get('send_receipts') or {}):
+        raise D.EvidenceError('answered evidence requires an already registered item delivery')
+    rec, changed = D.record_delivery(W.transcript_path(sess), actor, copy.deepcopy(state),
+                                     ident, queue_id=item.get('id'))
+    if changed or rec['ts'] != item['sent']:
+        raise D.EvidenceError('item delivery does not match its registered receipt')
+    return rec
+
+
+def evidence_answers(sess, state):
+    """Reports stay on their original archived items, visible on every owed poll."""
+    reports = []
+    for item in state.get('owner_queue_sent') or []:
+        entries = item.get('answers', [])
+        if not isinstance(entries, list):
+            raise D.EvidenceError('unreadable answered evidence history')
+        for entry in entries:
+            if (not isinstance(entry, dict) or entry.get('target') != sess['sessionId']
+                    or any(not isinstance(entry.get(k), str) or not entry[k].strip()
+                           for k in ('actor', 'at', 'evidence'))
+                    or not isinstance(entry.get('open', ''), str)):
+                raise D.EvidenceError('answered evidence lacks its report or attribution')
+            rec = verified_item_receipt(sess, state, item, entry['actor'])
+            if D.epoch(entry['at']) < D.epoch(rec['ts']):
+                raise D.EvidenceError('answered evidence predates item delivery')
+            reports.append((item, entry, rec))
+    return reports
+
+
+def record_evidence_answer(a, sess, state, item_id, evidence, residue):
+    """Owner-authorized third route on answered, not a mechanical acceptance PASS.
+
+    This is weaker than a passing mechanical check. The owner chose a prose
+    report judged by him over another rule hierarchy the operator could satisfy
+    without doing the work. We retain the requirement and attributed report;
+    we do not parse or score the report, or turn its residue into his obligations.
+    """
+    if not evidence.strip() or (residue is not None and not residue.strip()):
+        raise D.EvidenceError('answered requires nonempty evidence and nonempty supplied open text')
+    if not a.self_sel:
+        raise D.EvidenceError('answered evidence requires acting session attribution')
+    actor = W.find_session(a.self_sel)['sessionId']
+    matches = [q for q in list(state.get('owner_queue') or []) + list(state.get('owner_queue_sent') or [])
+               if q.get('id') == item_id]
+    if len(matches) != 1:
+        raise D.EvidenceError('answered evidence needs exactly one known item')
+    item = matches[0]
+    rec = verified_item_receipt(sess, state, item, actor)
+    evidence_answers(sess, state)  # refuse malformed history before appending anything
+    now = W.now_iso()
+    if D.epoch(now) < D.epoch(rec['ts']):
+        raise D.EvidenceError('answered evidence cannot predate delivery')
+    if not isinstance(item.get('answers', []), list):
+        raise D.EvidenceError('unreadable answered evidence history')
+    entry = dict(at=now, actor=actor, target=sess['sessionId'], evidence=evidence, open=residue or '')
+    item.setdefault('answers', []).append(entry)
+    if item in (state.get('owner_queue') or []):
+        state.setdefault('owner_queue_sent', []).append(item)
+        state['owner_queue'].remove(item)
+    return item, entry
+
+
 def next_item(sess, state):
     """The send gate, as ONE function so a control can exercise IT rather than re-derive it.
 
@@ -268,6 +339,10 @@ def next_item(sess, state):
     problem = D.recording_problem(sess, state)
     if problem:
         return 'stuck', None, 'STUCK: %s. SEND NOTHING.' % problem, len(q)
+    try:
+        evidence_answers(sess, state)
+    except (D.EvidenceError, OSError, SystemExit) as exc:
+        return 'stuck', None, 'STUCK: cannot validate recorded answer evidence: %s. SEND NOTHING.' % exc, len(q)
     identities = [x.get('id') for x in state.get('owner_queue') or []]
     if len(identities) != len(set(identities)):
         return 'held', None, 'AMBIGUOUS QUEUE IDS. SEND NOTHING.', len(q)
@@ -359,6 +434,26 @@ def run(a, ap):
     if TD.initialize_tracking(state):
         WK.save_state(a.state_dir, state)
     if a.mode == 'answered':
+        if '--evidence' in a.rest or '--open' in a.rest:
+            if ('--owner-ack' in a.rest or a.rest.count('--evidence') != 1
+                    or a.rest.count('--open') > 1):
+                print('REFUSED: choose one answered route; evidence and open options cannot repeat')
+                return 1
+            args = argparse.ArgumentParser(prog='answered', allow_abbrev=False)
+            args.add_argument('item_id')
+            args.add_argument('--evidence', required=True)
+            args.add_argument('--open', dest='residue')
+            report = args.parse_args(a.rest)
+            try:
+                item, entry = record_evidence_answer(a, sess, state, report.item_id, report.evidence, report.residue)
+            except (D.EvidenceError, OSError, SystemExit) as exc:
+                print('REFUSED: %s' % exc); return 1
+            WK.save_state(a.state_dir, state)
+            print('answered %s by %s: recorded operator evidence, for owner judgement' % (item['id'], entry['actor']))
+            print('ORIGINAL ITEM: %s\nORIGINAL ACCEPTANCE: %s\nEVIDENCE: %s' %
+                  (item['text'], item['acted_when'], entry['evidence']))
+            if entry['open']: print('STILL OPEN (report only): %s' % entry['open'])
+            return 0
         if a.rest[:1] == ['--owner-ack']:
             ack = ' '.join(a.rest[1:]).strip()
             ok, why = answered_allowed(W.transcript_path(sess), a.self_sel, state, ack)
@@ -591,6 +686,12 @@ def run(a, ap):
         for u in unacted:
             print('   %s sent %s -- waiting on: %s' % (u['id'], u['sent'], u['spec']))
             print('      %s: %s' % (u['status'], W.short(u['evidence'], 300)))
+        reports = evidence_answers(sess, state)
+        print('RECORDED ANSWER EVIDENCE (operator reports for owner judgement): %d' % len(reports))
+        for item, entry, _ in reports:
+            print('   %s at %s by %s\nORIGINAL ITEM: %s\nORIGINAL ACCEPTANCE: %s\nEVIDENCE: %s' %
+                  (item['id'], entry['at'], entry['actor'], item['text'], item['acted_when'], entry['evidence']))
+            if entry['open']: print('STILL OPEN (report only): %s' % entry['open'])
         # The owner's primitive, 2026-09-10: "keep track of what you've requested and what the
         # engine has and hasn't answered... keep reminding yourself, and not interrupting, but
         # nudging for answers when you don't get them." So open questions ride on the check that

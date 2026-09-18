@@ -5,6 +5,10 @@ from send_contract_support import ContractCase, C, ts
 
 class OwnerAckContract(ContractCase):
     def test_explicit_owner_ack_restores_turn_disposition(self):
+        # A real question survives automatic narration supersession; this still
+        # tests owner-ack's intentionally global scope across both prior turns.
+        self.records(dict(type='assistant', timestamp=ts(1), message=dict(
+            content=[dict(type='text', text='Which option should I use?')], stop_reason='end_turn')))
         self.turn('second', 2, 3)
         self.assertIn(ts(1), self.poll())
         self.clock = 5

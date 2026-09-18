@@ -141,6 +141,10 @@ class ReceiptContract(ContractCase):
                 self.assertNotIn('last_send_ts', self.state())
 
     def test_one_receipt_answers_only_one_prior_turn(self):
+        # Narration is now superseded by a later completed turn. Keep a question
+        # outstanding so this still detects a receipt wrongly spent twice.
+        self.records(dict(type='assistant', timestamp=ts(1), message=dict(
+            content=[dict(type='text', text='Which option should I use?')], stop_reason='end_turn')))
         self.turn('second', 2, 3)
         self.queue()
         self.deliver('Create artifact')
