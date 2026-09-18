@@ -28,25 +28,17 @@ copy; no missing delivery is reconstructed. Malformed archived answer evidence
 makes the common send gate STUCK rather than silently accepting the archive as
 completed work. Existing receipt answering and owner-ack remain available.
 
-## Remaining scope decision: item closure versus the reply head
+## Scope decision resolved in the follow-up repair
 
-The evidence route above closes the identified delivered item. It does **not**
-claim an unrelated turn was answered. The requested relaxation of the unrelayed
-turn gate has not been implemented pending clarification of that scope.
+At this commit the relay-gate relaxation was pending clarification: the item's
+receipt identifies the turn before delivery, not its later close-out response.
+The subsequent ruling credits only the turn containing the reply that actually
+satisfied a message acceptance. Non-message acceptances grant no exemption.
 
-An existing item receipt's `turn_ts` identifies the completed turn **before**
-delivery (`wd_receipts.receipt`), not the later close-out response. In a synthetic
-record, delivery at 10:00:10 points to the prior turn ending at 10:00:01, while
-the response ends at 10:00:22. Reusing that field for a later reply is wrong;
-choosing the latest completed turn merely because it is latest can exempt an
-unrelated question. Automatically superseding narration does not establish
-that a retained question or head belongs to a particular item.
-
-The operator-facing clarification asks which turn an item-specific evidence
-answer should credit. No new identity contract, inferred work thread, default
-span or global answer watermark was invented. The send gate continues to block
-unrelayed turns while that interpretation is unresolved. This is an explicit
-remaining part of the requested work, not a claim that the whole repair is done.
+That follow-up is implemented and validated in
+[Credit the turn whose reply satisfied acceptance](acceptance-reply-turn.md).
+The historical census and controls below describe the earlier repair; the
+follow-up reports the resulting six remaining turns and full gate controls.
 
 ## Owner-ack scope
 
@@ -145,5 +137,6 @@ python3 tests/run_all.py
 RESULT: 29/29 scripts passed; 0 failed; exclusions: 0
 ```
 
-This is validation of the implemented changes, not validation of the pending
-gate relaxation. No tests were excluded or deleted from the existing suite.
+This was validation of the earlier changes; the linked follow-up adds the gate
+controls and its complete suite result. No tests were excluded or deleted from
+the existing suite.

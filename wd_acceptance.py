@@ -10,6 +10,7 @@ import math
 import os
 import re
 import shlex
+from typing import Optional
 
 import wd_lib as W
 import wd_receipts as D
@@ -23,6 +24,8 @@ class Status(str, Enum):
 class Result:
     status: Status
     evidence: str
+    # Computed from the transcript, never persisted as an exemption marker.
+    reply_turn_ts: Optional[str] = None
 
 @dataclass(frozen=True)
 class Kind:
@@ -323,6 +326,27 @@ def evaluate_task(a, sess, item, args, facts, calls):
                   'session-scoped launch=%s; post-delivery harness completion=%s' % (launched, notified))
 
 
+def unique_reply_turn(sess, calls):
+    """Credit only one completed turn containing every qualifying candidate call.
+
+    If multiple calls could explain a delivery, choosing one would be a guess.
+    Old uses of an ID outside the call's timestamp do not identify this call.
+    A still-open turn or an ambiguous end timestamp earns no turn exemption.
+    """
+    turns = W.split_turns(D.read_records(W.transcript_path(sess)))
+    matched = []
+    for call in calls:
+        candidates = [t for t in turns if any(u.get('id') == call['id'] and u.get('ts') == call['ts']
+                                             for u in t.tool_uses)]
+        if len(candidates) != 1 or candidates[0].end_state != 'end_turn': return None
+        matched.append(candidates[0])
+    if not matched or any(t is not matched[0] for t in matched): return None
+    stamp = matched[0].end_ts
+    if sum(t.end_ts == stamp for t in turns) != 1: return None
+    if any(D.epoch(stamp) < D.epoch(c['result_ts']) for c in calls): return None
+    return stamp
+
+
 def evaluate_message(a, sess, item, args, facts, calls):
     require_count(facts, 'count')
     sender = W.find_session(a.self_sel)
@@ -333,10 +357,13 @@ def evaluate_message(a, sess, item, args, facts, calls):
     for record in D.read_records(W.transcript_path(sender)):
         try: rec = D.delivery(record, sess['sessionId'])
         except D.EvidenceError: continue
-        if expected in rec['body'].splitlines() and any(
-                rec['body'] == W.message_input(c)['message'].strip()
-                and D.epoch(rec['ts']) >= D.epoch(c['ts']) for c in sent):
-            return Result(Status.PASS, 'matching reply delivered to watchdog in record %s' % rec['id'])
+        matching = [c for c in sent if rec['body'] == W.message_input(c)['message'].strip()
+                    and D.epoch(rec['ts']) >= D.epoch(c['ts'])]
+        if expected in rec['body'].splitlines() and matching:
+            turn = unique_reply_turn(sess, matching)
+            detail = ('; qualifying reply turn %s' % turn if turn else
+                      '; no unique completed reply turn: relay remains blocking')
+            return Result(Status.PASS, 'matching reply delivered to watchdog in record %s%s' % (rec['id'], detail), turn)
     return Result(Status.NOT_YET, 'target reply has not been delivered to the watchdog')
 
 
@@ -376,6 +403,6 @@ def evaluate(a, sess, state, item):
         value = KINDS[kind].evaluate(a, sess, item, args, facts, calls)
         if not isinstance(value, Result) or not isinstance(value.status, Status):
             raise D.EvidenceError('acceptance did not return a typed decision')
-        return Result(value.status, '%s: %s; %s' % (checked, description, value.evidence))
+        return Result(value.status, '%s: %s; %s' % (checked, description, value.evidence), value.reply_turn_ts)
     except (Exception, SystemExit) as exc:
         return Result(Status.UNDECIDED, '%s: %s' % (type(exc).__name__, exc))

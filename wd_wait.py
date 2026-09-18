@@ -55,7 +55,7 @@ def log(msg):
 def emit(line):
     sys.stdout.write(line + '\n'); sys.stdout.flush()
 
-def gate_lines(sess, state_dir):
+def gate_lines(sess, state_dir, self_sel=None):
     """The SEND GATE's verdict, computed and printed beside every event this hook emits.
 
     The hook already tells the watchdog what the target did. It did not tell it what it is allowed to
@@ -75,7 +75,8 @@ def gate_lines(sess, state_dir):
     try:
         import wd_check as C
         import wd_wake as WK
-        verdict, item, why, n = C.next_item(sess, WK.load_state(state_dir))
+        state = WK.load_state(state_dir)
+        verdict, item, why, n = (C.next_item(sess, state, self_sel) if self_sel else C.next_item(sess, state))
     except Exception as e:
         return ['NEXT: UNAVAILABLE (%s: %s) -- the gate did NOT run. Send nothing; run `wd.sh next`.'
                 % (type(e).__name__, e)]
@@ -469,7 +470,7 @@ def main():
         try: procs = len(W.live_children(sess))
         except Exception: procs = -1
         emit('AUDIT ct=%s idle_min=%d live=%d inflight=%d cec=%s open=%d' % (st['ct'], idle, procs, len(sj.get('in_flight') or []), st['cec'], 1 if _open else 0))
-        for g in gate_lines(sess, a.state_dir): emit(g)
+        for g in gate_lines(sess, a.state_dir, a.self_sel): emit(g)
         return 0
     while True:
         lines = w.poll(a.backstop)
@@ -480,14 +481,14 @@ def main():
             # The verdict rides with EVERY event, not only a turn end: a stall, an overdue reply and an
             # interruption all change what may be sent, and all three were points at which the queue was
             # bypassed. One computation per wake, after the event it is about.
-            for g in gate_lines(sess, a.state_dir): emit(g)
+            for g in gate_lines(sess, a.state_dir, a.self_sel): emit(g)
             if not a.follow: return 0
         if a.max_wait and time.time() - t0 > a.max_wait:
             _a = w.activity_ms()
             idle = int(time.time() - _a / 1000.0) if _a else -1
             st_ = w.state_json()
             emit('HEARTBEAT idle_min=%d ct=%s inflight=%d open=%d' % (idle / 60.0, w.ct, len(st_.get('in_flight') or []), 1 if w.turn_open else 0))
-            for g in gate_lines(sess, a.state_dir): emit(g)
+            for g in gate_lines(sess, a.state_dir, a.self_sel): emit(g)
             return 3
 
 if __name__ == '__main__':

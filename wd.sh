@@ -90,7 +90,7 @@ case "$cmd" in
             *) echo "wd.sh queue add [--urgent] [--acted-when \"<check>\"] \"<owner's words>\" | list | acted-when <id> \"<check>\" | hold <id> \"<condition>\"" >&2; exit 2 ;;
           esac ;;
   outcome) id=$1; v=$2; shift 2; exec $PY "$D/wd_wake.py" --state-dir "$S" --outcome "$id" "$v" --reason "$*" ;;
-  due)    exec $PY "$D/wd_wake.py" --state-dir "$S" --target "$TARGET" --due ;;
+  due)    exec $PY "$D/wd_wake.py" "${WAKE_ARGS[@]}" --due ;;
   owe)    sub=$1; shift
           case "$sub" in
             add)    g=""; [ "$1" = "--gated-on" ] && { g="$2"; shift 2; }

@@ -506,7 +506,7 @@ def print_report(a, sess, st, state, R, trigger, wall, bytes_read):
     T = R['T']
     q = state.get('owner_queue') or []
     import wd_check as C
-    verdict, chosen, reason, _ = C.next_item(sess, state)
+    verdict, chosen, reason, _ = C.next_item(sess, state, getattr(a, 'self_sel', None))
     sendable = [chosen] if verdict == 'send' else []
     held = [it for it in q if it.get('hold_until')]
     if sendable:
@@ -666,7 +666,7 @@ def run(a):
         _open_turn = turns[-1] if turns and turns[-1].end_state == 'open' else None
         receptive = (not procs) and (not infl) and idle_min > 0.5 and _open_turn is None
         import wd_check as C
-        verdict, chosen, reason, _ = C.next_item(sess, state)
+        verdict, chosen, reason, _ = C.next_item(sess, state, a.self_sel)
         sendable = [chosen] if verdict == 'send' else []
         held = [it for it in q if it.get('hold_until')]
         print('OWNER ITEMS SENDABLE NOW: %d' % len(sendable))

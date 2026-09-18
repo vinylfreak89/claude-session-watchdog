@@ -18,6 +18,7 @@
         applies dedupe and the quiet rule, logs it to findings.md and proposes it. Then: wd.sh sent Fn <message_id>.
 The model does the reading; this does the measuring and the wording. It cannot emit a result it did not compute."""
 import os, sys, json, argparse, glob, time, collections, copy
+from types import SimpleNamespace
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wd_lib as W
 import wd_state as S
@@ -178,6 +179,7 @@ def owed(sess, state, self_sel=None):
     latest = max((D.epoch(t.end_ts) for t in done), default=None)
     relayed = state.get('last_relay_ts') or ''
     answered = D.answered_turns(W.transcript_path(sess), self_sel, state)
+    reply_turns = accepted_reply_turns(sess, state, self_sel)
     rows = []
     for t in done:
         why = []
@@ -194,12 +196,13 @@ def owed(sess, state, self_sel=None):
         # reader; questions survive. This answers RESPOND only, never RELAY.
         superseded = (latest is not None and D.epoch(t.end_ts) < latest
                       and not TD.question_evidence(t))
-        if not (historical or t.end_ts in answered or held or closed or owner_acknowledged or superseded):
+        if not (historical or t.end_ts in answered or t.end_ts in reply_turns
+                or held or closed or owner_acknowledged or superseded):
             why.append('not answered or held')
         if not why: continue
         text = ' '.join(x for _, x in t.assistant_texts)
         rows.append(dict(ts=t.end_ts, why=' + '.join(why),
-                         head=W.short(t.final_text or '', 130)))
+                         head=W.short(t.final_text or '', 130), relay_exempt=t.end_ts in reply_turns))
     return rows
 
 
@@ -313,7 +316,31 @@ def record_evidence_answer(a, sess, state, item_id, evidence, residue):
     return item, entry
 
 
-def next_item(sess, state):
+def accepted_reply_turns(sess, state, self_sel):
+    """Re-derive a closed message item's satisfying turn; never guess its thread.
+
+    The receipt's turn_ts is the turn BEFORE delivery, not the reply. Prose
+    reports can close an item, but grant no turn credit without an independently
+    passing message acceptance. Non-message acceptances exempt no relay at all.
+    """
+    if not self_sel: return set()
+    out = set()
+    args = SimpleNamespace(self_sel=self_sel, repo=None, ledger=None)
+    for item in state.get('owner_queue_sent') or []:
+        try:
+            if A.parse(item.get('acted_when'))[0] != 'msg-to-watchdog': continue
+            if not (item.get('answers') or (item.get('acted_status') == 'pass' and item.get('acted_evidence'))):
+                continue
+            verified_item_receipt(sess, state, item, self_sel)
+            decision = A.evaluate(args, sess, state, item)
+            if decision.status is A.Status.PASS and decision.reply_turn_ts:
+                out.add(decision.reply_turn_ts)
+        except (D.EvidenceError, OSError, SystemExit):
+            continue  # unavailable/ambiguous evidence cannot exempt a relay
+    return out
+
+
+def next_item(sess, state, self_sel=None):
     """The send gate, as ONE function so a control can exercise IT rather than re-derive it.
 
     Receipt recording must be usable before any pacing decision. A recording
@@ -374,7 +401,11 @@ def next_item(sess, state):
     # that half gates; answering is what releasing the item DOES.
     # The pacing the owner asked for ("don't rapid fire the queue") is carried by hold_until below,
     # which is the control that actually waits for the WORK rather than for a turn boundary.
-    unrelayed = [r for r in owed(sess, state) if 'not relayed' in r['why']]
+    # The owner permits unrelated work while a verified close-out awaits relay.
+    # Exempt only the turn whose reply satisfied a closed message acceptance.
+    # Keep that row in owed; neither a prior delivery turn nor a later turn is it.
+    relay_rows = [r for r in owed(sess, state, self_sel) if 'not relayed' in r['why']]
+    unrelayed = [r for r in relay_rows if not r['relay_exempt']]
     if unrelayed:
         return 'owed', None, ('ITS LAST REPLY IS UNRELAYED (%d turn(s), oldest %s). %d queued. '
                               'SEND NOTHING -- read it and relay to the owner first.'
@@ -387,7 +418,10 @@ def next_item(sess, state):
     ok, why = acceptance_valid(sendable[0].get('acted_when'))
     if not ok or not sendable[0].get('acceptance_baseline'):
         return 'held', None, 'ACCEPTANCE UNAVAILABLE. SEND NOTHING: %s' % why, len(q)
-    return 'send', sendable[0], '', len(q)
+    exempt = [r['ts'] for r in relay_rows if r['relay_exempt']]
+    reason = ('Verified close-out turn(s) %s still owe relay; unrelated unheld work may proceed.' %
+              ', '.join(exempt)) if exempt else ''
+    return 'send', sendable[0], reason, len(q)
 
 
 def due_questions(sess, state, quiet_min):
@@ -595,7 +629,7 @@ def run(a, ap):
     # item, and only when the target is not mid-turn. An advisory queue was bypassed all evening
     # because nothing sat on the send path; this does.
     if a.mode == 'next':
-        verdict, item, why, n = next_item(sess, state)
+        verdict, item, why, n = next_item(sess, state, a.self_sel)
         if verdict == 'send':
             if why: print(why)
             print('SEND EXACTLY THIS ONE ITEM, then run:  wd.sh sent1 %s <target-delivery-uuid>' % item.get('id'))
@@ -667,7 +701,9 @@ def run(a, ap):
         # further down was not an alarm: 21 questions sat DUE for 30+ turns with 0 resends,
         # because nothing counted them as owed and nothing recorded a re-send either.
         print('OWED completed turns: %d  DUE NUDGES: %d' % (len(rows), len(due_now)))
-        for r in rows: print('   %s  [%s]  %s' % (r['ts'], r['why'], r['head']))
+        for r in rows:
+            print('   %s  [%s]  %s%s' % (r['ts'], r['why'], r['head'],
+                  ' (relay exempt from send gate: verified close-out reply)' if r['relay_exempt'] else ''))
         for k, q, why, age in due_now:
             print('   NUDGE %-22s %s  (%d resend(s))  -- re-send it, then: wd.sh nudged %s'
                   % (k, why, q.get('resends', 0), k))
