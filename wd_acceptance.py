@@ -44,6 +44,19 @@ def path_for(a, sess, path):
 
 
 def file_snapshot(path):
+    if os.path.isdir(path):
+        # A directory has no content to hash. Its children are recorded by size and
+        # mtime so a later write inside it is visible without reading every byte --
+        # a render directory can hold hundreds of megabytes.
+        children = {}
+        for root, _dirs, files in os.walk(path):
+            for name in files:
+                full = os.path.join(root, name)
+                try: st = os.stat(full)
+                except FileNotFoundError: continue
+                children[os.path.relpath(full, path)] = [st.st_size, st.st_mtime]
+        return dict(path=path, exists=True, is_dir=True, sha256=None, content=None,
+                    mtime=os.stat(path).st_mtime, children=children)
     try:
         with open(path, 'rb') as f:
             data = f.read()
@@ -181,10 +194,14 @@ def attributed_file(a, sess, item, args, calls):
     current = file_snapshot(path)
     if not current['exists']:
         return False, current
+    if current.get('is_dir'):
+        return attributed_directory(a, sess, item, before, current, calls)
     if current['mtime'] <= D.epoch(item['sent']):
         return False, current
     if current['sha256'] == before['sha256']:
         return False, current
+    if script_wrote(sess, path, current['mtime'], calls):
+        return True, current
     content = base64.b64decode(before['content']) if before['content'] is not None else None
     proved = False
     for call in calls:
@@ -224,6 +241,85 @@ def evaluate_file(a, sess, item, args, facts, calls):
     proved, current = attributed_file(a, sess, item, args, calls)
     return Result(Status.PASS if proved else Status.NOT_YET,
                   'target write verified: %s sha256=%s' % (current['path'], current['sha256']) if proved else 'no new target-attributed file contents')
+
+
+def background_completions(sess):
+    """task id -> earliest completion timestamp, from the host's own task notifications."""
+    done = {}
+    for record in D.read_records(W.transcript_path(sess)):
+        text = json.dumps(record, ensure_ascii=False)
+        if '<task-notification' not in text or '<status>completed</status>' not in text:
+            continue
+        for task in re.findall(r'<task-id>([^<]+)</task-id>', text):
+            stamp = record.get('timestamp')
+            if stamp and (task not in done or D.epoch(stamp) < D.epoch(done[task])):
+                done[task] = stamp
+    return done
+
+
+BACKGROUND_RE = re.compile(r'Command running in background with ID: (\S+?)\.')
+SCRIPT_SLACK_S = 1.0
+
+
+def script_wrote(sess, path, mtime, calls, completions=None):
+    """A file the target produced with a command rather than Write/Edit.
+
+    Write/Edit attribution replays the exact bytes; a script's output cannot be
+    replayed, so this is weaker and is stated as such. It requires ALL of: a
+    successful target Bash call after delivery whose command names both the
+    file's directory and its file name as literal text, and the file's mtime
+    inside that call's own execution window -- from the call to its result, or
+    for a backgrounded command to the host's completion notice for that task.
+    A mention alone never credits: `ls` of the path outside the write window
+    does not satisfy the timing half. SCRIPT_SLACK_S covers filesystem mtime
+    granularity at the close of the window, never its start.
+    """
+    names = {os.path.basename(path)}
+    dirs = {os.path.dirname(path), os.path.dirname(os.path.realpath(path))}
+    for d in list(dirs):
+        if d.startswith('/private/'): dirs.add(d[len('/private'):])
+    for call in calls:
+        if call['name'] != 'Bash': continue
+        command = call['input'].get('command') or ''
+        if not any(n in command for n in names) or not any(d in command for d in dirs): continue
+        start = D.epoch(call['ts'])
+        background = BACKGROUND_RE.search(call.get('result') or '')
+        if background:
+            if completions is None: completions = background_completions(sess)
+            end_ts = completions.get(background.group(1))
+            if not end_ts: continue
+            end = D.epoch(end_ts)
+        else:
+            end = D.epoch(call['result_ts'])
+        if start <= mtime <= end + SCRIPT_SLACK_S:
+            return True
+    return False
+
+
+def attributed_directory(a, sess, item, before, current, calls):
+    """A directory subject passes when a file inside it is new or changed since the
+    pre-delivery baseline, written after delivery, and attributed to the target --
+    by Write/Edit replay or by the script rule above. Untouched files never credit."""
+    old = before.get('children') or {}
+    sent = D.epoch(item['sent'])
+    completions = None
+    for rel, (size, mtime) in sorted(current['children'].items()):
+        if old.get(rel) == [size, mtime] or mtime <= sent: continue
+        full = os.path.join(current['path'], rel)
+        if any(c['name'] in ('Write', 'Edit') and isinstance(c['input'].get('file_path'), str)
+               and path_for(a, sess, c['input']['file_path']) == os.path.realpath(full) for c in calls):
+            return True, dict(current, path=full, sha256=file_digest(full))
+        if completions is None: completions = background_completions(sess)
+        if script_wrote(sess, full, mtime, calls, completions):
+            return True, dict(current, path=full, sha256=file_digest(full))
+    return False, current
+
+
+def file_digest(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1 << 20), b''): h.update(chunk)
+    return h.hexdigest()
 
 
 def previous_text(item):

@@ -251,6 +251,15 @@ def settle_acted(a, sess, state):
             item['acted_ts'] = W.now_iso()
             item['acted_status'] = decision.status.value
             item['acted_evidence'] = decision.evidence
+            if item.get('review') == 'owner':
+                # The machine half is done -- the work exists and the target produced it --
+                # but whether it is RIGHT is his call. It leaves the send gate (nothing waits
+                # on it) and becomes a READY review on his list, cleared from his own words.
+                item['acted_status'] = 'awaiting owner review'
+                item['review_decision'] = WK.add_owner_decision(
+                    state, 'REVIEW %s: %s | produced and verified: %s' % (
+                        item['id'], W.short(item.get('text', ''), 160), W.short(decision.evidence, 240)),
+                    None, review_of=item['id'])
             state.setdefault('owner_queue_sent', []).append(item)
             state['owner_queue'].remove(item)
             closed.append(item['id'])

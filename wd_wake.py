@@ -574,6 +574,21 @@ def print_report(a, sess, st, state, R, trigger, wall, bytes_read):
     print('      wd.sh wait  (re-arm the hook -- run it in the background every single wake)')
     print('cost: scripts %.1f s wall, %.1f MB transcript read' % (wall, bytes_read / 1e6))
 
+
+def add_owner_decision(state, text, gated_on=None, **extra):
+    """The ONE allocator for owner decisions. Never derive the id from len() or max():
+    clearing a decision would hand its id to the next one and overwrite a live entry
+    (cost, 2026-09-10: clearing D4 made the next add take D6 and destroy D6). The
+    counter is persistent and monotonic, and every caller goes through here."""
+    owe = state.setdefault('owner_decisions', {})
+    seq = int(state.get('owner_decision_seq') or 0)
+    seq = max(seq, max([int(k[1:]) for k in owe if k[1:].isdigit()] or [0])) + 1
+    state['owner_decision_seq'] = seq
+    oid = 'D%d' % seq
+    assert oid not in owe, 'owner-decision id %s already in use' % oid
+    owe[oid] = dict(id=oid, ts=W.now_iso(), text=text, gated_on=gated_on, **extra)
+    return oid
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--target'); ap.add_argument('--state-dir', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'state'))
@@ -587,7 +602,7 @@ def main():
     ap.add_argument('--max-digest', type=int, default=30); ap.add_argument('--bootstrap', action='store_true'); ap.add_argument('--replay', type=int, default=0)
     ap.add_argument('--no-state', action='store_true'); ap.add_argument('--json', action='store_true')
     ap.add_argument('--sent'); ap.add_argument('--message-id', default=''); ap.add_argument('--veto'); ap.add_argument('--reason', default='')
-    ap.add_argument('--queue-add'); ap.add_argument('--queue-urgent', action='store_true'); ap.add_argument('--queue-list', action='store_true'); ap.add_argument('--outcome', nargs=2, metavar=('ID','VERDICT')); ap.add_argument('--queue-clear'); ap.add_argument('--queue-hold'); ap.add_argument('--hold-until', default=''); ap.add_argument('--queue-acted-when'); ap.add_argument('--queue-drop'); ap.add_argument('--acted-when', default='')
+    ap.add_argument('--queue-add'); ap.add_argument('--queue-urgent', action='store_true'); ap.add_argument('--queue-list', action='store_true'); ap.add_argument('--outcome', nargs=2, metavar=('ID','VERDICT')); ap.add_argument('--queue-clear'); ap.add_argument('--queue-hold'); ap.add_argument('--hold-until', default=''); ap.add_argument('--queue-acted-when'); ap.add_argument('--queue-drop'); ap.add_argument('--acted-when', default=''); ap.add_argument('--queue-review', choices=('owner', 'machine'), default='machine')
     ap.add_argument('--due', action='store_true')
     ap.add_argument('--owe-add'); ap.add_argument('--gated-on', default=''); ap.add_argument('--owe-list', action='store_true')
     ap.add_argument('--owe-clear'); ap.add_argument('--owe-ungate')
@@ -613,13 +628,7 @@ def run(a):
             # not losing the owner's decisions. Cost, 2026-09-10: clearing D4 made the next add
             # take D6 and destroy the D6 that was already there. Max-of-existing has the same hole
             # (clear the highest and it comes back), so the counter is persistent and monotonic.
-            seq = int(state.get('owner_decision_seq') or 0)
-            seq = max(seq, max([int(k[1:]) for k in owe if k[1:].isdigit()] or [0]))
-            seq += 1
-            state['owner_decision_seq'] = seq
-            oid = 'D%d' % seq
-            assert oid not in owe, 'owner-decision id %s already in use' % oid
-            owe[oid] = dict(id=oid, ts=W.now_iso(), text=a.owe_add, gated_on=a.gated_on or None)
+            oid = add_owner_decision(state, a.owe_add, a.gated_on or None)
             save_state(a.state_dir, state); print('recorded %s%s' % (oid, (' GATED behind: ' + a.gated_on) if a.gated_on else ' READY'))
         # A CLOSE THAT MISSES MUST SAY SO. Both of these used to do nothing, print nothing and
         # exit 0 when the id was not there -- so `owe done D1` on an absent decision was
@@ -736,8 +745,8 @@ def run(a):
             state['owner_queue_seq'] = sequence
             q.append(dict(id='Q%d' % sequence, ts=W.now_iso(),
                           urgent=bool(a.queue_urgent), text=a.queue_add,
-                          acted_when=spec, acceptance_baseline=snapshot))
-            save_state(a.state_dir, state); print('queued %s%s' % (q[-1]['id'], ' URGENT' if q[-1]['urgent'] else ''))
+                          acted_when=spec, acceptance_baseline=snapshot, review=a.queue_review))
+            save_state(a.state_dir, state); print('queued %s%s%s' % (q[-1]['id'], ' URGENT' if q[-1]['urgent'] else '', ' REVIEW:owner' if q[-1]['review'] == 'owner' else ''))
         if a.queue_acted_when:
             # WHAT THE TARGET HAVING ACTED LOOKS LIKE. Separate from sending on purpose: this is a
             # pre-delivery requirement. The transcript gate above forbids retrofitting

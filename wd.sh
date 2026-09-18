@@ -13,6 +13,9 @@
 #   wd.sh relayed <turn end_ts>     mark turns up to here as relayed to the owner (a send answers them separately)
 #   wd.sh hold <turn end_ts> "why"  deliberately hold a turn: it is blocked on the owner
 #   wd.sh cost                      append this session's per-turn token cost to state/cost.tsv
+#   wd.sh queue add [--review owner|machine] "<text>"   --review owner: when the item's check passes it is NOT
+#                                   closed; it becomes a READY review in `owe list`, cleared from his own words.
+#                                   machine (default): the passing check closes it.
 #   wd.sh queue add "<text>"        hold an owner item until the next wake (add --urgent to send at once,
 #                                   --acted-when "<check>" to say what the target ACTING will look like)
 #   wd.sh queue acted-when <id> "<check> <args>"   what closes this item: commit <sha> | file <path> [since] |
@@ -80,15 +83,20 @@ case "$cmd" in
   finding) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" finding "$@" ;;
   queue)  sub=$1; shift
           case "$sub" in
-            add)   urgent=""; [ "$1" = "--urgent" ] && { urgent="--queue-urgent"; shift; }
-                   acted=""; [ "$1" = "--acted-when" ] && { acted="$2"; shift 2; }
-                   exec $PY "$D/wd_wake.py" "${WAKE_ARGS[@]}" --queue-add "$*" $urgent --acted-when "$acted" ;;
+            add)   urgent=""; acted=""; review="machine"
+                   while :; do case "$1" in
+                     --urgent) urgent="--queue-urgent"; shift ;;
+                     --acted-when) acted="$2"; shift 2 ;;
+                     --review) review="$2"; shift 2 ;;
+                     *) break ;;
+                   esac; done
+                   exec $PY "$D/wd_wake.py" "${WAKE_ARGS[@]}" --queue-add "$*" $urgent --acted-when "$acted" --queue-review "$review" ;;
             list)  exec $PY "$D/wd_wake.py" "${WAKE_ARGS[@]}" --queue-list ;;
             acted-when) id=$1; shift; exec $PY "$D/wd_wake.py" "${WAKE_ARGS[@]}" --queue-acted-when "$id" --acted-when "$*" ;;
             drop)  id=$1; shift; exec $PY "$D/wd_wake.py" "${WAKE_ARGS[@]}" --queue-drop "$id" --reason "$*" ;;
             clear) exec $PY "$D/wd_wake.py" "${WAKE_ARGS[@]}" --queue-clear "$1" ;;
             hold)  id=$1; shift; exec $PY "$D/wd_wake.py" "${WAKE_ARGS[@]}" --queue-hold "$id" --hold-until "$*" ;;
-            *) echo "wd.sh queue add [--urgent] [--acted-when \"<check>\"] \"<owner's words>\" | list | acted-when <id> \"<check>\" | hold <id> \"<condition>\"" >&2; exit 2 ;;
+            *) echo "wd.sh queue add [--urgent] [--acted-when \"<check>\"] [--review owner|machine] \"<owner's words>\" | list | acted-when <id> \"<check>\" | hold <id> \"<condition>\"" >&2; exit 2 ;;
           esac ;;
   outcome) id=$1; v=$2; shift 2; exec $PY "$D/wd_wake.py" --state-dir "$S" --outcome "$id" "$v" --reason "$*" ;;
   due)    exec $PY "$D/wd_wake.py" "${WAKE_ARGS[@]}" --due ;;
