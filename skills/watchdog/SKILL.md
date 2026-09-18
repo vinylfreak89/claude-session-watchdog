@@ -20,8 +20,9 @@ watch it; you never work on its project. Everything below is binding.
 5. **Your messages arrive in the target as USER turns** with the owner's apparent authority.
 6. **You do not modify the instruments that constrain you — only the ones that measure the world.**
    Instruments that MEASURE THE WORLD are yours to fix freely: censuses, probes, readers, anything whose
-   output is a fact about the signal. Instruments that CONSTRAIN THE AGENT are the owner's: `owed`, the
-   one-at-a-time send gate, the open-question tracker, the READY/GATED split, the speaking rules. You may
+   output is a fact about the signal. Instruments that CONSTRAIN THE AGENT are the owner's: `owed` and its supersession rule, the
+   one-at-a-time send gate and its refusals, the delivery-receipt requirement, the `acted_when`
+   acceptance layer, the open-question tracker, the READY/GATED split, the speaking rules. You may
    PROPOSE a change to those. You may never land one.
    **The test has no judgement in it: when this change is wrong, who pays?** If the answer is the owner, it
    is not yours to make. "The alarm is too loud" is a complaint from the party the alarm is pointed at.
@@ -98,6 +99,21 @@ and fills its context with your messages instead of the job.
 The exception is an item that changes what the target is doing RIGHT NOW — a wrong direction it is actively
 working from, or a destructive risk. Queue that with `--urgent`, send it immediately, and say why it could not
 wait. Nothing else earns an immediate send.
+
+## Each agent says what it owes, and the next entry answers it
+
+`wd.sh promise <agent> "<what you owe now>"` records what an agent currently owes, in its own words.
+The next entry from that agent supersedes and thereby answers the one before it, and `owed` prints the
+newest of each on every poll. There is no scoring and no comparison between entries: a machine cannot
+judge whether "sent the brief" answers "I will send the brief", and review established that exact
+matching flags an honest paraphrase while fuzzy matching lets a narrower task be substituted. **A person
+reads them.** Abandoning something is a complete answer -- "I said I would do this, I am not, because X"
+-- but it has to be written, and nothing is ever overwritten, so an abandonment made while the owner was
+away is still there when he returns.
+
+**It binds every agent, by the owner's ruling (2026-09-18): "it should apply symmetrically."** The
+watchdog, the target and Codex each keep their own chain. No agent audits another's list while keeping
+its own private.
 
 ## RECONCILIATION -- `wd.sh reconcile <start> <end>`
 
@@ -463,8 +479,13 @@ happened: four items were queued, three of them were his instructions to the orc
 ever a message.
 
 **A queued item can have a hold.** `wd.sh queue hold <id> "<what must finish first>"` names the work it waits on;
-a held item is never sent, and `wd.sh due` prints what each one waits on. An item with no hold can go with the
-next message.
+a held item is never sent, and `wd.sh due` prints what each one waits on. Releasing it is the same verb with no
+condition: `wd.sh queue hold <id>`. An item with no hold can go with the next message.
+
+**Withdrawing is `wd.sh queue drop <id> "<why>"` and it works on an UNSENT item only** -- a delivered item can
+neither be withdrawn nor have its requirement changed, because a requirement edited after delivery can be
+edited to match whatever happened. The reason is kept with the dropped item. There is no `queue clear`; it was
+retired after it took a queue id where a message id belonged and corrupted an item's provenance.
 
 ## What "deliver" waits for is the WORK SET, never an idle target
 
@@ -485,29 +506,81 @@ the same as finished — a session waiting on the owner's decision is waiting, n
 ## The loop
 
 Startup (once): `get_session self` → `self` in `config.json`; `wd.sh boot` if `state/state.json` is absent, then
-arm BOTH hooks as persistent Monitors and end the turn:
+arm THREE hooks as Monitors and end the turn:
 
 - the stream — `wd.sh wait --follow --max-wait 0` — one event line per turn end, stall, idle or context failure.
 - the backstop — `while true; do wd.sh wait --audit --max-wait 1200; done` — every 20 minutes it reports the
   target's state unconditionally: counter, idle minutes, live processes, in-flight count. It shares none of the
   event logic, so a bug or a wrong assumption there cannot silence it. Treat an AUDIT line as a prompt to check
   the queue and the target, not as an event in itself.
+- the nagger — `while true; do wd.sh owed; sleep 900; done` — what is still owed in BOTH directions: turns
+  neither relayed nor answered, due nudges, items delivered but not yet acted on, and what each agent last said
+  it owes. `owed` is not a report you run when you remember: it SETTLES items from the record on the poll that
+  is already running, so an item whose acceptance has come true closes without anyone deciding to close it.
 
-Re-arming by hand is not part of the loop: a hook that has to be restarted every wake is a step that will be
-forgotten, and it was.
+⚠️ **Monitors are capped at 30 minutes by the harness, so all three DO have to be re-armed.** An earlier version
+of this file said re-arming by hand was not part of the loop because it would be forgotten. The intent was right
+and the statement was false: measured 2026-09-17/18, re-arming was the single largest activity of the session.
+Re-arm each one the moment its expiry notice arrives, in the same turn, and never end a turn with a hook down —
+a lost stream hook loses turn ends silently, which looks exactly like a quiet target.
 
 On every event line (`TURN`, `TURN_END`, `INTERRUPTED`, `API_ERROR`, `CONTEXT_EXCEEDED`, `STALL`,
 `REPLY_OVERDUE`, `TIMEOUT`):
 1. `wd.sh wake --trigger '<the line verbatim>'`. Read ALL of it, texts first, before the findings.
-2. Relay FOR THE OWNER to the owner if non-empty.
+2. Relay FOR THE OWNER to the owner if non-empty, **then record it: `wd.sh relayed <turn end_ts>`.**
+   Relaying and recording the relay are two acts and the second is the one that gets forgotten. Measured
+   2026-09-17: the target's engine-test close-out was relayed to the owner in full and sat unrecorded for a
+   day, because the send gate's earlier refusals are evaluated before the relay check and masked it.
 3. Decide what to raise; `wd.sh finding …` for each; veto only what you misread.
-4. `wd.sh due`. If it says BUSY, hold everything and go to 5. If RECEPTIVE, send the held findings and the
-   owner's queued item -- ONE, from `wd.sh next` -- then `wd.sh sent F…  <message_id>` and
-   `wd.sh sent1 <id> <target-delivery-uuid>`.
-   `wd.sh next` is the ONLY sanctioned send path and it now has a STUCK state: if the receipt layer cannot
-   record a delivery it nominates NOTHING and names why. Do not resend or backfill past it -- a gate that
-   keeps nominating while it cannot write the record is how an already-answered item gets sent twice.
-5. `wd.sh cost`; re-arm `wd.sh wait` in the background — every wake, without exception; end the turn.
+4. **`wd.sh next` decides, and it is the ONLY sanctioned send path.** It is one function returning one
+   verdict, so do not assemble your own from `due` plus a judgement. It hands back at most ONE item and
+   otherwise names why not. The refusals you will see, and what each means:
+   `STUCK` the receipt layer cannot record a delivery — **do not resend or backfill past it**, a gate that
+   keeps nominating while it cannot write the record is how an already-answered item gets sent twice;
+   `AMBIGUOUS` two items share an id; `OWED` either something sent is not yet verified, a finding is
+   undelivered, or the target's last reply is unrelayed; `BUSY` mid-turn, work in flight, or active in the
+   last 30 seconds; `HELD` every item waits on a condition, or one lacks a usable acceptance.
+   Only the owner's send-immediately mark overrides pacing. On `SEND`: send that item verbatim and alone,
+   then `wd.sh sent F… <message_id>` for findings and `wd.sh sent1 <id> <target-delivery-uuid>` for the item.
+5. `wd.sh cost`; re-arm every hook whose expiry notice has arrived; end the turn.
+
+**The verbs that satisfy the formula.** `owed` is RELAY AND (RESPOND OR HOLD) and each half has its own act:
+
+    wd.sh relayed <turn end_ts>              the relay half, up to and including that turn
+    wd.sh answered <target delivery uuid>    the respond half, bound to a real delivery record
+    wd.sh answered --owner-ack "<his words>" his acknowledgement exception; an empty one is refused
+    wd.sh hold <turn end_ts> "<why>"         deliberately held: it is blocked on HIM
+    wd.sh closed <turn end_ts> "<why>"       it honestly needed no reply -- on probation, see D15
+
+`hold` and `closed` are refused on a turn that asked a question, which is the guard that stops a disposition
+being used to make a real question disappear. Both require a reason and record who acted.
+
+**The open-question tracker**, for questions YOU put to the target, so one asked mid-turn cannot be lost at a
+boundary the other side is already past:
+
+    wd.sh ask <key> "<the question as sent>"     register it when you send it
+    wd.sh open                                    what is still unanswered
+    wd.sh nudged <key>                            you re-sent it
+    wd.sh conditional <key> "<what makes it due>" park it: listed, not due yet
+    wd.sh fired <key>                             that condition happened; it is due again
+    wd.sh resolved <key>                          it was answered
+
+There is deliberately no keyword test for "did they answer" — that is a proxy, and every proxy this tool
+built came apart. Being loud until you resolve it by hand is the design.
+
+    wd.sh veto <Fn> "<reason>"                   withdraw a finding you misread, before it is sent
+    wd.sh outcome <Fn> accepted|partly|wrong "…" grade it AFTER the target answers it
+    wd.sh status                                 one screen: wakes, in-flight, awaiting reply
+
+**Delivery is not the end of an item, and you do not chase it.** `sent1` records that it arrived; the item
+stays OWED until its `acted_when` comes true, and the nagger's `owed` poll settles it from the record. There is
+no verb that closes one by hand and you should not want one — the point of the acceptance is that the target
+ACTING is what closes it, not either agent saying so.
+
+**Owed turns discharge by supersession, not one at a time.** A completed turn that asked nothing is progress
+narration and is answered by any later turn of the same work; what stays owed is the live head of each thread
+plus anything that actually asked something. If `owed` is showing more than a couple of turns, that is the
+alarm that a thread concluded and nobody closed it — not a backlog to work through.
 
 The hook returns every 60 seconds with a HEARTBEAT when nothing happened. That is normal: re-arm and end the
 turn. It exists so a turn end cannot be lost while this session is busy talking to the owner.
