@@ -158,7 +158,13 @@ def target_calls(sess, after):
                         if not W.message_success(W._result_text(b)): continue
                     elif b.get('is_error') is not False and not W.legacy_message_success(use, W._result_text(b)):
                         continue
-                elif b.get('is_error') is not False:
+                elif b.get('is_error', False) is not False:
+                    # The host OMITS is_error on successful Edit/Write/Read results and marks
+                    # failures with an explicit true (measured 2026-09-18 on the target: 140 Edit
+                    # and 98 Write results with no key, every failure is_error=true). Requiring
+                    # an explicit False discarded every real Edit and Write, so no file/grep/csv
+                    # acceptance could ever be proved by the replay path. Absent is success;
+                    # only an explicit non-False value is failure.
                     continue
                 if D.epoch(use['ts']) <= boundary or D.epoch(stamp) < D.epoch(use['ts']):
                     continue
