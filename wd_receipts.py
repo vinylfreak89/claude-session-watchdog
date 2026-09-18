@@ -271,6 +271,11 @@ def components(state, rec):
 def record_delivery(path, sender, state, ident, queue_id=None, finding_ids=None):
     """Validate every component before mutating; either mark order records the same receipt."""
     rec = receipt(path, sender, ident)
+    history = state.get('acknowledged_turns', [])
+    if not isinstance(history, list) or any(not isinstance(e, dict) for e in history):
+        raise EvidenceError('invalid acknowledgement history; cannot bind receipt')
+    if any(e.get('message_id') == ident and e.get('turn_ts') != rec['turn_ts'] for e in history):
+        raise EvidenceError('delivery already acknowledges a different turn')
     q, fids, findings = components(state, rec)
     if queue_id is not None and (q is None or q.get('id') != queue_id):
         raise EvidenceError('receipt did not deliver this queue item')

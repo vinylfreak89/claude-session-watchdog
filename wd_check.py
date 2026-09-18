@@ -180,6 +180,11 @@ def owed(sess, state, self_sel=None):
     relayed = state.get('last_relay_ts') or ''
     answered = D.answered_turns(W.transcript_path(sess), self_sel, state)
     reply_turns = accepted_reply_turns(sess, state, self_sel)
+    actor = W.find_session(self_sel)['sessionId'] if self_sel else None
+    acknowledgements, problems = TD.acknowledged_turns(sess, actor, state)
+    acknowledged = {e['turn_ts'] for e in acknowledgements}
+    for problem in problems:
+        print('INVALID ACKNOWLEDGEMENT: %s' % problem)
     rows = []
     for t in done:
         why = []
@@ -197,7 +202,7 @@ def owed(sess, state, self_sel=None):
         superseded = (latest is not None and D.epoch(t.end_ts) < latest
                       and not TD.question_evidence(t))
         if not (historical or t.end_ts in answered or t.end_ts in reply_turns
-                or held or closed or owner_acknowledged or superseded):
+                or t.end_ts in acknowledged or held or closed or owner_acknowledged or superseded):
             why.append('not answered or held')
         if not why: continue
         text = ' '.join(x for _, x in t.assistant_texts)
@@ -468,6 +473,19 @@ def run(a, ap):
     if TD.initialize_tracking(state):
         WK.save_state(a.state_dir, state)
     if a.mode == 'answered':
+        if '--acknowledged' in a.rest:
+            if len(a.rest) != 4 or a.rest[1] != '--acknowledged':
+                print('REFUSED: answered <turn end_ts> --acknowledged <target delivery uuid> "what was acknowledged"')
+                return 1
+            try:
+                actor = W.find_session(a.self_sel)['sessionId'] if a.self_sel else None
+                entry = TD.record_acknowledgement(sess, actor, state, a.rest[0], a.rest[2], a.rest[3])
+            except (D.EvidenceError, OSError, SystemExit) as exc:
+                print('REFUSED: %s' % exc); return 1
+            WK.save_state(a.state_dir, state)
+            print('answered %s by %s with target delivery %s\nACKNOWLEDGED: %s' %
+                  (entry['turn_ts'], entry['actor'], entry['message_id'], entry['reason']))
+            return 0
         if '--evidence' in a.rest or '--open' in a.rest:
             if ('--owner-ack' in a.rest or a.rest.count('--evidence') != 1
                     or a.rest.count('--open') > 1):
@@ -708,6 +726,9 @@ def run(a, ap):
             print('   NUDGE %-22s %s  (%d resend(s))  -- re-send it, then: wd.sh nudged %s'
                   % (k, why, q.get('resends', 0), k))
         if not rows: print('   nothing owed')
+        for entry in state.get('acknowledged_turns', []) if isinstance(state.get('acknowledged_turns', []), list) else []:
+            print('RECORDED TURN ACKNOWLEDGEMENT (operator report, revalidated above): %s' %
+                  json.dumps(entry, ensure_ascii=False, sort_keys=True))
         # What each agent SAID it owed and has not answered for. There is no correspondence
         # check: the words are retained and put in front of the owner, who judges them. The
         # mechanical part is only that an unanswered list is loud and blocks opening another.

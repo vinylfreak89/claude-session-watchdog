@@ -9,6 +9,7 @@
 #   wd.sh answered <delivery_uuid> verify a registered payload in the target transcript; delivery alone is not action
 #   wd.sh answered --owner-ack "<his words>"  the owner-authorized acknowledgement exception; empty words are refused
 #   wd.sh answered <item id> --evidence "<checks and results>" [--open "<residue>"]  retain an attributed report beside the original delivered item
+#   wd.sh answered <turn end_ts> --acknowledged <target delivery uuid> "<what was acknowledged>"  record a real standalone reply to this turn
 #   wd.sh relayed <turn end_ts>     mark turns up to here as relayed to the owner (a send answers them separately)
 #   wd.sh hold <turn end_ts> "why"  deliberately hold a turn: it is blocked on the owner
 #   wd.sh cost                      append this session's per-turn token cost to state/cost.tsv

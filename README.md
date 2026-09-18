@@ -21,6 +21,13 @@ owner-authorized roles with audited reasons and turn bindings. Existing tracking
 gets a frozen migration boundary. See [repair contracts and limitations](docs/repairs/send-acceptance.md)
 for supported action checks, undecidable cases, and the deciding controls.
 
+A standalone reply can be recorded with
+`answered <turn end_ts> --acknowledged <target delivery uuid> "<what was acknowledged>"`.
+It requires a verified later delivery from the watchdog and retains an attributed,
+append-only explanation. It answers that turn's response duty, including a direct
+question; relay duty and queued-work acceptance remain independent. See the
+[acknowledgement repair and controls](docs/repairs/acknowledged-turn.md).
+
 ```
 wd.sh                 the watchdog session's commands: boot | wait | wake | check | finding | queue | sent | veto | cost | status
 wd_lib.py             session discovery, transcript turn model, claim extraction, read-only world checks
