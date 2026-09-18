@@ -54,10 +54,11 @@ def main():
         return 0
     sys.stdout.write(
         'You are the orchestration watchdog for the session named in %s, and this session '
-        'was just %sed -- which drops every loaded skill, including the one defining this '
+        'was just %s -- which drops every loaded skill, including the one defining this '
         'role. The watchdog skill is re-injected below IN FULL and is binding. Do not act on '
         'a monitor event, run wd.sh, or send anything to the target until you have read it.'
-        '\n\n%s\n' % (os.path.join(ROOT, 'config.json'), hook['source'], body))
+        '\n\n%s\n' % (os.path.join(ROOT, 'config.json'),
+                         {'compact': 'compacted', 'resume': 'resumed', 'startup': 'started'}[hook['source']], body))
     return 0
 
 
