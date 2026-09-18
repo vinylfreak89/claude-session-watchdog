@@ -911,10 +911,35 @@ def message_to_session(call, session_id):
     records = D.read_records(transcript_path(receiver))
     hits = [r for r in records if isinstance(r.get('origin'), dict) and r['origin'].get('msg_id') == mid
             and r.get('type') in ('user', 'attachment')]
-    if len(hits) != 1: return False
-    try: rec = D.delivery(hits[0], hits[0]['origin'].get('from'))
-    except D.EvidenceError: return False
-    return rec['body'] == inp['message'].strip() and D.epoch(rec['ts']) >= D.epoch(call.get('ts'))
+    if hits:
+        if len(hits) != 1: return False
+        try: rec = D.delivery(hits[0], hits[0]['origin'].get('from'))
+        except D.EvidenceError: return False
+        return rec['body'] == inp['message'].strip() and D.epoch(rec['ts']) >= D.epoch(call.get('ts'))
+    return absorbed_receipt(records, inp['message'].strip(), call.get('ts'))
+
+
+def absorbed_receipt(records, body, sent_ts):
+    """A reply that reached the receiver while IT was mid-turn is written there as an
+    absorbed queue removal with no origin block, so it carries no msg_id to match. The
+    same blindness was repaired on the send side in 4c82e7a; this is the reply side.
+
+    Credit exactly ONE absorbed removal in the receiver's own transcript whose delivered
+    envelope body is this message, arriving at or after the call. Only the removal counts
+    -- the host also writes a queued_command attachment for the same delivery, and
+    counting both would make every absorbed reply ambiguous. A second matching removal
+    is ambiguity, and ambiguity credits nothing."""
+    import wd_receipts as D
+    hits = []
+    for r in records:
+        if not D.is_absorbed_delivery(r): continue
+        sender = re.search(r'<cross-session-message\s+from="([^"<>]*)"', r['content'])
+        if not sender: continue
+        try: rec = D.delivery(r, sender.group(1))
+        except D.EvidenceError: continue
+        if rec['body'] == body and D.epoch(rec['ts']) >= D.epoch(sent_ts):
+            hits.append(rec)
+    return len(hits) == 1
 
 
 def messages_to_watchdog(turn, self_session_id=None):
