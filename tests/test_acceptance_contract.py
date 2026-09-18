@@ -48,6 +48,26 @@ class AcceptanceContract(ContractCase):
         self.assertEqual(self.state()['owner_queue'], [], out)
         self.assertEqual(self.state()['owner_queue_sent'][0]['id'], q)
 
+    def reply_body(self, body):
+        self.message_case('SendMessage')
+        rows = D.read_records(str(self.tx))
+        rows[-2]['message']['content'][0]['input']['message'] = body
+        self.tx.write_text(''.join(json.dumps(r) + '\n' for r in rows))
+        rows = D.read_records(str(self.mine))
+        rows[-1]['message']['content'] = '<cross-session-message from="%s">%s</cross-session-message>' % (TARGET, body)
+        self.mine.write_text(''.join(json.dumps(r) + '\n' for r in rows))
+
+    def test_closeout_line_with_detail_settles(self):
+        self.reply_body('Synthetic result\nDetail of the completed work.')
+        out = self.poll()
+        self.assertEqual(self.state()['owner_queue'], [], out)
+
+    def test_closeout_mentioned_mid_sentence_stays_owed(self):
+        self.reply_body('The phrase Synthetic result appears in this sentence.')
+        out = self.poll()
+        self.assertEqual(len(self.state()['owner_queue']), 1, out)
+        self.assertIn('not-yet', out)
+
     def test_legacy_message_reply_still_settles_and_is_visible(self):
         self.message_case('mcp__ccd_session_mgmt__send_message')
         self.check_message_count(1)

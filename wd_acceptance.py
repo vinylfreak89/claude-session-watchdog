@@ -328,12 +328,14 @@ def evaluate_message(a, sess, item, args, facts, calls):
     sender = W.find_session(a.self_sel)
     expected = args[0]
     sent = [c for c in calls if W.message_to_session(c, sender['sessionId'])
-            and W.message_input(c)['message'] == expected]
+            and expected in W.message_input(c)['message'].splitlines()]
     if not sent: return Result(Status.NOT_YET, 'no successful matching target reply call after delivery')
     for record in D.read_records(W.transcript_path(sender)):
         try: rec = D.delivery(record, sess['sessionId'])
         except D.EvidenceError: continue
-        if rec['body'] == expected and any(D.epoch(rec['ts']) >= D.epoch(c['ts']) for c in sent):
+        if expected in rec['body'].splitlines() and any(
+                rec['body'] == W.message_input(c)['message'].strip()
+                and D.epoch(rec['ts']) >= D.epoch(c['ts']) for c in sent):
             return Result(Status.PASS, 'matching reply delivered to watchdog in record %s' % rec['id'])
     return Result(Status.NOT_YET, 'target reply has not been delivered to the watchdog')
 
