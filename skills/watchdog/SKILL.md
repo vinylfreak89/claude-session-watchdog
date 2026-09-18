@@ -79,7 +79,7 @@ Findings the wake itself produced from tool facts appear in the report already w
 ## The owner's items are queued HERE, not in the target's inbox
 
 When the owner gives you something for the target, hold it:
-`wd.sh queue add --acted-when "<what the target ACTING looks like>" "<his words>"`. Do NOT send it on
+`wd.sh queue add --acted-when "<what the target ACTING looks like>" [--review owner] "<his words>"`. Do NOT send it on
 arrival. **The acceptance is not optional and it is set BEFORE delivery**: an item with no `acted_when`
 is refused at send time, because a requirement written after the fact can be written to match whatever
 happened. Kinds: `commit <sha>` | `file <path> [since]` | `grep <path> <regex>` | `csv ...` | `row <ID>` |
@@ -95,6 +95,22 @@ and `wd.sh owed` settles it from the record on a later poll. There is no verb to
 because a wake happened to print it. Sending on the owner's cadence fragments
 the target's work: each message opens or queues a turn there, so a run of small relays interrupts it repeatedly
 and fills its context with your messages instead of the job.
+
+**Who reviews it is part of the item: `--review owner` or `machine` (the default).** Owner, 2026-09-18:
+*"it depends. if the render is something I need review vs something that is going to be machine reviewed"*.
+The acceptance says when the work EXISTS; the review says who decides it is right. A machine-reviewed item
+closes when its check passes. An owner-reviewed one -- a render or report made for his eyes -- does not: when
+its check passes it leaves the send gate and becomes a READY review in `wd.sh owe list`. You clear that with
+`wd.sh owe done <id>` when HIS OWN WORDS in the transcript settle it, including what he says to the target
+directly. He is never asked to tell you separately; reading him is your job. Decide the review when you
+queue the item, from what the work is for, never after.
+
+**Script output is recordable.** `file`, `grep` and `csv` credit a file the target produced with a command,
+not only one it wrote with Write/Edit: a successful target Bash call after delivery whose command names both
+the file's directory and its name, with the file's mtime inside that call's window (to the host's completion
+notice for a backgrounded command). A `file` subject may be a directory; a new or changed file inside it,
+so attributed, satisfies it. Test an acceptance through the settle path (`owed`), not `wd.sh check`: the
+two readers are not the same code, and a spec `check` accepts can still be one `owed` can never pass.
 
 The exception is an item that changes what the target is doing RIGHT NOW — a wrong direction it is actively
 working from, or a destructive risk. Queue that with `--urgent`, send it immediately, and say why it could not
