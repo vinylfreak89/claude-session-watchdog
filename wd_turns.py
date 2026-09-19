@@ -126,12 +126,12 @@ def record_acknowledgement(sess, actor, state, stamp, ident, reason):
     entry = acknowledgement_evidence(sess, actor, stamp, ident, D.read_records(W.transcript_path(sess)))
     existing = (state.get('send_receipts') or {}).get(ident)
     if existing is not None and existing.get('turn_ts') != stamp:
-        raise D.EvidenceError('delivery receipt already bound to another turn')
+        raise D.AlreadyBound('delivery receipt already bound to another turn')
     history = state.get('acknowledged_turns', [])
     if not isinstance(history, list) or any(not isinstance(e, dict) for e in history):
         raise D.EvidenceError('invalid acknowledgement history; cannot append')
     if any(e.get('message_id') == ident and e.get('turn_ts') != stamp for e in history):
-        raise D.EvidenceError('acknowledgement delivery already bound to another turn')
+        raise D.AlreadyBound('acknowledgement delivery already bound to another turn')
     entry.update(reason=reason, at=W.now_iso())
     if D.epoch(entry['at']) < D.epoch(entry['delivery_ts']):
         raise D.EvidenceError('acknowledgement delivery is in the future')

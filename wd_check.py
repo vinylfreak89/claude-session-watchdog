@@ -493,6 +493,8 @@ def run(a, ap):
                 entry = TD.record_acknowledgement(sess, actor, state, a.rest[0], a.rest[2], a.rest[3])
                 D.recording_succeeded(state, 'answered',
                                       dict(id=entry['message_id'], ts=entry['delivery_ts']), actor)
+            except D.AlreadyBound as exc:
+                print('REFUSED: %s' % exc); return 1
             except (D.EvidenceError, OSError, SystemExit) as exc:
                 D.recording_failed(state, 'answered', exc, message_id=a.rest[2])
                 WK.save_state(a.state_dir, state)

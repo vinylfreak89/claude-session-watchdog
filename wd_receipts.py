@@ -11,6 +11,13 @@ class EvidenceError(ValueError):
     pass
 
 
+class AlreadyBound(EvidenceError):
+    """A receipt that is already bound to a different turn. The delivery's state is
+    fully known -- only the operator's request was wrong -- so it refuses without
+    latching the send gate (2026-09-19: re-using one receipt for a second turn
+    stopped every send)."""
+
+
 def recording_failed(state, operation, reason, item_id=None, message_id=None):
     """Retain the first failure until that exact recording succeeds with evidence."""
     state.setdefault('receipt_recording_failure', dict(operation=operation, reason=str(reason),
