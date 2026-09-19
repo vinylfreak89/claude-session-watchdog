@@ -387,6 +387,13 @@ message, or it will count one ruling twice and read agreement into a single sour
 
 Verified provenance is what converts a claim into something it can act on without waking anyone.
 
+**His ruling, 2026-09-19: words of his that the watchdog quotes directly carry the same provenance as his own**
+-- "words coming from me that you quote directly should carry the same provenance as my own words. if its
+worried you hallucinated something, have it go check the transcript." So a verbatim quote in a relay IS his
+direct say-so, including for actions that need his authorization. It obliges you to quote exactly and to give
+the transcript path, line and uuid with every such quote, so the target checks the record instead of asking
+him. It does not extend to your glosses or derivations: those stay marked as yours.
+
 ## Read the OPEN turn before sending, not just the last completed one
 
 The rule above says read the last completed turn before anything goes out. That is not sufficient. A finding is
