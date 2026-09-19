@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SessionStart hook: re-inject the watchdog skill into the WATCHDOG session only.
+"""SessionStart hook: tell the WATCHDOG session (only) to reload its skill via the Skill tool.
 
 Skills load on invocation and live in that context alone, so a compaction drops the
 one document defining this session's role -- and a compacted session resumes on a
@@ -47,18 +47,24 @@ def main():
         import wd_lib as W
         cfg = json.load(open(os.path.join(ROOT, 'config.json'), encoding='utf-8'))
         mine = os.path.realpath(W.transcript_path(W.find_session(cfg['self'])))
-        body = open(SKILL, encoding='utf-8').read()
+        body = open(SKILL, encoding='utf-8').read()  # existence check only
     except Exception:
         return 0
     if here != mine or not body.strip():
         return 0
+    # The skill body is NOT emitted. Measured 2026-09-19 on the first live compact: the hook
+    # fired and wrote ~49.6 KB, the harness persisted anything over its output cap to a file
+    # and put only a 2 KB preview in context -- so the "re-injected IN FULL" skill never
+    # loaded. The Skill tool has no such cap, so the hook's whole job is a short directive
+    # to call it, kept far under the cap (asserted by tests/test_skill_reload_hook.py).
     sys.stdout.write(
-        'You are the orchestration watchdog for the session named in %s, and this session '
-        'was just %s -- which drops every loaded skill, including the one defining this '
-        'role. The watchdog skill is re-injected below IN FULL and is binding. Do not act on '
-        'a monitor event, run wd.sh, or send anything to the target until you have read it.'
-        '\n\n%s\n' % (os.path.join(ROOT, 'config.json'),
-                         {'compact': 'compacted', 'resume': 'resumed', 'startup': 'started'}[hook['source']], body))
+        'WATCHDOG SKILL NOT LOADED. This session is the orchestration watchdog for the session '
+        'named in %s, and it was just %s, which dropped the watchdog skill from context. Your '
+        'FIRST action, before acting on any monitor event, running wd.sh or sending anything to '
+        'the target, is to invoke the Skill tool with skill "watchdog". Do this even mid-task and '
+        'even if a summary says the skill was loaded earlier: an earlier load is gone.\n'
+        % (os.path.join(ROOT, 'config.json'),
+           {'compact': 'compacted', 'resume': 'resumed', 'startup': 'started'}[hook['source']]))
     return 0
 
 
