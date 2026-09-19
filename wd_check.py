@@ -477,6 +477,7 @@ def main():
     with S.transaction(a.state_dir):
         return run(a, ap)
 
+
 def run(a, ap):
     W.set_row_pattern(a.row_pattern)
     sess = W.find_session(a.target); state = WK.load_state(a.state_dir)
@@ -528,7 +529,12 @@ def run(a, ap):
             state['last_send_ts'] = W.now_iso()
             WK.save_state(a.state_dir, state)
             print('answered at %s (%s)' % (state['last_send_ts'], why)); return 0
-        if len(a.rest) != 1:
+        if len(a.rest) != 1 or a.rest[0].startswith('-'):
+            # An option-shaped argument is a usage error, not a delivery in an unknown
+            # state, so it never latches. Ids are not uuid-only (absorbed:<sha>), so the
+            # test is the leading dash, nothing looser.
+            # Cost 2026-09-19: `answered --help` recorded "--help" as a message id and
+            # stopped the send gate on a delivery that never existed.
             print('REFUSED: answered <target delivery uuid>; the body must match registered obligations')
             return 1
         ok, why = answered_allowed(W.transcript_path(sess), a.self_sel, state, None, a.rest[0])
