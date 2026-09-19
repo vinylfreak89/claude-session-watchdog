@@ -88,6 +88,32 @@ def gate_lines(sess, state_dir, self_sel=None):
     return ['NEXT: %s' % (flat or verdict.upper()),
             'USAGE: send nothing. Only the owner marking an item send-immediately overrides the gate.']
 
+
+def delivery_counts(path, ids):
+    """How many delivery records name each agent id: its launch acknowledgement, then its
+    return. Above one means it returned. Only USER records count, plus a queued
+    task-notification carrying the id in its own <task-id> tag: a completion absorbed
+    mid-turn never becomes a user record (measured 2026-09-19: a finished recount agent was
+    reported STALLED for 40 minutes). Assistant text is excluded deliberately -- the target
+    audited its own subagents once, its text named their ids, and live agents read as returned.
+    """
+    counts = dict.fromkeys(ids, 0)
+    with open(path, errors='replace') as fh:
+        for ln in fh:
+            if not ln.strip(): continue
+            hit = [aid for aid in ids if aid in ln]
+            if not hit: continue
+            try: rec = json.loads(ln)
+            except Exception: continue
+            if rec.get('type') in ('attachment', 'queue-operation'):
+                for aid in hit:
+                    if ('<task-id>%s</task-id>' % aid) in ln and 'task-notification' in ln:
+                        counts[aid] = max(counts[aid], 2)
+                continue
+            if rec.get('type') != 'user': continue
+            for aid in hit: counts[aid] += 1
+    return counts
+
 class Watch(object):
     def __init__(self, sess, state_dir, stale_after, stall_min, self_sess=None, idle_after=0):
         self.sess = sess; self.state_dir = state_dir; self.stale_after = stale_after; self.stall_min = stall_min
@@ -378,19 +404,8 @@ class Watch(object):
         # and three live agents were read as returned while their transcripts were being written to that
         # second. Anything the target says can mention an id for any reason; only a delivery record marks
         # a return.
-        counts = dict.fromkeys(ids, 0)
-        try:
-            with open(W.transcript_path(self.sess), errors='replace') as fh:
-                for ln in fh:
-                    if not ln.strip(): continue
-                    hit = [aid for aid in ids if aid in ln]
-                    if not hit: continue
-                    try: rec = json.loads(ln)
-                    except Exception: continue
-                    if rec.get('type') != 'user': continue
-                    for aid in hit: counts[aid] += 1
-        except OSError:
-            return []
+        try: counts = delivery_counts(W.transcript_path(self.sess), ids)
+        except OSError: return []
         out = []
         for aid, ts in ids.items():
             if counts[aid] > 1: continue
