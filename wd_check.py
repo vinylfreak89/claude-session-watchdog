@@ -201,7 +201,7 @@ def owed(sess, state, self_sel=None):
         # response after a later completed turn. Reuse the conservative request
         # reader; questions survive. This answers RESPOND only, never RELAY.
         superseded = (latest is not None and D.epoch(t.end_ts) < latest
-                      and not TD.question_evidence(t))
+                      and not TD.has_question_candidates(t))
         if not (historical or t.end_ts in answered or t.end_ts in reply_turns
                 or t.end_ts in acknowledged or held or closed or owner_acknowledged or superseded):
             why.append('not answered or held')
@@ -547,11 +547,17 @@ def run(a, ap):
         WK.save_state(a.state_dir, state)
         print('answered: %s' % why); return 0
     if a.mode in ('hold', 'closed'):
-        if len(a.rest) < 2:
-            print('REFUSED: %s <turn end_ts> "reason"' % a.mode); return 1
+        rest, reading = list(a.rest), None
+        if '--not-asked' in rest:
+            i = rest.index('--not-asked')
+            if i + 1 >= len(rest):
+                print('REFUSED: --not-asked needs the reading that quotes each candidate sentence'); return 1
+            reading = rest[i + 1]; del rest[i:i + 2]
+        if len(rest) < 2:
+            print('REFUSED: %s <turn end_ts> "reason" [--not-asked "<reading>"]' % a.mode); return 1
         try:
             actor = W.find_session(a.self_sel)['sessionId'] if a.self_sel else None
-            changed = TD.record_disposition(sess, actor, state, a.mode, a.rest[0], ' '.join(a.rest[1:]))
+            changed = TD.record_disposition(sess, actor, state, a.mode, rest[0], ' '.join(rest[1:]), reading)
         except D.EvidenceError as exc:
             print('REFUSED: %s' % exc); return 1
         if changed:

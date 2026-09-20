@@ -32,26 +32,78 @@ def fingerprint(turn):
     return hashlib.sha256(json.dumps(turn.records, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
-def question_evidence(turn):
-    """Conservative explicit-question/request detection, not semantic adjudication.
+REQUEST_RE = re.compile(r'(?im)(?:^|[.!:]\s+)(?:please\s+)?(?:who|what|when|where|why|how|which|can you|could you|would you|will you|do you|are you|is it|should I|shall I|tell me|let me know|confirm|clarify|choose|decide|advise)\b')
+QUOTE_CHARS = 40
 
-    False positives keep a turn owed. This cannot prove absence of a question in
-    arbitrary prose; that boundary is documented, not disguised as understanding.
+
+def _sentences(text):
+    return [s.strip() for s in re.split(r'(?<=[.!?？。])\s+|\n+', text) if s.strip()]
+
+
+def question_candidates(turn):
+    """Find sentences that MIGHT be a question, and quote them. It does not adjudicate.
+
+    Owner's ruling, 2026-09-20: "as everything else it should be answerable by
+    natural language." The punctuation/keyword proxy could not tell a question put
+    to the watchdog from the target narrating its own next measurement, and it was
+    holding turns owed that had asked nothing. Deciding what a sentence MEANS is the
+    model's job; finding the candidates and keeping the record is the script's.
+
+    So this returns the candidate sentences themselves. Disposing of a turn that has
+    any requires quoting each one and saying why it is not a question to the
+    watchdog -- that reading is stored forever, so a false dismissal is a specific
+    sentence someone can read back, not a silent pass.
+
+    Returns (candidates, hard_refusal). A hard refusal is a MEASUREMENT failure --
+    text that could not be read at all -- and no reading disposes of it.
     """
     texts = [text for _, text in turn.assistant_texts]
     for use in turn.tool_uses:
         if use.get('name') not in W.MESSAGE_TOOL_NAMES: continue
         message = W.message_input(use)
-        if message is None: return 'unreadable request text'
+        if message is None: return [], 'unreadable request text'
         texts.append(message['message'])
+    candidates = []
     for text in texts:
         if not isinstance(text, str):
-            return 'unreadable request text'
-        if '?' in text or '？' in text:
-            return 'question punctuation'
-        if re.search(r'(?im)(?:^|[.!:]\s+)(?:please\s+)?(?:who|what|when|where|why|how|which|can you|could you|would you|will you|do you|are you|is it|should I|shall I|tell me|let me know|confirm|clarify|choose|decide|advise)\b', text):
-            return 'direct question or request language'
-    return None
+            return [], 'unreadable request text'
+        for sentence in _sentences(text):
+            if '?' in sentence or '？' in sentence or REQUEST_RE.search(sentence):
+                if sentence not in candidates:
+                    candidates.append(sentence)
+    return candidates, None
+
+
+def has_question_candidates(turn):
+    """Conservative boolean, for decisions made with NO human reading attached.
+
+    Automatic supersession in `owed` closes a turn with nobody looking at it, so it
+    keeps the strict proxy: anything question-shaped blocks it and the turn stays
+    owed. The explicit `closed`/`hold` path is the one the owner opened to natural
+    language, because there a person writes down what the sentence meant.
+    """
+    candidates, hard = question_candidates(turn)
+    return bool(candidates or hard)
+
+
+def _normalise(text):
+    return re.sub(r'\s+', ' ', text or '').strip().lower()
+
+
+def unquoted_candidates(candidates, reading):
+    """Which candidates the reading fails to quote. Forces literal quotation.
+
+    A blanket "none of these are questions" does not dispose of anything: the
+    reading must carry each candidate's own words, so dismissing one is concrete.
+    """
+    body = _normalise(reading)
+    missing = []
+    for candidate in candidates:
+        norm = _normalise(candidate)
+        needle = norm if len(norm) <= QUOTE_CHARS else norm[:QUOTE_CHARS]
+        if needle not in body:
+            missing.append(candidate)
+    return missing
 
 
 def find_turn(sess, stamp):
@@ -62,18 +114,31 @@ def find_turn(sess, stamp):
     return matches[0]
 
 
-def record_disposition(sess, actor, state, mode, stamp, reason):
+def record_disposition(sess, actor, state, mode, stamp, reason, reading=None):
     reason = (reason or '').strip()
+    reading = (reading or '').strip()
     if not reason or not actor:
         raise D.EvidenceError('a disposition requires a nonempty reason and acting session attribution')
     if mode == 'hold' and not re.search(r'\b(owner|you)\b', reason, re.I):
         raise D.EvidenceError('hold is restricted to a turn blocked on the owner')
     turn = find_turn(sess, stamp)
-    evidence = question_evidence(turn)
-    if evidence:
-        raise D.EvidenceError('a turn containing a direct question cannot be held or closed (%s)' % evidence)
+    candidates, hard = question_candidates(turn)
+    if hard:
+        raise D.EvidenceError('a turn whose text cannot be read is never disposed of (%s)' % hard)
+    if candidates:
+        if not reading:
+            raise D.EvidenceError(
+                'this turn has %d sentence(s) that may be a question. Quote each one and say why it is '
+                'not a question to the watchdog, with --not-asked "<reading>":\n  %s'
+                % (len(candidates), '\n  '.join(repr(c) for c in candidates)))
+        missing = unquoted_candidates(candidates, reading)
+        if missing:
+            raise D.EvidenceError(
+                'the reading does not quote %d of the candidate sentence(s); dismissing one means '
+                'carrying its own words:\n  %s' % (len(missing), '\n  '.join(repr(c) for c in missing)))
     entry = dict(reason=reason, actor=actor, ruling=RULINGS[mode], at=W.now_iso(),
-                 target=sess['sessionId'], turn_hash=fingerprint(turn))
+                 target=sess['sessionId'], turn_hash=fingerprint(turn),
+                 question_candidates=candidates, reading=reading)
     store = 'held_turns' if mode == 'hold' else 'closed_turns'
     previous = state.setdefault(store, {}).get(stamp)
     if previous:
@@ -88,12 +153,19 @@ def record_disposition(sess, actor, state, mode, stamp, reason):
 
 
 def valid_disposition(sess, turn, entry, mode):
-    return (isinstance(entry, dict) and bool(str(entry.get('reason') or '').strip())
+    if not (isinstance(entry, dict) and bool(str(entry.get('reason') or '').strip())
             and isinstance(entry.get('actor'), str) and bool(entry['actor'])
             and entry.get('ruling') == RULINGS[mode] and bool(entry.get('at'))
             and entry.get('target') == sess['sessionId']
-            and entry.get('turn_hash') == fingerprint(turn)
-            and not question_evidence(turn))
+            and entry.get('turn_hash') == fingerprint(turn)):
+        return False
+    candidates, hard = question_candidates(turn)
+    if hard:
+        return False
+    # Candidates are re-derived from the transcript, never trusted from the entry, so a
+    # stored reading cannot validate itself. A turn with none needs no reading, which is
+    # what makes legacy entries (written when any candidate was refused outright) valid.
+    return not unquoted_candidates(candidates, entry.get('reading') or '')
 
 
 def acknowledgement_evidence(sess, actor, stamp, ident, records):
