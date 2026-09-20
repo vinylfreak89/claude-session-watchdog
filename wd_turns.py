@@ -142,12 +142,26 @@ def record_disposition(sess, actor, state, mode, stamp, reason, reading=None):
     store = 'held_turns' if mode == 'hold' else 'closed_turns'
     previous = state.setdefault(store, {}).get(stamp)
     if previous:
-        if valid_disposition(sess, turn, previous, mode):
+        if previous.get('turn_hash') == entry['turn_hash']:
+            # Same turn, same content: a differing reason here is a REWRITE of history, and
+            # that stays refused. Identical is a no-op.
             if previous['reason'] != reason or previous['actor'] != actor:
                 raise D.EvidenceError('an existing audited disposition cannot be rewritten')
             return False
-        # Do not relabel unverifiable legacy records as if they had new provenance.
-        raise D.EvidenceError('legacy disposition lacks auditable provenance; it cannot be rewritten')
+        # Different content = a later state of the turn, so the old decision is STALE, not a
+        # lock. Owner's ruling, 2026-09-20: "Nothing should ever be permanently stuck. If the
+        # previous decision was overridden, then a stale entry should be superseded and the
+        # new decision should close it via roll up."
+        #
+        # Blocking here made early disposal permanently unfixable, which is the alarm stuck ON
+        # -- and the watchdog had argued FOR keeping that, on the reasoning that permanence was
+        # the penalty for disposing of a turn before it finished. His design is the opposite
+        # and matches the rest of this system (promise, owed): the penalty is VISIBILITY. The
+        # superseded entry is kept in full, with its own hash and timestamp, so an early
+        # disposal is on the record forever instead of silently vanishing into a fresh one.
+        history = list(previous.get('superseded') or [])
+        history.append({k: v for k, v in previous.items() if k != 'superseded'})
+        entry['superseded'] = history
     state[store][stamp] = entry
     return True
 
