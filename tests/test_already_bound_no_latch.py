@@ -21,8 +21,9 @@ def main():
         st = os.path.join(tmp, 'state'); shutil.copytree(os.path.join(ROOT, 'state'), st)
         path = os.path.join(st, 'state.json'); s = json.load(open(path)); s.pop('receipt_recording_failure', None)
         # A real delivery whose receipt is already bound to a turn, and an earlier turn it could answer.
+        # a receipt whose id is a plain transcript uuid (an absorbed:<sha> id resolves differently)
         rid, rec = next((k, v) for k, v in sorted((s.get('send_receipts') or {}).items(), key=lambda kv: str(kv[1].get('ts')))[::-1]
-                        if isinstance(v, dict) and v.get('turn_ts'))
+                        if isinstance(v, dict) and v.get('turn_ts') and not k.startswith('absorbed:'))
         json.dump(s, open(path, 'w'))
         other = '2026-09-19T11:51:31.291Z'
         assert other != rec['turn_ts']

@@ -699,8 +699,9 @@ def run(a, ap):
             WK.save_state(a.state_dir, state)
             print('no queued item %s' % i); return 1
         if not mid:
-            D.recording_failed(state, 'sent1', 'missing target delivery uuid', item_id=i)
-            WK.save_state(a.state_dir, state)
+            # A call with no id at all is a usage error, not a delivery in an unknown state:
+            # nothing was named, so nothing can be unresolved. It refuses without latching the
+            # send gate (2026-09-20: a shell variable that came back empty stopped every send).
             print('REFUSED: sent1 <id> <message_id>. The message id is what ties this mark to a '
                   'delivery that can be checked.'); return 1
         # The acceptance lives on the ITEM, set when it was queued or with `queue acted-when`.
