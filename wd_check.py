@@ -17,7 +17,7 @@
         runs the check, builds the fixed-form message from ITS output (the model supplies class and quote only),
         applies dedupe and the quiet rule, logs it to findings.md and proposes it. Then: wd.sh sent Fn <message_id>.
 The model does the reading; this does the measuring and the wording. It cannot emit a result it did not compute."""
-import os, sys, json, argparse, glob, time, collections, copy
+import os, sys, json, argparse, glob, re, time, collections, copy
 from types import SimpleNamespace
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wd_lib as W
@@ -574,6 +574,12 @@ def run(a, ap):
     if a.mode == 'relayed':
         ts = a.rest[0] if a.rest else ''
         if not ts: ap.error('relayed <turn end_ts>')
+        # The watermark advances by max(), so ANY string sorting above the current value
+        # marks every owed turn relayed at once -- the alarm silenced by a typo. `--help`
+        # sorts BELOW an ISO timestamp and so did nothing when it was run on 2026-09-20;
+        # `zzz` would have wiped the whole backlog. The argument must BE a timestamp.
+        if not re.match(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}', ts):
+            print('REFUSED: relayed <turn end_ts>; %r is not an ISO timestamp' % ts); return 1
         state['last_relay_ts'] = max(ts, state.get('last_relay_ts') or '')
         WK.save_state(a.state_dir, state)
         print('relayed to the owner up to %s' % state['last_relay_ts']); return 0
