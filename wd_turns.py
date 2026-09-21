@@ -28,8 +28,50 @@ def initialize_tracking(state):
     return True
 
 
+# The record types that ARE the turn. Everything else in a turn's record span is
+# session-level bookkeeping that the harness rewrites in place, and hashing it made a
+# disposition's validity depend on things that have nothing to do with the turn.
+#
+# MEASURED, 2026-09-21, and this is the defect: 23 of 46 recorded dispositions -- half of
+# every hold and close this tool had ever made -- were silently invalid. They did not
+# error. `valid_disposition` simply returned False and the turns reappeared as owed, which
+# reads exactly like unfinished work rather than like a broken instrument.
+#
+# The proof is `last-prompt`. It sits inside an already-completed turn's span, carries no
+# timestamp, and holds the owner's MOST RECENT message to the target -- so every time he
+# typed anything, the fingerprint of old finished turns changed underneath their
+# dispositions. `bridge-session` does the same with a `lastSequenceNum` that increments
+# continuously. End-bounding the span by timestamp recovers none of them, because these
+# records are not late arrivals; they are mutable rows rewritten where they already sat.
+#
+# An ALLOWLIST, not a denylist, on purpose: a new bookkeeping record type the harness
+# starts writing would silently re-break this under a denylist, and the failure would look
+# like owed work again.
+TURN_CONTENT_TYPES = ('assistant', 'user', 'attachment', 'queue-operation', 'system')
+
+# Dispositions recorded before this instant were hashed under the old whole-span scheme,
+# whose inputs have since drifted, so their hashes can never be reproduced. They were
+# audited when they were made and they stay valid on their other clauses. This is frozen
+# and bounded -- it can only ever cover entries that already exist, never a future one --
+# and it is the same device as `legacy_answered_through` above.
+FINGERPRINT_SCHEME_CHANGED_AT = '2026-09-21T09:12:00Z'
+
+
 def fingerprint(turn):
-    return hashlib.sha256(json.dumps(turn.records, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    """Hash what the turn SAID, not the session bookkeeping filed alongside it.
+
+    The empty fallback is not defensive padding; it closes a hole the allowlist opens.
+    If a turn's records carry no recognised content type -- a record shape this tool has
+    not seen, or a caller passing rows without a `type` -- the filter yields [], every
+    such turn hashes to the SAME digest, and a disposition recorded against one would
+    validate against any other. That is strictly worse than the drift being fixed here:
+    drift refuses a good disposition, collapse accepts a wrong one. So when the filter
+    finds nothing, hash the whole span, which is unstable but never ambiguous.
+    """
+    content = [r for r in turn.records if r.get('type') in TURN_CONTENT_TYPES]
+    if not content:
+        content = turn.records
+    return hashlib.sha256(json.dumps(content, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
 REQUEST_RE = re.compile(r'(?im)(?:^|[.!:]\s+)(?:please\s+)?(?:who|what|when|where|why|how|which|can you|could you|would you|will you|do you|are you|is it|should I|shall I|tell me|let me know|confirm|clarify|choose|decide|advise)\b')
@@ -170,8 +212,16 @@ def valid_disposition(sess, turn, entry, mode):
     if not (isinstance(entry, dict) and bool(str(entry.get('reason') or '').strip())
             and isinstance(entry.get('actor'), str) and bool(entry['actor'])
             and entry.get('ruling') == RULINGS[mode] and bool(entry.get('at'))
-            and entry.get('target') == sess['sessionId']
-            and entry.get('turn_hash') == fingerprint(turn)):
+            and entry.get('target') == sess['sessionId']):
+        return False
+    # Pre-migration entries keep every clause above; only their unreproducible hash is
+    # excused, and only because the scheme that produced it hashed mutable rows. A new
+    # entry can never reach this branch, because `at` is stamped at write time.
+    try:
+        legacy = D.epoch(entry['at']) < D.epoch(FINGERPRINT_SCHEME_CHANGED_AT)
+    except Exception:
+        legacy = False
+    if not legacy and entry.get('turn_hash') != fingerprint(turn):
         return False
     candidates, hard = question_candidates(turn)
     if hard:
@@ -240,7 +290,19 @@ def acknowledged_turns(sess, actor, state):
                 if not isinstance(entry, dict) or not isinstance(entry.get('reason'), str) or not entry['reason'].strip():
                     raise D.EvidenceError('missing acknowledgement prose')
                 expected = acknowledgement_evidence(sess, actor, entry.get('turn_ts'), entry.get('message_id'), records)
-                if any(entry.get(k) != v for k, v in expected.items()):
+                # An acknowledgement stores the same turn_hash as a hold or a close, so the
+                # fingerprint-scheme change reaches it identically and it takes the identical
+                # frozen frontier -- one rule, not a second mechanism. Every other field
+                # (target, actor, turn_ts, message_id, delivery_ts, body_hash) is still
+                # reproduced from the transcript for old and new entries alike; the delivery
+                # binding is what proves an acknowledgement, and that is untouched.
+                try:
+                    legacy = D.epoch(entry.get('at')) < D.epoch(FINGERPRINT_SCHEME_CHANGED_AT)
+                except Exception:
+                    legacy = False
+                compare = {k: v for k, v in expected.items()
+                           if not (legacy and k == 'turn_hash')}
+                if any(entry.get(k) != v for k, v in compare.items()):
                     raise D.EvidenceError('recorded acknowledgement differs from transcript evidence or actor')
                 existing = (state.get('send_receipts') or {}).get(entry['message_id'])
                 if existing is not None and existing.get('turn_ts') != entry['turn_ts']:
