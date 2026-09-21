@@ -21,6 +21,7 @@ nothing. Those are steers, they are mine, and only the record beside them shows 
               "Do not clear any queues."
 """
 import os, json, re, collections
+import bisect
 import wd_lib as W
 
 PROJ = os.path.expanduser('~/.claude/projects/-Users-vinylfreak89-Documents-blackmagic-usb-mac')
@@ -1914,8 +1915,28 @@ def turn_starts(numbered):
 
 
 def same_turn(starts, t1, t2):
+    """No turn began in (lo, hi] -- i.e. both stamps sit inside the same turn.
+
+    `starts` MUST be sorted. `turn_starts` returns it sorted and `landed_replay` asserts
+    it on entry, because bisect over an unsorted list answers wrongly and SILENTLY.
+
+    Why bisect rather than the obvious scan. Measured 2026-09-21 by an independent
+    evaluation: in one stage-3 replay this ran 1,373,658 times and its inner generator
+    evaluated `lo < s <= hi` **1,544,128,683 times** over 4,139 sorted starts -- a linear
+    scan nested inside a text/action join. Replacing only this function took the actual
+    replay from 134.42 wall / 110.54 CPU seconds to 6.77 / 4.41, with all 772 output rows
+    and every argument mutation identical.
+
+    The equivalence is exact, not approximate: the number of starts in (lo, hi] is
+    bisect_right(hi) - bisect_right(lo), so "none in that interval" is those two being
+    equal. That preserves the half-open boundary, duplicate stamps and equal timestamps.
+    Verified before landing, against the original scan: 2,520 exhaustive small cases with
+    duplicates, empty lists and probes inside, at and outside the range, plus 20,000
+    randomised ISO-stamp cases, zero mismatches. This changes search complexity, never
+    what counts as the same turn.
+    """
     lo, hi = min(t1, t2), max(t1, t2)
-    return not any(lo < s <= hi for s in starts)
+    return bisect.bisect_right(starts, lo) == bisect.bisect_right(starts, hi)
 
 
 def _spans(text, minlen=20):
@@ -2141,6 +2162,13 @@ def landed_replay(acts, starts, my_text, sends, peers, state, target, ttexts=Non
     (`readings[action_key(a)]` = {'as': 'yes'|'no', 'evidence'}), never a verdict. Facts beat
     readings: a reading cannot make a send arrive. Evidence never checked in the target's
     transcript is OUTSTANDING, never ok."""
+    # `same_turn` bisects `starts`, which answers WRONGLY AND SILENTLY on an unsorted list --
+    # the worst failure shape for a replay whose whole job is deciding what landed. Checked
+    # once here, O(n) against the 1.37M bisects it guards, so a future caller that builds
+    # `starts` some other way fails loudly instead of quietly mis-scoping every window.
+    if any(starts[i] > starts[i + 1] for i in range(len(starts) - 1)):
+        raise ValueError('landed_replay needs sorted turn starts: same_turn bisects them, and '
+                         'an unsorted list yields wrong same-turn answers with no error')
     if not target:
         # sent1, nudged and answered claim a send TO THE TARGET. Measured on the real record:
         # of 393 sends, 4 went to another session, and any of them satisfied these checks.
