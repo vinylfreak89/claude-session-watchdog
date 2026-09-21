@@ -467,12 +467,98 @@ def due_questions(sess, state, quiet_min):
         elif age >= 3: out.append((k, q, 'moved %d turns past the ask' % age, age))
     return out
 
+
+def superseding_item(state, item):
+    """The live work that has replaced this owed item, if any.
+
+    Supersession is READ, never inferred from similarity: a burned-and-re-queued item
+    is archived with an `answers` entry naming why, and its replacement carries the
+    same acceptance spec. An item with no live successor is its own prod target.
+    """
+    spec = item.get('acted_when')
+    if not spec:
+        return None
+    for other in state.get('owner_queue') or []:
+        if other is item or other.get('sent'):
+            continue
+        if other.get('acted_when') == spec:
+            return other
+    return None
+
+
+def due_items(sess, state, quiet_min, unacted):
+    """Delivered items whose acceptance has not come true and that must now be PRODDED.
+
+    Owner, 2026-09-21: "Each owed item should prod directly for it or its superseded
+    work only. That's the change you need. Right now you are just firing bullets
+    without looking for the target."
+
+    Before this, an open QUESTION was nudged and an owed ITEM was not. A delivered item
+    simply sat in `SENT, NOT YET ACTED ON` while the gate printed a global SEND NOTHING,
+    so the loop's whole response to owed work was to STOP rather than to go and ask
+    about the specific thing that was owed. Measured the same day: a render item
+    delivered at 07:47:54 sat unacted for fifty minutes; in that window the owner's next
+    request could not be sent, was never prodded for, and nothing in the tool ever named
+    the render as the thing to ask about.
+
+    The prod is DIRECTED, which is the entire point. It names ONE item, its acceptance,
+    and what would satisfy it -- or, where that item has been superseded, it names the
+    successor INSTEAD, so a stale requirement is never chased. "or its superseded work
+    only" is the owner's phrase and it is a restriction, not an extension: one prod per
+    live thread, aimed at what is actually current.
+
+    It is not a licence to interrupt. The trigger mirrors the question nudge's, so a
+    target that is actively working is left alone; and a successor still under a hold is
+    not a prod target, because its hold says the work is not due yet.
+    """
+    rows = []
+    quiet = False
+    try:
+        quiet = (W.ms_of_iso(W.now_iso()) - W.activity_ms(sess)) / 60000.0 >= quiet_min
+    except Exception:
+        pass
+    # Driven off the rows `owed` has ALREADY computed. Re-deciding every acceptance here
+    # would be a third full pass over the transcript in one poll, and `owed` was taken
+    # from 122 s to 26 s precisely by removing passes like that.
+    by_id = {i.get('id'): i for i in state.get('owner_queue') or [] if i.get('sent')}
+    for row in unacted:
+        item = by_id.get(row.get('id'))
+        if item is None or row.get('status') == A.Status.PASS.value:
+            continue
+        # Age runs from the LAST PROD, not from delivery, so recording a prod pushes the
+        # item forward instead of leaving it permanently due. `owed_min` is kept separate
+        # and always measured from delivery, because that is the number a person needs to
+        # see: an item prodded four times is still an item owed since 07:47.
+        try:
+            now_ms = W.ms_of_iso(W.now_iso())
+            owed_min = (now_ms - W.ms_of_iso(item['sent'])) / 60000.0
+            since_ms = W.ms_of_iso(item.get('last_prod') or item['sent'])
+            age_min = (now_ms - since_ms) / 60000.0
+        except Exception:
+            owed_min = age_min = 0.0
+        successor = superseding_item(state, item)
+        if successor is not None and successor.get('hold_until'):
+            successor = None
+        prods = int(item.get('prods') or 0)
+        since = 'since the last prod' if prods else 'since delivery'
+        if quiet:
+            why = ('target is quiet; owed %.0f min, %.0f min %s'
+                   % (owed_min, age_min, since))
+        elif age_min >= 30.0:
+            why = ('owed %.0f min with no acceptance evidence, %.0f min %s'
+                   % (owed_min, age_min, since))
+        else:
+            continue
+        rows.append((item, successor, why, age_min, prods))
+    return rows
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--target', required=True); ap.add_argument('--self', dest='self_sel'); ap.add_argument('--repo'); ap.add_argument('--ledger')
     ap.add_argument('--state-dir', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'state')); ap.add_argument('--quiet-min', type=float, default=10.0)
     ap.add_argument('--row-pattern', default=W.DEFAULT_ROW_PATTERN)
-    ap.add_argument('mode', choices=['check', 'finding', 'owed', 'relayed', 'hold', 'answered', 'ask', 'resolved', 'open', 'next', 'sent1', 'nudged', 'conditional', 'fired', 'closed', 'promise']); ap.add_argument('rest', nargs=argparse.REMAINDER)
+    ap.add_argument('mode', choices=['check', 'finding', 'owed', 'relayed', 'hold', 'answered', 'ask', 'resolved', 'open', 'next', 'sent1', 'nudged', 'prodded', 'conditional', 'fired', 'closed', 'promise']); ap.add_argument('rest', nargs=argparse.REMAINDER)
     a = ap.parse_args()
     with S.transaction(a.state_dir):
         return run(a, ap)
@@ -608,6 +694,25 @@ def run(a, ap):
         state.setdefault('open_questions', {})[key] = dict(
             text=text, asked_ts=W.now_iso(), asked_ct=str(st.get('ct')), resends=0, last_send=W.now_iso())
         WK.save_state(a.state_dir, state); print('open question %s registered at ct %s' % (key, st.get('ct'))); return 0
+    if a.mode == 'prodded':
+        # The item half of `nudged`, and it re-arms the same way: recording a prod pushes
+        # the clock forward so the item comes back DUE later rather than going quiet. A
+        # prod is never permanently satisfied, only temporarily -- the acceptance closes
+        # it, and nothing else does. Refused on an unsent or already-satisfied item so a
+        # prod cannot be recorded against work that was never delivered.
+        ident = a.rest[0] if a.rest else ''
+        if not ident: ap.error('prodded <item id>')
+        matches = [i for i in state.get('owner_queue') or [] if i.get('id') == ident]
+        if len(matches) != 1:
+            print('no single unsettled queue item %s' % ident); return 1
+        item = matches[0]
+        if not item.get('sent'):
+            print('REFUSED: %s was never delivered; there is nothing to prod for' % ident); return 1
+        item['prods'] = int(item.get('prods') or 0) + 1
+        item['last_prod'] = W.now_iso()
+        WK.save_state(a.state_dir, state)
+        print('prodded %s (%d prod(s)); still owed until: %s'
+              % (ident, item['prods'], item.get('acted_when'))); return 0
     if a.mode == 'nudged':
         # `resends` existed from the start and NOTHING incremented it, so every question read
         # "0 resend(s)" however often it was re-sent -- a counter that cannot count. Recording a
@@ -776,8 +881,26 @@ def run(a, ap):
             print('   %s %s: %s' % (e['ts'], e['agent'], ' | '.join(e['open'])))
         # In the headline the monitor already reads, for the same reason the nudge is: a section
         # further down is not an alarm.
-        print('SENT, NOT YET ACTED ON: %d%s' % (len(unacted),
+        # Owner, 2026-09-21: "Each owed item should prod directly for it or its superseded
+        # work only... Right now you are just firing bullets without looking for the target."
+        # The prod rides in the headline for the same reason the question nudge does: a
+        # section further down is not an alarm. An owed item now names the ONE thing to ask
+        # about, so the response to owed work is a directed question, not a global stop.
+        prods = due_items(sess, state, a.quiet_min, unacted)
+        print('SENT, NOT YET ACTED ON: %d  DUE PRODS: %d%s' % (len(unacted), len(prods),
               ('  (closed this poll: %s)' % ', '.join(closed)) if closed else ''))
+        for item, successor, why, age_min, count in prods:
+            if successor is not None:
+                print('   ** PROD %-6s SUPERSEDED by %s -- prod for THAT and let %s lie'
+                      % (item.get('id'), successor.get('id'), item.get('id')))
+                print('      %s  (%d prod(s) so far)' % (why, count))
+                print('      ask for: %s' % successor.get('acted_when'))
+                print('      then: wd.sh prodded %s' % successor.get('id'))
+            else:
+                print('   ** PROD %-6s %s  (%d prod(s) so far)' % (item.get('id'), why, count))
+                print('      ask ONLY for this: %s' % item.get('acted_when'))
+                print('      %s' % W.short(item.get('text', ''), 200))
+                print('      then: wd.sh prodded %s' % item.get('id'))
         for u in unacted:
             print('   %s sent %s -- waiting on: %s' % (u['id'], u['sent'], u['spec']))
             print('      %s: %s' % (u['status'], W.short(u['evidence'], 300)))

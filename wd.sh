@@ -5,6 +5,8 @@
 #   wd.sh wake --trigger '<line>'   analyse the latest completed turn / the stall / the reply; print the report
 #   wd.sh sent F1,F2 <message_id>   record that findings were sent (opens the reply window when one asked for a reply)
 #   wd.sh veto F3 "reason"          record a veto
+#   wd.sh prodded <item id>         record that you prodded for a delivered item that has not been acted on
+#                                   (owed items now name the ONE thing to ask about; prodding re-arms its clock)
 #   wd.sh owed                      what the watchdog still owes: turns nobody relayed, and actions the target declared and did not take
 #   wd.sh answered <delivery_uuid> verify a registered payload in the target transcript; delivery alone is not action
 #   wd.sh answered --owner-ack "<his words>"  the owner-authorized acknowledgement exception; empty words are refused
@@ -74,6 +76,7 @@ case "$cmd" in
   next)   exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" next ;;
   sent1)  exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" sent1 "$@" ;;
   nudged) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" nudged "$@" ;;
+  prodded) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" prodded "$@" ;;
   conditional) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" conditional "$@" ;;
   fired)  exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" fired "$@" ;;
   closed) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" closed "$@" ;;
