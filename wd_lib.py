@@ -1016,18 +1016,52 @@ def absorbed_receipt(records, body, sent_ts):
     envelope body is this message, arriving at or after the call. Only the removal counts
     -- the host also writes a queued_command attachment for the same delivery, and
     counting both would make every absorbed reply ambiguous. A second matching removal
-    is ambiguity, and ambiguity credits nothing."""
+    is ambiguity, and ambiguity credits nothing.
+
+    The VALIDATION is hoisted; the DECISION is not. Measured 2026-09-21: 343 calls costing
+    13.3 s of one `owed`, each re-walking the whole receiver transcript and re-validating
+    every absorbed delivery in it -- work that depends only on the records, never on the
+    body or the timestamp being asked about. So the validated deliveries are built once per
+    record set and grouped by body.
+
+    What deliberately stays per-call is the part that decides: the arrival-time filter and
+    the exactly-one rule are still applied to the candidate LIST for each query. Grouping to
+    a single record instead of a list would silently weaken the ambiguity guard -- two
+    matching removals must still credit nothing, and that is the whole point of the rule."""
     import wd_receipts as D
-    hits = []
+    index = _absorbed_index(records)
+    floor = D.epoch(sent_ts)
+    hits = [rec for rec in index.get(body, ()) if D.epoch(rec['ts']) >= floor]
+    return len(hits) == 1
+
+
+_ABSORBED_INDEX = {}
+
+
+def _absorbed_index(records):
+    """body -> [validated absorbed delivery, ...], built once per record set.
+
+    Keyed on the identity of the records, like every other index here: length plus the `is`
+    identity of the first and last record. There is no path to stat and nothing to disagree
+    with, which is the property the append race taught us to want.
+    """
+    import wd_receipts as D
+    key = (len(records), id(records[0]) if records else 0, id(records[-1]) if records else 0)
+    cached = _ABSORBED_INDEX.get(key)
+    if cached is not None and (not records or (cached[0] is records[0] and cached[1] is records[-1])):
+        return cached[2]
+    index = {}
     for r in records:
         if not D.is_absorbed_delivery(r): continue
         sender = re.search(r'<cross-session-message\s+from="([^"<>]*)"', r['content'])
         if not sender: continue
         try: rec = D.delivery(r, sender.group(1))
         except D.EvidenceError: continue
-        if rec['body'] == body and D.epoch(rec['ts']) >= D.epoch(sent_ts):
-            hits.append(rec)
-    return len(hits) == 1
+        index.setdefault(rec['body'], []).append(rec)
+    _ABSORBED_INDEX.clear()
+    _ABSORBED_INDEX[key] = (records[0] if records else None,
+                            records[-1] if records else None, index)
+    return index
 
 
 def messages_to_watchdog(turn, self_session_id=None):

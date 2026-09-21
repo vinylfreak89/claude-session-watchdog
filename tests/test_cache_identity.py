@@ -183,6 +183,31 @@ def main():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
+        # 6. THE ABSORBED-REPLY INDEX. Its validation is hoisted (343 calls / 13.3 s in one
+        #    `owed`, each re-walking the whole receiver transcript), but the DECISION is not:
+        #    the arrival-time filter and the exactly-one rule still run per query against the
+        #    candidate LIST. Grouping to a single record would silently destroy the ambiguity
+        #    guard, which is the one property this function exists to enforce.
+        def absorbed(body, ts):
+            return {'type': 'queue-operation', 'operation': 'remove',
+                    'reason': 'absorbed_mid_turn', 'timestamp': ts,
+                    'content': '<cross-session-message from="peer-1">%s</cross-session-message>' % body}
+        floor = '1970-01-01T00:00:00.000Z'
+        one = [absorbed('same body', '2026-09-21T10:00:00.000Z')]
+        two = [absorbed('same body', '2026-09-21T10:00:00.000Z'),
+               absorbed('same body', '2026-09-21T11:00:00.000Z')]
+        ok &= check('one absorbed match credits', W.absorbed_receipt(one, 'same body', floor) is True)
+        ok &= check('TWO matches credit NOTHING -- the ambiguity guard survives grouping',
+                    W.absorbed_receipt(two, 'same body', floor) is False)
+        ok &= check('  and the arrival-time filter can still reduce two candidates to one',
+                    W.absorbed_receipt(two, 'same body', '2026-09-21T10:30:00.000Z') is True)
+        ok &= check('  a body that never arrived credits nothing',
+                    W.absorbed_receipt(two, 'never sent', floor) is False)
+        # the index must be keyed to its records, not leak between different sets
+        ok &= check('  a different record set is not answered from the previous index',
+                    W.absorbed_receipt(one, 'same body', floor) is True and
+                    W.absorbed_receipt(two, 'same body', floor) is False)
+
     print('\n%s' % ('ALL PASS' if ok else 'FAILURES ABOVE'))
     return 0 if ok else 1
 
