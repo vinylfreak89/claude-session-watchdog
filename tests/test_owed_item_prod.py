@@ -31,11 +31,28 @@ NOW = '2026-09-21T09:00:00.000Z'
 
 
 def prods(items, quiet=False, now=NOW):
-    """Run the REAL due_items against a stubbed clock; no live transcript is involved."""
-    real_now, real_act = W.now_iso, getattr(W, 'activity_ms', None)
+    """Run the REAL due_items against a stubbed clock and a stubbed SESSION SOURCE.
+
+    THE BUG THIS SHAPE EXISTS TO PREVENT. The first version of this file did
+    `W.activity_ms = lambda sess: ...`, creating the function it was supposed to be
+    testing. `wd_lib.activity_ms` did not exist; `due_items` called it, the blanket
+    `except Exception` swallowed the AttributeError, and the quiet trigger never fired in
+    production -- while every case here passed, because each one ran against the stub.
+    An independent evaluation found it on 2026-09-21; this suite did not, and could not.
+
+    So the rule here is: stub the INPUTS the real function reads, never the function.
+    `activity_ms` reads `read_state(sess)['lastActivityAt']` and the last turn's end, so
+    those are what get replaced. If `activity_ms` is deleted or renamed again, case 3
+    fails with AttributeError instead of quietly passing.
+    """
+    assert hasattr(W, 'activity_ms'), \
+        'wd_lib.activity_ms is missing -- the exact defect this test was blind to before'
+    real_now = W.now_iso
+    real_read_state, real_last_turns = W.read_state, W.last_turns
     W.now_iso = lambda: now
-    # activity_ms decides `quiet`; 0 min idle when busy, 99 min when quiet.
-    W.activity_ms = lambda sess: W.ms_of_iso(now) - (99 if quiet else 0) * 60000
+    idle_ms = (99 if quiet else 0) * 60000
+    W.read_state = lambda sess: {'lastActivityAt': W.ms_of_iso(now) - idle_ms}
+    W.last_turns = lambda sess, n=1: (None, [])
     try:
         state = {'owner_queue': items}
         unacted = [dict(id=i.get('id'), sent=i.get('sent'), spec=i.get('acted_when'),
@@ -44,8 +61,7 @@ def prods(items, quiet=False, now=NOW):
         return C.due_items(object(), state, 10.0, unacted)
     finally:
         W.now_iso = real_now
-        if real_act is not None:
-            W.activity_ms = real_act
+        W.read_state, W.last_turns = real_read_state, real_last_turns
 
 
 def item(ident, sent_min_ago=None, acceptance='file /tmp/thing.mp4', **kw):

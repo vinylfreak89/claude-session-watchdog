@@ -149,6 +149,40 @@ def read_state(sess):
     return dict(ct=d.get('completedTurns'), cec=d.get('contextExceededCount'), lastActivityAt=d.get('lastActivityAt'),
                 title=d.get('title'), permissionMode=d.get('permissionMode'))
 
+def activity_ms(sess):
+    """Whichever source saw the target most recently, in epoch ms. Never regresses.
+
+    THIS FUNCTION DID NOT EXIST, and two callers had been calling it for however long:
+    `wd_check.due_questions` (the question nudge) and `wd_check.due_items` (the owed-item
+    prod). Both wrap the call in a blanket `except Exception` and fall back to
+    `quiet = False`, so the AttributeError was swallowed and the QUIET TRIGGER OF BOTH
+    ALARMS SILENTLY NEVER FIRED -- only their age thresholds worked. Found 2026-09-21 by an
+    independent evaluation; the prod's own test had invented a stub of this name while
+    stubbing the clock, which is what let a nonexistent API certify the integration.
+
+    The semantics are `wd_wait.Watcher.activity_ms`'s, deliberately, because that is the
+    one place this was implemented correctly and the reason is measured: the app's
+    `lastActivityAt` DOES NOT ADVANCE during a turn the app is not attached to -- a
+    peer-opened turn freezes it at the moment of delivery. Measured 2026-09-10,
+    lastActivityAt 07:06:35 against a transcript record at 07:12:18, fourteen tool calls
+    into an open turn. Reading idle from it alone would therefore report minutes of silence
+    while the target is working, and for an alarm that decides whether to interrupt, that
+    error points the wrong way: it prods a busy session. So take the LATER of the two.
+    """
+    last_act = None
+    try:
+        last_act = read_state(sess).get('lastActivityAt')
+    except Exception:
+        pass
+    last_record = None
+    try:
+        _, turns = last_turns(sess, n=1)
+        last_record = ms_of_iso(turns[-1].end_ts) if turns else None
+    except Exception:
+        pass
+    return max(last_act or 0, last_record or 0) or None
+
+
 def transcript_path(sess):
     p = os.path.join(PROJECTS, slug(sess['cwd']), (sess['cli'] or '') + '.jsonl')
     if os.path.exists(p): return p
