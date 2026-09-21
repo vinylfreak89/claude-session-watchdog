@@ -487,10 +487,16 @@ def split_turns(records):
         key = (len(records), id(records[0]), id(records[-1]))
         hit = _TURNS_CACHE.get(key)
         if hit is not None and hit[0] is records[0] and hit[1] is records[-1]:
+            _TURNS_CACHE.pop(key)
+            _TURNS_CACHE[key] = hit
             return hit[2]
     turns = _split_turns_uncached(records)
     if records:
         _TURNS_CACHE[key] = (records[0], records[-1], turns)
+        # Old turns retain their entire source snapshot. Bound retention during
+        # a growing poll; eviction only recomputes structure, never a verdict.
+        while len(_TURNS_CACHE) > 8:
+            _TURNS_CACHE.pop(next(iter(_TURNS_CACHE)))
     return turns
 
 

@@ -300,6 +300,25 @@ def main():
             built = False
         ok &= check('an unrelated non-hashable uuid does not crash the index', built)
 
+    # A growing poll must not retain every old full transcript through its turns.
+    W._TURNS_CACHE.clear()
+    def turn_records(n):
+        return [dict(type='user', promptId=str(n), timestamp='2026-09-21T00:00:00Z',
+                     message=dict(content='request')),
+                dict(type='assistant', timestamp='2026-09-21T00:00:01Z',
+                     message=dict(content='reply %d' % n, stop_reason='end_turn'))]
+    hot = turn_records(0)
+    hot_turns = W.split_turns(hot)
+    for n in range(1, 21):
+        rows = turn_records(n)
+        W.split_turns(rows)
+        ok &= W.split_turns(hot) is hot_turns
+    ok &= check('turn cache retains at most eight snapshots, keeping a repeatedly used snapshot hot',
+                len(W._TURNS_CACHE) <= 8 and W.split_turns(hot) is hot_turns)
+    ok &= check('evicted turns rebuild with the same content',
+                [t.assistant_texts for t in W.split_turns(turn_records(1))] ==
+                [t.assistant_texts for t in W._split_turns_uncached(turn_records(1))])
+
     print('\n%s' % ('ALL PASS' if ok else 'FAILURES ABOVE'))
     return 0 if ok else 1
 
