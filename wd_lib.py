@@ -47,15 +47,34 @@ def ms_of_iso(ts):
 def now_iso():
     return datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
 
+_EPOCH_CACHE = {}
+_EPOCH_ZERO = datetime.datetime(1970, 1, 1)
+
+
 def epoch_from_iso(s):
+    """Memoised: the same stamps are parsed over and over across one pass.
+
+    Measured 2026-09-21 by cProfile on `owed`: 1,628,915 _strptime calls costing 10.3 s,
+    because every record's timestamp is re-parsed by every check that looks at it, and a
+    stamp without fractional seconds pays TWO failed parses before the second format
+    matches. The distinct stamps number in the tens of thousands, so the answer is cached
+    by its exact string. Parsing itself is unchanged -- same formats, same order, same
+    None for anything unparseable -- so no decision can move.
+    """
     if not s: return None
-    s = s.rstrip('Z')
+    cached = _EPOCH_CACHE.get(s, _EPOCH_CACHE)
+    if cached is not _EPOCH_CACHE:
+        return cached
+    body = s.rstrip('Z')
+    value = None
     for fmt in ('%Y-%m-%dT%H:%M:%S.%f', '%Y-%m-%dT%H:%M:%S'):
         try:
-            return (datetime.datetime.strptime(s, fmt) - datetime.datetime(1970, 1, 1)).total_seconds()
+            value = (datetime.datetime.strptime(body, fmt) - _EPOCH_ZERO).total_seconds()
+            break
         except ValueError:
             pass
-    return None
+    _EPOCH_CACHE[s] = value
+    return value
 
 def iso_from_epoch(e):
     return datetime.datetime.utcfromtimestamp(e).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -382,7 +401,31 @@ def _grab(pat, s, flags=re.S):
     m = re.search(pat, s or '', flags)
     return m.group(1).strip() if m else None
 
+_TURNS_CACHE = {}
+
+
 def split_turns(records):
+    """Memoised on the identity of the records it was handed.
+
+    Measured 2026-09-21 by cProfile on `owed`: 180 calls costing 26.4 s of a 72 s run,
+    re-splitting the same transcript over and over. read_records serves a fresh list over
+    the SAME record dicts from its own version-keyed cache, so identical objects mean an
+    identical split. The key is length plus the identity of the first and last record, and
+    a hit is CONFIRMED by comparing those objects with `is` before it is served -- an id()
+    can be reused after garbage collection, so the key alone is not evidence.
+    """
+    if records:
+        key = (len(records), id(records[0]), id(records[-1]))
+        hit = _TURNS_CACHE.get(key)
+        if hit is not None and hit[0] is records[0] and hit[1] is records[-1]:
+            return hit[2]
+    turns = _split_turns_uncached(records)
+    if records:
+        _TURNS_CACHE[key] = (records[0], records[-1], turns)
+    return turns
+
+
+def _split_turns_uncached(records):
     turns, prev_pid, cur = [], None, None
     for r in records:
         ty = r.get('type')
@@ -915,9 +958,13 @@ def message_to_session(call, session_id):
     if not isinstance(mid, str) or not mid: return False
     import wd_receipts as D
     receiver = find_session(session_id)
-    records = D.read_records(transcript_path(receiver))
-    hits = [r for r in records if isinstance(r.get('origin'), dict) and r['origin'].get('msg_id') == mid
-            and r.get('type') in ('user', 'attachment')]
+    path = transcript_path(receiver)
+    records = D.read_records(path)
+    # Indexed rather than scanned. Measured 2026-09-21: 18,235 calls each walking all 70,812
+    # records for one msg_id -- 1.3 billion iterations, 31 s of a 36 s `owed` run. The index
+    # is built once per transcript version and holds exactly the records this scan selected,
+    # so the hits and the len(hits) != 1 rule below are unchanged.
+    hits = _origin_index(path, records).get(mid, [])
     if hits:
         if len(hits) != 1: return False
         try: rec = D.delivery(hits[0], hits[0]['origin'].get('from'))
@@ -962,3 +1009,35 @@ def messages_to_watchdog(turn, self_session_id=None):
 def watchdog_self_session():
     """The session running this code, if any (env var set by the wake wrapper), else None."""
     return os.environ.get('WD_SELF_CLI')
+
+
+_ORIGIN_INDEX = {}
+
+
+def _origin_index(path, records):
+    """msg_id -> delivery records, built once per transcript version.
+
+    Same shape as wd_receipts._msg_id_results and for the same reason: the inputs cannot
+    change within a file version, so the answer is built once. Keyed on realpath, size and
+    mtime so an appended record invalidates it and a stale view is never served.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return {}
+    key = (os.path.realpath(path), st.st_size, st.st_mtime_ns)
+    cached = _ORIGIN_INDEX.get(key)
+    if cached is not None:
+        return cached
+    index = {}
+    for r in records:
+        origin = r.get('origin')
+        if not isinstance(origin, dict): continue
+        if r.get('type') not in ('user', 'attachment'): continue
+        mid = origin.get('msg_id')
+        if isinstance(mid, str) and mid:
+            index.setdefault(mid, []).append(r)
+    for stale in [k for k in _ORIGIN_INDEX if k[0] == key[0]]:
+        del _ORIGIN_INDEX[stale]
+    _ORIGIN_INDEX[key] = index
+    return index
