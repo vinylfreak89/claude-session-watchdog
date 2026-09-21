@@ -516,7 +516,9 @@ def evaluate_message(a, sess, item, args, facts, calls):
     # whole 118 MB sender transcript. Records with no readable timestamp are NOT skipped;
     # absorbed deliveries are read by delivery() itself and must still reach it.
     earliest = min(D.epoch(c['ts']) for c in sent)
-    for record in D.read_records(W.transcript_path(sender)):
+    # The parse snapshot keeps raw candidates, not validated receipts. Every
+    # candidate still reaches delivery(), including fresh sender-side evidence.
+    for record in D.read_records(W.transcript_path(sender), deliveries_only=True):
         stamp = record.get('timestamp')
         if isinstance(stamp, str) and stamp:
             try:

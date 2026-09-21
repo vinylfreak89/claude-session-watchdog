@@ -1,5 +1,7 @@
 """Transcript-derived delivery receipts. Caller supplied IDs are never receipt evidence."""
+from dataclasses import dataclass
 import hashlib
+import io
 import json
 import math
 import os
@@ -106,70 +108,94 @@ def recording_problem(sess, state):
     return None
 
 
+@dataclass(frozen=True)
+class _RecordSnapshot:
+    version: object
+    records: list
+    deliveries: list
+    size: int
+    digest: bytes
+    lines: int
+    terminated: bool
+
+
 _RECORDS_CACHE = {}
 
 
-def read_records(path):
-    """Parse a transcript once per process per file version.
+def _file_version(st):
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
 
-    A single `owed` pass re-read the two transcripts 204 times (measured
-    2026-09-18: 171 of 188 seconds, files of 104 and 322 MB), because every
-    check opens the whole file. Callers get a fresh list over shared record
-    dicts; nothing in the watchdog mutates a transcript record (audited when
-    this was added).
 
-    TWO CORRECTNESS DEFECTS FIXED 2026-09-21, both found by an independent
-    evaluation and both reproduced. This docstring used to claim "a stale view
-    can never be served", and that claim was false.
+def _parse_record_bytes(data, first_line=1):
+    records, lines = [], 0
+    # Match the uncached text reader's UTF-8 and universal-newline behavior.
+    with io.TextIOWrapper(io.BytesIO(data), encoding='utf-8') as stream:
+        for number, line in enumerate(stream, first_line):
+            lines += 1
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if not isinstance(record, dict):
+                raise EvidenceError('record %d is not an object' % number)
+            records.append(record)
+    return records, lines
 
-    1. THE KEY OMITTED FILE IDENTITY. It was (realpath, size, mtime_ns).
-       Atomically replace a file with different content of the same length,
-       preserving mtime, and every component still matches although the inode
-       changed: the reproduction printed "atomic replace changed inode: True
-       disk contains new: True read_records stale: old". st_dev and st_ino are
-       now in the key, so a replaced file is a different file.
 
-       AND ctime, added 2026-09-21 after a recheck reproduced the remaining hole:
-       rewrite the sender's evidence IN PLACE, same inode, same byte length, and
-       restore mtime -- every component of the key still matched, and a warm read
-       served the OLD records while a cold read REFUSED. That is fail-open credit
-       from stale parser output, and the receipt index cannot repair it: delivery()
-       runs again but is handed old sender records. ctime is the one field an
-       in-place write cannot preserve. This is metadata invalidation, not a verdict
-       cache, and it is not a universal proof against arbitrary concurrent rewrites.
+def read_records(path, *, deliveries_only=False):
+    """Read current evidence, reusing JSON decoding only for a verified prefix.
 
-    2. THE SNAPSHOT WAS NEVER CHECKED FOR CONSISTENCY. The stat was taken BEFORE
-       the read, so a record appended during the read produced a list that did
-       not correspond to its own key. These transcripts are appended to by live
-       sessions continuously, so that is the ordinary case, not an exotic one.
-       The file is now stat-ed again afterwards and the result is cached ONLY if
-       it did not move underneath the read; otherwise the records are returned
-       uncached and the next call reads again. Returning them is safe -- they
-       are a real prefix of the file. FILING them under a key they do not match
-       is what was not, because an index built over them then outlives them.
+    A growing transcript used to invalidate the entire parse on every append,
+    including when it grew DURING decoding. An active poll could therefore decode
+    hundreds of megabytes repeatedly and never finish settling its items.
+
+    On a changed version, read the bytes again and hash the entire previous prefix.
+    Only an identical SHA-256 permits reuse of its immutable record dictionaries;
+    replacement, truncation and edits within a growing file are not assumed to be
+    appends. Decode the suffix, preserving duplicate records and strict JSON errors.
+    An unterminated final line is reparsed rather than treated as a record boundary.
+
+    Device/inode/size/mtime/ctime still guard unchanged-file hits. A read that moves
+    is saved only as a byte-verified baseline, NEVER as a hit for that file version:
+    the next request reads and verifies the bytes again. No delivery or acceptance
+    verdict is cached. Callers still receive independent lists over shared records.
     """
+    realpath = os.path.realpath(path)
     try:
-        st = os.stat(path)
-    except OSError as exc:
+        version = _file_version(os.stat(path))
+        previous = _RECORDS_CACHE.get(realpath)
+        if previous is not None and previous.version == version:
+            return list(previous.deliveries if deliveries_only else previous.records)
+        with open(path, 'rb') as stream:
+            before = _file_version(os.fstat(stream.fileno()))
+            data = stream.read()
+            after = _file_version(os.fstat(stream.fileno()))
+        current = _file_version(os.stat(path))
+        stable = before == after == current and len(data) == after[2]
+        prefix = None
+        if previous is not None and previous.terminated and len(data) >= previous.size:
+            prefix = hashlib.sha256(memoryview(data)[:previous.size])
+        if prefix is not None and prefix.digest() == previous.digest:
+            tail = data[previous.size:]
+            added, lines = _parse_record_bytes(tail, previous.lines + 1)
+            records = previous.records + added
+            deliveries = previous.deliveries + [r for r in added if delivery_candidate(r)]
+            lines += previous.lines
+            prefix.update(tail)
+            digest = prefix.digest()
+        else:
+            records, lines = _parse_record_bytes(data)
+            deliveries = [r for r in records if delivery_candidate(r)]
+            digest = hashlib.sha256(data).digest()
+        _RECORDS_CACHE[realpath] = _RecordSnapshot(
+            current if stable else None, records, deliveries, len(data), digest, lines,
+            not data or data.endswith(b'\n'))
+        return list(deliveries if deliveries_only else records)
+    except (OSError, UnicodeError, ValueError) as exc:
         raise EvidenceError('cannot read complete transcript: %s' % exc)
-    key = (os.path.realpath(path), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
-    cached = _RECORDS_CACHE.get(key)
-    if cached is not None:
-        return list(cached)
-    records = _read_records_uncached(path)
-    try:
-        after = os.stat(path)
-    except OSError as exc:
-        raise EvidenceError('cannot read complete transcript: %s' % exc)
-    if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) != key[1:]:
-        return list(records)
-    for stale in [k for k in _RECORDS_CACHE if k[0] == key[0]]:
-        del _RECORDS_CACHE[stale]
-    _RECORDS_CACHE[key] = records
-    return list(records)
 
 
 def _read_records_uncached(path):
+    """Independent full-scan reference retained for differential controls."""
     records = []
     try:
         with open(path, encoding='utf-8') as f:
@@ -350,11 +376,21 @@ def delivered_text(record):
     return body
 
 
+def delivery_candidate(record):
+    """Structural eligibility only; never sender attribution or delivery credit.
+
+    Shared by the parser's ordered candidate list and the validator, so the fast
+    path cannot grow a separate definition of which record shapes are admissible.
+    """
+    origin = record.get('origin')
+    return is_absorbed_delivery(record) or (isinstance(origin, dict) and origin.get('kind') == 'peer')
+
+
 def delivery(record, sender):
     """Read the delivered envelope, excluding the host's appended guidance."""
     absorbed = is_absorbed_delivery(record)
     origin = record.get('origin')
-    if not sender or (not absorbed and (not isinstance(origin, dict) or origin.get('kind') != 'peer')):
+    if not sender or not delivery_candidate(record):
         raise EvidenceError('delivery has no structural peer provenance for this sender')
     if absorbed:
         # The host writes no origin block on an absorbed record. Authorship comes

@@ -41,6 +41,36 @@ class AcceptanceContract(ContractCase):
         self.assertEqual(rc, 0, out)
         self.assertEqual(json.loads(out)['evidence']['count'], expected, out)
 
+    def test_poll_skips_impossible_delivery_records_but_still_settles(self):
+        self.message_case('SendMessage', receive=False)
+        self.records(*(dict(type='system', uuid='noise-%d' % i, timestamp=ts(22),
+                           content='Synthetic result') for i in range(300)), path=self.mine)
+        self.records(dict(type='user', uuid='reply-control', timestamp=ts(22),
+                          origin=dict(kind='peer', **{'from': TARGET}),
+                          message=dict(content='<cross-session-message from="%s">Synthetic result</cross-session-message>' % TARGET)), path=self.mine)
+        with patch.object(D, 'delivery', wraps=D.delivery) as validate:
+            out = self.poll()
+        self.assertEqual(self.state()['owner_queue'], [], out)
+        rejected_noise = [c for c in validate.call_args_list
+                          if str(c.args[0].get('uuid', '')).startswith('noise-')]
+        self.assertEqual(len(rejected_noise), 0, 'the real poll must use the structural candidates')
+        self.assertTrue(any(c.args[0].get('uuid') == 'reply-control' for c in validate.call_args_list))
+
+    def test_warm_candidates_do_not_hide_new_sender_ambiguity(self):
+        self.message_case('SendMessage', socket=True)
+        self.assertTrue(D.read_records(str(self.mine), deliveries_only=True))
+        self.records(D.read_records(str(self.tx))[-1])
+        out = self.poll()
+        self.assertEqual(len(self.state()['owner_queue']), 1, out)
+
+    def test_candidate_with_bad_timestamp_cannot_settle(self):
+        self.message_case('SendMessage')
+        rows = D.read_records(str(self.mine))
+        rows[-1]['timestamp'] = 'unreadable'
+        self.mine.write_text(''.join(json.dumps(r) + '\n' for r in rows))
+        out = self.poll()
+        self.assertEqual(len(self.state()['owner_queue']), 1, out)
+
     def test_current_message_reply_settles_and_is_visible(self):
         q = self.message_case('SendMessage')
         self.check_message_count(1)
