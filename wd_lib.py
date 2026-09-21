@@ -130,19 +130,54 @@ def list_sessions():
     out.sort(key=lambda s: s['lastActivityAt'] or 0, reverse=True)
     return out
 
+_SESSION_CACHE = {}
+
+
 def find_session(selector):
+    """Resolve a selector once per PROCESS -- which is once per poll, and no longer.
+
+    Measured 2026-09-21: 1,475 calls costing 4.3 s and causing 26,551 read_json_retry
+    calls, because every receipt, message and acceptance check re-globs the session
+    directory and re-parses every session's metadata to resolve the same two selectors.
+
+    WHY THIS IS SAFE FOR LIVENESS, which is the obvious objection. The dict returned here
+    snapshots ct/cec/lastActivityAt, but nothing reads those from it: every live reader goes
+    through `read_state(sess)`, which re-opens `sess['state_path']` on each call (audited
+    across wd_check, wd_wake and wd_wait before this landed). What is memoised is the
+    RESOLUTION -- selector to state_path -- which is what re-globbing recomputes for nothing.
+
+    THE LIFETIME IS THE POINT. A process is one poll, so a session that appears later is
+    picked up by the next poll, exactly as the evaluation required: resolve once per poll,
+    never persist a match across them.
+
+    FAILURES ARE NOT CACHED. `find_session` raises SystemExit for no-match and for ambiguity,
+    and both are properties of the directory at that instant -- a session may appear, and an
+    ambiguity may resolve. Caching either would freeze a transient condition into the run.
+
+    A COPY is returned so a caller that annotates its session dict cannot alter what the next
+    caller resolves.
+    """
+    sel_key = selector.strip()
+    hit = _SESSION_CACHE.get(sel_key)
+    if hit is not None:
+        return dict(hit)
     ss = list_sessions()
     sel = selector.strip()
     exact = [s for s in ss if sel in (s['sessionId'], s['cli'])]
-    if len(exact) == 1: return exact[0]
+    if len(exact) == 1: return _remember(sel_key, exact[0])
     pref = [s for s in ss if (s['cli'] or '').startswith(sel) or (s['sessionId'] or '').startswith(sel)
             or (s['sessionId'] or '').startswith('local_' + sel)]
-    if len(pref) == 1: return pref[0]
+    if len(pref) == 1: return _remember(sel_key, pref[0])
     sub = [s for s in ss if sel.lower() in (s['title'] or '').lower()]
-    if len(sub) == 1: return sub[0]
+    if len(sub) == 1: return _remember(sel_key, sub[0])
     if len(sub) > 1:
         raise SystemExit('ambiguous selector %r: %s' % (sel, [(s['sessionId'], s['title']) for s in sub]))
     raise SystemExit('no session matches %r' % sel)
+
+
+def _remember(sel_key, sess):
+    _SESSION_CACHE[sel_key] = sess
+    return dict(sess)
 
 def read_state(sess):
     d = read_json_retry(sess['state_path']) or {}

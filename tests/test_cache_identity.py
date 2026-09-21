@@ -208,6 +208,37 @@ def main():
                     W.absorbed_receipt(one, 'same body', floor) is True and
                     W.absorbed_receipt(two, 'same body', floor) is False)
 
+        # 7. THE SESSION-RESOLUTION MEMO. 1,475 calls re-globbed the session directory and
+        #    re-parsed every session's metadata (26,551 reads) to resolve the same two
+        #    selectors. The memo is per PROCESS, i.e. per poll. What must hold:
+        #      - a repeat resolves to the same session,
+        #      - it hands back a COPY, so annotating one caller's session cannot alter
+        #        what the next caller resolves,
+        #      - a MISS is never cached, because a session may appear and an ambiguity may
+        #        resolve; freezing either into the run is the hazard the evaluation named.
+        try:
+            live = W.find_session('BlackMagic Intensity USB driver for Apple Silicon')
+        except SystemExit:
+            live = None
+        if live is not None:
+            again = W.find_session('BlackMagic Intensity USB driver for Apple Silicon')
+            ok &= check('the session memo resolves a repeat to the same session',
+                        live['sessionId'] == again['sessionId'])
+            ok &= check('  and hands back a COPY', live is not again)
+            live['injected'] = 'x'
+            ok &= check('  so annotating one resolution cannot alter the next',
+                        'injected' not in W.find_session('BlackMagic Intensity USB driver for Apple Silicon'))
+            # liveness is not frozen: read_state re-opens the file every call
+            ok &= check('  and read_state still reads the file, not the memo',
+                        W.read_state(again).get('ct') is not None)
+        misses = 0
+        for _ in range(2):
+            try:
+                W.find_session('no-such-session-' + 'z' * 8)
+            except SystemExit:
+                misses += 1
+        ok &= check('a failed session lookup is never cached', misses == 2)
+
     print('\n%s' % ('ALL PASS' if ok else 'FAILURES ABOVE'))
     return 0 if ok else 1
 
