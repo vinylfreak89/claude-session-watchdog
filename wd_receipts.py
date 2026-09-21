@@ -114,20 +114,46 @@ def read_records(path):
 
     A single `owed` pass re-read the two transcripts 204 times (measured
     2026-09-18: 171 of 188 seconds, files of 104 and 322 MB), because every
-    check opens the whole file. The key is the file's identity AND its size and
-    mtime, so an appended record invalidates the cache and a stale view can never
-    be served. Callers get a fresh list over shared record dicts; nothing in the
-    watchdog mutates a transcript record (audited when this was added).
+    check opens the whole file. Callers get a fresh list over shared record
+    dicts; nothing in the watchdog mutates a transcript record (audited when
+    this was added).
+
+    TWO CORRECTNESS DEFECTS FIXED 2026-09-21, both found by an independent
+    evaluation and both reproduced. This docstring used to claim "a stale view
+    can never be served", and that claim was false.
+
+    1. THE KEY OMITTED FILE IDENTITY. It was (realpath, size, mtime_ns).
+       Atomically replace a file with different content of the same length,
+       preserving mtime, and every component still matches although the inode
+       changed: the reproduction printed "atomic replace changed inode: True
+       disk contains new: True read_records stale: old". st_dev and st_ino are
+       now in the key, so a replaced file is a different file.
+
+    2. THE SNAPSHOT WAS NEVER CHECKED FOR CONSISTENCY. The stat was taken BEFORE
+       the read, so a record appended during the read produced a list that did
+       not correspond to its own key. These transcripts are appended to by live
+       sessions continuously, so that is the ordinary case, not an exotic one.
+       The file is now stat-ed again afterwards and the result is cached ONLY if
+       it did not move underneath the read; otherwise the records are returned
+       uncached and the next call reads again. Returning them is safe -- they
+       are a real prefix of the file. FILING them under a key they do not match
+       is what was not, because an index built over them then outlives them.
     """
     try:
         st = os.stat(path)
     except OSError as exc:
         raise EvidenceError('cannot read complete transcript: %s' % exc)
-    key = (os.path.realpath(path), st.st_size, st.st_mtime_ns)
+    key = (os.path.realpath(path), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
     cached = _RECORDS_CACHE.get(key)
     if cached is not None:
         return list(cached)
     records = _read_records_uncached(path)
+    try:
+        after = os.stat(path)
+    except OSError as exc:
+        raise EvidenceError('cannot read complete transcript: %s' % exc)
+    if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != key[1:]:
+        return list(records)
     for stale in [k for k in _RECORDS_CACHE if k[0] == key[0]]:
         del _RECORDS_CACHE[stale]
     _RECORDS_CACHE[key] = records
@@ -550,20 +576,31 @@ def _msg_id_results(path, records):
     `socket_sender_matches` previously walked the whole sender transcript on EVERY call to
     find one msg_id. Measured 2026-09-21: 947 calls at ~107 ms each, 100 s of a 171 s `owed`
     run. The scan's inputs never change within a file version, so the same answer is built
-    once and looked up thereafter. Keyed like _RECORDS_CACHE on realpath, size and mtime, so
-    an appended record invalidates it and a stale view cannot be served.
+    once and looked up thereafter.
+
+    KEYED ON THE IDENTITY OF THE RECORDS IT INDEXED, never on a stat of its own. It used to
+    stat `path` independently, which is the append race an independent evaluation reproduced
+    on 2026-09-21: the caller reads records, a record is appended, this function then stats
+    and files an index built from the OLD records under the NEW size/mtime. The next read
+    sees the appended record while the lookup returns the index that cannot see it, so a
+    duplicate SendMessage result stays hidden and a delivery a fresh index REFUSES gets
+    credited. It fails toward credit, which is the wrong direction for the layer that decides
+    whether the target acted. The reproduction printed "race second delivery credited despite
+    duplicate result: receipt" against `D.delivery` itself, not merely a helper.
+
+    The identity is the one `split_turns` already uses -- length plus the `is` identity of the
+    first and last record -- because read_records hands out a fresh list over the SAME record
+    dicts, so identical objects mean the same parse. There is no stat here to disagree with it.
 
     The caller's `len(results) != 1` rule is preserved exactly: every match for an id is kept,
     so an ambiguous id still fails rather than silently picking one.
     """
-    try:
-        st = os.stat(path)
-    except OSError as exc:
-        raise EvidenceError('cannot read complete transcript: %s' % exc)
-    key = (os.path.realpath(path), st.st_size, st.st_mtime_ns)
+    key = (os.path.realpath(path), len(records))
     cached = _MSGID_CACHE.get(key)
-    if cached is not None:
-        return cached
+    if cached is not None and records and cached[0] is records[0] and cached[1] is records[-1]:
+        return cached[2]
+    if cached is not None and not records:
+        return cached[2]
     index = {}
     for rec in records:
         if rec.get('type') != 'user': continue
@@ -579,5 +616,6 @@ def _msg_id_results(path, records):
                     index.setdefault(mid, []).append(block)
     for stale in [k for k in _MSGID_CACHE if k[0] == key[0]]:
         del _MSGID_CACHE[stale]
-    _MSGID_CACHE[key] = index
+    _MSGID_CACHE[key] = (records[0] if records else None,
+                         records[-1] if records else None, index)
     return index

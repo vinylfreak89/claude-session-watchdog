@@ -1052,17 +1052,23 @@ def _origin_index(path, records):
     """msg_id -> delivery records, built once per transcript version.
 
     Same shape as wd_receipts._msg_id_results and for the same reason: the inputs cannot
-    change within a file version, so the answer is built once. Keyed on realpath, size and
-    mtime so an appended record invalidates it and a stale view is never served.
+    change within one parse, so the answer is built once.
+
+    KEYED ON THE IDENTITY OF THE RECORDS IT INDEXED, never on a stat of its own -- it had
+    the identical append race, reproduced 2026-09-21: build from the caller's records, then
+    independently stat the path, and an append landing between the two files a stale index
+    under a fresh key. The reproduction printed "origin index after append: 1 actual records:
+    2 / fresh origin index: 2" -- the index could not see a record the parser could. Length
+    plus the `is` identity of the first and last record is the same rule `split_turns` uses,
+    and it cannot disagree with the records because it IS the records.
     """
-    try:
-        st = os.stat(path)
-    except OSError:
-        return {}
-    key = (os.path.realpath(path), st.st_size, st.st_mtime_ns)
+    key = (os.path.realpath(path), len(records))
     cached = _ORIGIN_INDEX.get(key)
     if cached is not None:
-        return cached
+        if not records:
+            return cached[2]
+        if cached[0] is records[0] and cached[1] is records[-1]:
+            return cached[2]
     index = {}
     for r in records:
         origin = r.get('origin')
@@ -1073,5 +1079,6 @@ def _origin_index(path, records):
             index.setdefault(mid, []).append(r)
     for stale in [k for k in _ORIGIN_INDEX if k[0] == key[0]]:
         del _ORIGIN_INDEX[stale]
-    _ORIGIN_INDEX[key] = index
+    _ORIGIN_INDEX[key] = (records[0] if records else None,
+                          records[-1] if records else None, index)
     return index
