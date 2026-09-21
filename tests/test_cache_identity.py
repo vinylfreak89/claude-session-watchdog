@@ -74,6 +74,7 @@ def result_rec(mid):
 def main():
     ok = True
     tmp = tempfile.mkdtemp(prefix='wd-cache-identity-')
+    tmp2 = tempfile.mkdtemp(prefix='wd-cache-identity-x-')
     try:
         p = os.path.join(tmp, 't.jsonl')
 
@@ -124,55 +125,55 @@ def main():
         ok &= check('an unchanged record list is served from the origin cache',
                     W._origin_index(p, same_list) is og_first)
 
-        # 5. THE RECEIPT MEMO. receipt() is memoised on (records identity, sender, ident):
-        #    measured on a real `owed`, 131 calls resolved to only 65 distinct ids, so half
-        #    were exact repeats. The properties that matter are that a repeat AGREES, that it
-        #    hands back a COPY -- callers annotate the dict they receive, and sharing the
-        #    cached object would let one caller's annotation surface in another's receipt --
-        #    and that a REFUSAL is never cached, because a cached refusal outlives its reason.
-        #    A delivery needs structural peer provenance, so the record carries origin.kind
-        #    = peer; an earlier draft of this case used a plain record and raised before it
-        #    ever reached the memo, testing nothing.
-        deliv = ('{"type": "user", "uuid": "11111111", "timestamp": "2026-09-21T00:00:00.000Z",'
-                 ' "origin": {"kind": "peer", "from": "sender-A"},'
-                 ' "message": {"role": "user", "content":'
-                 ' "<cross-session-message from=\\"sender-A\\">hello</cross-session-message>"}}')
-        write(p, [deliv])
-        try:
-            r1 = D.receipt(p, 'sender-A', '11111111')
-            r2 = D.receipt(p, 'sender-A', '11111111')
-            ok &= check('the receipt memo agrees with itself on the repeat', r1 == r2)
-            ok &= check('  and hands back a COPY, not the cached object', r1 is not r2)
-            r1['injected'] = 'mutation by a caller'
-            ok &= check('  so a caller mutating its receipt cannot poison the cache',
-                        'injected' not in D.receipt(p, 'sender-A', '11111111'))
-            # THE MEMO MUST ACTUALLY SERVE. Measured, not assumed: a repeat must do NO
-            # prefix split. Without this the whole case passes with the memo deleted --
-            # two uncached calls also return equal, non-identical dicts -- which is the
-            # borrowed-control failure in its purest form: green while testing nothing.
-            splits = []
-            real_split = W.split_turns
-            W.split_turns = lambda recs: (splits.append(len(recs)), real_split(recs))[1]
+        # 5. THE RECEIPT INDEX MUST NOT CACHE THE VERDICT. A receipt is NOT a function of
+        #    the target's records alone: a socket delivery also depends on the successful
+        #    SendMessage result and unique call in the SENDER'S transcript. A previous
+        #    version memoised the whole result on (target records, sender NAME, ident) and
+        #    returned before consulting that evidence -- appending a duplicate successful
+        #    result to the sender file, leaving the target untouched, made it answer CREDIT
+        #    where uncached delivery REFUSES. Fail-open, on the path record_delivery uses.
+        #    This control is modelled on the one that caught it, and my previous test could
+        #    not: that fixture used a single direct envelope and never touched a second
+        #    transcript, so the dependency it needed to exercise was not even present.
+        import json as _json
+        from unittest.mock import patch as _patch
+        sender_p = os.path.join(tmp2, 'sender.jsonl')
+        target_p = os.path.join(tmp2, 'target.jsonl')
+        stamp = '2026-09-21T00:00:00Z'
+        use = {'type': 'assistant', 'timestamp': stamp, 'message': {'content': [
+            {'type': 'tool_use', 'id': 'call', 'name': 'SendMessage',
+             'input': {'message': 'hello', 'to': 'target'}}]}}
+        res = {'type': 'user', 'timestamp': stamp, 'message': {'content': [
+            {'type': 'tool_result', 'tool_use_id': 'call',
+             'content': _json.dumps({'success': True, 'msg_id': 'm'})}]}}
+        recv = {'type': 'user', 'timestamp': stamp, 'uuid': 'receipt',
+                'origin': {'kind': 'peer', 'from': 'uds:/tmp/control.sock',
+                           'verifiedPeerPid': 123, 'msg_id': 'm'},
+                'message': {'content': '<cross-session-message from="uds:/tmp/control.sock">hello</cross-session-message>'}}
+        def dump(path, rows):
+            with open(path, 'w') as f:
+                for r in rows:
+                    f.write(_json.dumps(r) + '\n')
+        dump(sender_p, [use, res]); dump(target_p, [recv])
+        with _patch.object(W, 'find_session', return_value={'sessionId': 'sender'}), \
+             _patch.object(W, 'transcript_path', return_value=sender_p):
+            def credited():
+                try:
+                    D.receipt(target_p, 'sender', 'receipt')
+                    return True
+                except D.EvidenceError:
+                    return False
+            ok &= check('a valid socket delivery is credited', credited() is True)
+            with open(sender_p, 'a') as f:      # duplicate result in the SENDER only
+                f.write(_json.dumps(res) + '\n')
+            ok &= check('a duplicate in the SENDER transcript is seen, not served from cache',
+                        credited() is False)
             try:
-                D.receipt(p, 'sender-A', '11111111')
-                before = len(splits)
-                D.receipt(p, 'sender-A', '11111111')
-                after = len(splits)
-            finally:
-                W.split_turns = real_split
-            ok &= check('  and a repeat does ZERO prefix splits (the memo is live)',
-                        after == before)
-        except D.EvidenceError as exc:
-            ok &= check('the receipt memo case builds a usable delivery (it did not: %s)' % exc, False)
-
-        # A refusal must not be cached: an unknown id raises every time, not once.
-        raised = 0
-        for _ in range(2):
-            try:
-                D.receipt(p, 'sender-A', 'no-such-id')
+                D.delivery(recv, 'sender'); uncached_ok = True
             except D.EvidenceError:
-                raised += 1
-        ok &= check('a refused receipt is re-raised, never cached', raised == 2)
+                uncached_ok = False
+            ok &= check('  (uncached delivery refuses it too, so the two agree)',
+                        uncached_ok is False)
 
         # 4. A DIFFERENT LIST OF THE SAME LENGTH -- the collision case 1 is about, reaching
         #    the index layer. Length alone is not identity.
@@ -182,6 +183,7 @@ def main():
                     'MID-9' in idx_same_len and 'MID-1' not in idx_same_len)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(tmp2, ignore_errors=True)
 
         # 6. THE ABSORBED-REPLY INDEX. Its validation is hoisted (343 calls / 13.3 s in one
         #    `owed`, each re-walking the whole receiver transcript), but the DECISION is not:

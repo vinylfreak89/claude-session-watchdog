@@ -391,53 +391,95 @@ def delivery(record, sender):
     return dict(id=ident, ts=record['timestamp'], body=payload)
 
 
-_RECEIPT_CACHE = {}
+_RECEIPT_INDEX = {}
+
+
+def _receipt_index(path, records):
+    """delivery id -> [(record, preceding completed turn end_ts)], in ONE pass.
+
+    Replaces a whole-result memo that was wrong twice over (see `receipt`). This indexes the
+    TARGET-SIDE STRUCTURE only: which record carries an id, and what the last completed turn
+    was AT THAT POINT. It caches no verdict, so every request still validates provenance.
+
+    WHY THIS IS CORRECT WHERE SLICING WOULD NOT BE. `receipt` needs the last completed turn in
+    `records[:index]`, and a turn complete at one prefix can REOPEN after a tool continuation,
+    so the final turn list cannot be sliced to answer a prefix question. This walk instead
+    records the answer BEFORE consuming each record, observing the state at that prefix, which
+    is what makes reopening a non-issue rather than a hazard. It reuses `is_opener`, `Turn` and
+    `add` so the turn semantics are shared with `_split_turns_uncached`, never re-derived.
+
+    Measured: 131 receipt requests caused 65 distinct prefix rebuilds visiting 4,316,320
+    records; this is one pass over 73,678. An independent evaluation compared a prototype of
+    this walk against the uncached production splitter over the original 240 mixed-record
+    prefixes plus 4,000 deterministic ones covering API errors, interruptions, tool results,
+    meta users and reopening -- all agreed.
+    """
+    key = (os.path.realpath(path), len(records))
+    cached = _RECEIPT_INDEX.get(key)
+    if cached is not None and (not records or (cached[0] is records[0] and cached[1] is records[-1])):
+        return cached[2]
+    index, prev_pid, cur, finalized = {}, None, None, None
+    for r in records:
+        prior = cur.end_ts if cur is not None and cur.end_state != 'open' else finalized
+        if r.get('uuid'):
+            index.setdefault(r['uuid'], []).append((r, prior))
+        if is_absorbed_delivery(r):
+            index.setdefault(absorbed_id(r), []).append((r, prior))
+        ty = r.get('type')
+        if ty == 'user':
+            if W.is_opener(r, prev_pid):
+                if cur is not None and cur.end_state != 'open':
+                    finalized = cur.end_ts
+                cur = W.Turn(r)
+            elif cur is not None:
+                cur.add(r)
+            prev_pid = r.get('promptId')
+        elif cur is not None and ty == 'assistant':
+            cur.add(r)
+        elif cur is not None:
+            cur.records.append(r)
+    for stale in [k for k in _RECEIPT_INDEX if k[0] == key[0]]:
+        del _RECEIPT_INDEX[stale]
+    _RECEIPT_INDEX[key] = (records[0] if records else None,
+                           records[-1] if records else None, index)
+    return index
 
 
 def receipt(path, sender, ident):
-    """Memoised on (records identity, sender, ident) -- the answer cannot differ within one parse.
+    """Structure is indexed; PROVENANCE IS REVALIDATED ON EVERY CALL.
 
-    Measured 2026-09-21 on a real `owed`: 131 calls, and only 65 DISTINCT (path, ident)
-    pairs -- half were exact repeats. Each call scans every record for the id and then splits
-    the PREFIX before it, and the profile showed 93 uncached splits costing 17.7 s with
-    1,869,841 Turn.add calls.
+    An earlier version memoised the whole result on (target records, sender, ident). That was
+    wrong twice, and an independent evaluation reproduced the worse half:
 
-    Deliberately a memo of the whole function rather than the streaming prefix index the
-    evaluation proposed. That index would have to reproduce prefix-completeness exactly, and
-    its own author's warning is the reason not to attempt it here: a turn may be complete at
-    one prefix and REOPEN after a tool continuation, so `split_turns(records[:i])` is not a
-    slice of `split_turns(records)`. Re-deriving that rule is how a subtle wrong answer gets
-    into the layer that decides whether the target acted. This memo reimplements nothing: the
-    first call for an id computes exactly what it always did, and the repeats return it.
+    1. A RECEIPT IS NOT A FUNCTION OF THE TARGET'S RECORDS ALONE. A socket delivery also
+       depends on the successful SendMessage result and unique call in the SENDER'S
+       transcript. The memo keyed only on target identity plus the sender's NAME, and its hit
+       returned before consulting that evidence. Appending a duplicate successful result to
+       the sender file -- leaving the target untouched -- made the memo answer CREDIT where
+       uncached `delivery` REFUSES. That is fail-open, on the path `record_delivery` uses, and
+       the docstring's claim that "the answer cannot differ within one parse" was simply false:
+       there are two evidence inputs and it keyed on one.
 
-    Failures are NOT cached. An EvidenceError means the record set could not answer, and the
-    cost of re-raising it is one scan; caching a refusal risks outliving its reason.
+    2. IT DID NOT REMOVE THE WORK IT CLAIMED. With or without it there were still 65 uncached
+       prefix rebuilds -- `split_turns`'s own cache was already serving the repeats. What the
+       memo actually skipped was the repeated provenance validation, which is the part that
+       must never be skipped.
 
-    A COPY is returned. Callers own the dict -- `record_delivery` and the acceptance layer
-    both add to it -- and handing out the cached object would let one caller's annotation
-    appear in another's receipt.
+    So the index holds only the target-side structural answer, and `delivery(record, sender)`
+    runs for every request, reading the sender transcript each time.
     """
     if not ident:
         raise EvidenceError('a target transcript delivery uuid is required')
     records = read_records(path)
-    key = (os.path.realpath(path), len(records), sender, ident)
-    cached = _RECEIPT_CACHE.get(key)
-    if cached is not None and records and cached[0] is records[0] and cached[1] is records[-1]:
-        return dict(cached[2])
-    hits = [(i, r) for i, r in enumerate(records)
-            if r.get('uuid') == ident or (is_absorbed_delivery(r) and absorbed_id(r) == ident)]
+    hits = _receipt_index(path, records).get(ident, [])
     if len(hits) != 1:
         raise EvidenceError('delivery uuid must identify exactly one transcript record')
-    index, record = hits[0]
+    record, previous_ts = hits[0]
     result = delivery(record, sender)
     # The target transcript fixes the answered turn; invocation time is irrelevant.
-    done = [t for t in W.split_turns(records[:index]) if t.end_state != 'open']
-    previous = done[-1] if done else None
-    result['turn_ts'] = previous.end_ts if previous else None
-    if previous and epoch(previous.end_ts) >= epoch(result['ts']):
+    result['turn_ts'] = previous_ts
+    if previous_ts and epoch(previous_ts) >= epoch(result['ts']):
         raise EvidenceError('delivery is not later than the completed turn')
-    if records:
-        _RECEIPT_CACHE[key] = (records[0], records[-1], dict(result))
     return result
 
 

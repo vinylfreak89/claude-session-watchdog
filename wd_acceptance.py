@@ -152,10 +152,15 @@ def _tool_records(path, records):
     window filter, the duplicate-id check and the success tests -- which is why those
     stay in `target_calls` rather than being precomputed into this index.
     """
+    # KEYED ON RECORD IDENTITY, not on the list object. The first version compared
+    # `hit[0] is records`, and `read_records` returns a FRESH list over the same record
+    # dicts on every call, so the comparison could never be true: it rebuilt 28 times for
+    # 28 calls and the optimisation did nothing. Caught by an independent evaluation, not
+    # by its own test, which compared outputs and so passed while the cache never served.
     key = (path, len(records))
     hit = _TOOL_RECORDS_CACHE.get(key)
-    if hit is not None and hit[0] is records:
-        return hit[1]
+    if hit is not None and (not records or (hit[0] is records[0] and hit[1] is records[-1])):
+        return hit[2]
     parsed = []
     for record in records:
         role = record.get('type')
@@ -167,7 +172,8 @@ def _tool_records(path, records):
             continue
         parsed.append((role, record.get('timestamp'), blocks))
     _TOOL_RECORDS_CACHE.clear()
-    _TOOL_RECORDS_CACHE[key] = (records, parsed)
+    _TOOL_RECORDS_CACHE[key] = (records[0] if records else None,
+                                records[-1] if records else None, parsed)
     return parsed
 
 
