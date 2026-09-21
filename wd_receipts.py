@@ -129,6 +129,15 @@ def read_records(path):
        disk contains new: True read_records stale: old". st_dev and st_ino are
        now in the key, so a replaced file is a different file.
 
+       AND ctime, added 2026-09-21 after a recheck reproduced the remaining hole:
+       rewrite the sender's evidence IN PLACE, same inode, same byte length, and
+       restore mtime -- every component of the key still matched, and a warm read
+       served the OLD records while a cold read REFUSED. That is fail-open credit
+       from stale parser output, and the receipt index cannot repair it: delivery()
+       runs again but is handed old sender records. ctime is the one field an
+       in-place write cannot preserve. This is metadata invalidation, not a verdict
+       cache, and it is not a universal proof against arbitrary concurrent rewrites.
+
     2. THE SNAPSHOT WAS NEVER CHECKED FOR CONSISTENCY. The stat was taken BEFORE
        the read, so a record appended during the read produced a list that did
        not correspond to its own key. These transcripts are appended to by live
@@ -143,7 +152,7 @@ def read_records(path):
         st = os.stat(path)
     except OSError as exc:
         raise EvidenceError('cannot read complete transcript: %s' % exc)
-    key = (os.path.realpath(path), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+    key = (os.path.realpath(path), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
     cached = _RECORDS_CACHE.get(key)
     if cached is not None:
         return list(cached)
@@ -152,7 +161,7 @@ def read_records(path):
         after = os.stat(path)
     except OSError as exc:
         raise EvidenceError('cannot read complete transcript: %s' % exc)
-    if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != key[1:]:
+    if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) != key[1:]:
         return list(records)
     for stale in [k for k in _RECORDS_CACHE if k[0] == key[0]]:
         del _RECORDS_CACHE[stale]
@@ -421,10 +430,25 @@ def _receipt_index(path, records):
     index, prev_pid, cur, finalized = {}, None, None, None
     for r in records:
         prior = cur.end_ts if cur is not None and cur.end_state != 'open' else finalized
-        if r.get('uuid'):
-            index.setdefault(r['uuid'], []).append((r, prior))
+        # KEYS ARE DEDUPED WITHIN ONE PHYSICAL RECORD, never across records. Two separate
+        # rows sharing an id must stay ambiguous -- that is the guard. But one row inserted
+        # twice is not ambiguity, and the old code was an OR per record, not two hits.
+        # Regression found by recheck: a record whose uuid equals its derived absorbed_id
+        # was appended under the same key twice and a VALID receipt then refused as
+        # ambiguous. `absorbed_id` excludes uuid, so the collision is easy to construct.
+        keys = set()
+        ident = r.get('uuid')
+        # Only non-empty STRING uuids are indexed -- the ids the delivery validator accepts.
+        # Regression found by recheck: an unrelated bookkeeping row carrying a non-hashable
+        # uuid (e.g. "uuid": ["metadata"]) raised TypeError and took down the whole index,
+        # where the old equality scan simply did not match it. That is a loss of
+        # availability for a valid receipt caused by another row's malformed field.
+        if isinstance(ident, str) and ident:
+            keys.add(ident)
         if is_absorbed_delivery(r):
-            index.setdefault(absorbed_id(r), []).append((r, prior))
+            keys.add(absorbed_id(r))
+        for k in keys:
+            index.setdefault(k, []).append((r, prior))
         ty = r.get('type')
         if ty == 'user':
             if W.is_opener(r, prev_pid):

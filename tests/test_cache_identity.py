@@ -265,6 +265,41 @@ def main():
         ok &= check('  and the same list is served from the index',
                     D._tool_use_index(p, dupes) is idx2)
 
+        # 9. THE THREE DEFECTS A RECHECK FOUND IN THE REBUILD ITSELF. Two I introduced,
+        #    one pre-existing and more serious. All reproduced before being fixed.
+        def absorbed_rec(body, ts, uuid=None):
+            r = {'type': 'queue-operation', 'operation': 'remove', 'reason': 'absorbed_mid_turn',
+                 'timestamp': ts,
+                 'content': '<cross-session-message from="peer-1">%s</cross-session-message>' % body}
+            if uuid is not None:
+                r['uuid'] = uuid
+            return r
+        # (a) ONE ROW, TWO KEYS THAT COLLIDE. If a record's uuid equals its derived
+        #     absorbed_id, it was appended twice under the same key and a VALID receipt was
+        #     refused as ambiguous. Two separate rows sharing an id must STILL be ambiguous --
+        #     dedupe keys within a record, never across records.
+        row = absorbed_rec('x', '2026-09-21T00:00:02Z')
+        row['uuid'] = D.absorbed_id(row)
+        idx = D._receipt_index(os.path.join(tmp2, 'a.jsonl'), [row])
+        ok &= check('a row whose uuid equals its absorbed_id is indexed ONCE, not twice',
+                    len(idx.get(row['uuid'], [])) == 1)
+        two_rows = [absorbed_rec('x', '2026-09-21T00:00:02Z'),
+                    absorbed_rec('x', '2026-09-21T00:00:02Z')]
+        idx2 = D._receipt_index(os.path.join(tmp2, 'b.jsonl'), two_rows)
+        ok &= check('  but two SEPARATE rows sharing an id remain ambiguous',
+                    len(idx2.get(D.absorbed_id(two_rows[0]), [])) == 2)
+        # (b) AN UNRELATED MALFORMED UUID MUST NOT TAKE DOWN THE INDEX. A bookkeeping row
+        #     carrying a non-hashable uuid raised TypeError and destroyed availability for a
+        #     valid receipt elsewhere; the old equality scan simply did not match it.
+        mixed = [{'type': 'user', 'uuid': 'good', 'timestamp': '2026-09-21T00:00:01Z'},
+                 {'type': 'system', 'uuid': ['metadata']}]
+        try:
+            idx3 = D._receipt_index(os.path.join(tmp2, 'c.jsonl'), mixed)
+            built = 'good' in idx3
+        except TypeError:
+            built = False
+        ok &= check('an unrelated non-hashable uuid does not crash the index', built)
+
     print('\n%s' % ('ALL PASS' if ok else 'FAILURES ABOVE'))
     return 0 if ok else 1
 
