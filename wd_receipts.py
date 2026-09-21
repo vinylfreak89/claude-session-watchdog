@@ -355,10 +355,39 @@ def delivery(record, sender):
     return dict(id=ident, ts=record['timestamp'], body=payload)
 
 
+_RECEIPT_CACHE = {}
+
+
 def receipt(path, sender, ident):
+    """Memoised on (records identity, sender, ident) -- the answer cannot differ within one parse.
+
+    Measured 2026-09-21 on a real `owed`: 131 calls, and only 65 DISTINCT (path, ident)
+    pairs -- half were exact repeats. Each call scans every record for the id and then splits
+    the PREFIX before it, and the profile showed 93 uncached splits costing 17.7 s with
+    1,869,841 Turn.add calls.
+
+    Deliberately a memo of the whole function rather than the streaming prefix index the
+    evaluation proposed. That index would have to reproduce prefix-completeness exactly, and
+    its own author's warning is the reason not to attempt it here: a turn may be complete at
+    one prefix and REOPEN after a tool continuation, so `split_turns(records[:i])` is not a
+    slice of `split_turns(records)`. Re-deriving that rule is how a subtle wrong answer gets
+    into the layer that decides whether the target acted. This memo reimplements nothing: the
+    first call for an id computes exactly what it always did, and the repeats return it.
+
+    Failures are NOT cached. An EvidenceError means the record set could not answer, and the
+    cost of re-raising it is one scan; caching a refusal risks outliving its reason.
+
+    A COPY is returned. Callers own the dict -- `record_delivery` and the acceptance layer
+    both add to it -- and handing out the cached object would let one caller's annotation
+    appear in another's receipt.
+    """
     if not ident:
         raise EvidenceError('a target transcript delivery uuid is required')
     records = read_records(path)
+    key = (os.path.realpath(path), len(records), sender, ident)
+    cached = _RECEIPT_CACHE.get(key)
+    if cached is not None and records and cached[0] is records[0] and cached[1] is records[-1]:
+        return dict(cached[2])
     hits = [(i, r) for i, r in enumerate(records)
             if r.get('uuid') == ident or (is_absorbed_delivery(r) and absorbed_id(r) == ident)]
     if len(hits) != 1:
@@ -371,6 +400,8 @@ def receipt(path, sender, ident):
     result['turn_ts'] = previous.end_ts if previous else None
     if previous and epoch(previous.end_ts) >= epoch(result['ts']):
         raise EvidenceError('delivery is not later than the completed turn')
+    if records:
+        _RECEIPT_CACHE[key] = (records[0], records[-1], dict(result))
     return result
 
 

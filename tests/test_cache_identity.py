@@ -124,6 +124,56 @@ def main():
         ok &= check('an unchanged record list is served from the origin cache',
                     W._origin_index(p, same_list) is og_first)
 
+        # 5. THE RECEIPT MEMO. receipt() is memoised on (records identity, sender, ident):
+        #    measured on a real `owed`, 131 calls resolved to only 65 distinct ids, so half
+        #    were exact repeats. The properties that matter are that a repeat AGREES, that it
+        #    hands back a COPY -- callers annotate the dict they receive, and sharing the
+        #    cached object would let one caller's annotation surface in another's receipt --
+        #    and that a REFUSAL is never cached, because a cached refusal outlives its reason.
+        #    A delivery needs structural peer provenance, so the record carries origin.kind
+        #    = peer; an earlier draft of this case used a plain record and raised before it
+        #    ever reached the memo, testing nothing.
+        deliv = ('{"type": "user", "uuid": "11111111", "timestamp": "2026-09-21T00:00:00.000Z",'
+                 ' "origin": {"kind": "peer", "from": "sender-A"},'
+                 ' "message": {"role": "user", "content":'
+                 ' "<cross-session-message from=\\"sender-A\\">hello</cross-session-message>"}}')
+        write(p, [deliv])
+        try:
+            r1 = D.receipt(p, 'sender-A', '11111111')
+            r2 = D.receipt(p, 'sender-A', '11111111')
+            ok &= check('the receipt memo agrees with itself on the repeat', r1 == r2)
+            ok &= check('  and hands back a COPY, not the cached object', r1 is not r2)
+            r1['injected'] = 'mutation by a caller'
+            ok &= check('  so a caller mutating its receipt cannot poison the cache',
+                        'injected' not in D.receipt(p, 'sender-A', '11111111'))
+            # THE MEMO MUST ACTUALLY SERVE. Measured, not assumed: a repeat must do NO
+            # prefix split. Without this the whole case passes with the memo deleted --
+            # two uncached calls also return equal, non-identical dicts -- which is the
+            # borrowed-control failure in its purest form: green while testing nothing.
+            splits = []
+            real_split = W.split_turns
+            W.split_turns = lambda recs: (splits.append(len(recs)), real_split(recs))[1]
+            try:
+                D.receipt(p, 'sender-A', '11111111')
+                before = len(splits)
+                D.receipt(p, 'sender-A', '11111111')
+                after = len(splits)
+            finally:
+                W.split_turns = real_split
+            ok &= check('  and a repeat does ZERO prefix splits (the memo is live)',
+                        after == before)
+        except D.EvidenceError as exc:
+            ok &= check('the receipt memo case builds a usable delivery (it did not: %s)' % exc, False)
+
+        # A refusal must not be cached: an unknown id raises every time, not once.
+        raised = 0
+        for _ in range(2):
+            try:
+                D.receipt(p, 'sender-A', 'no-such-id')
+            except D.EvidenceError:
+                raised += 1
+        ok &= check('a refused receipt is re-raised, never cached', raised == 2)
+
         # 4. A DIFFERENT LIST OF THE SAME LENGTH -- the collision case 1 is about, reaching
         #    the index layer. Length alone is not identity.
         same_len = [result_rec('MID-9')]
