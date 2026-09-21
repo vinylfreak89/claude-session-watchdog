@@ -901,7 +901,14 @@ def message_to_session(call, session_id):
     recipient = inp['recipient']
     if recipient == session_id or (session_id.startswith('local_') and recipient == session_id[6:]):
         return True
-    if not recipient.startswith('uds:') or call.get('name') != 'SendMessage': return False
+    # Anything that is not an id match -- a socket, or a NAME, which ListAgents says is the
+    # address -- resolves the same way: never by trusting the recipient string, only by finding
+    # the message in the RECEIVER'S OWN transcript by msg_id and body. That is strictly stronger
+    # than matching the text, so widening what reaches this path cannot credit a message that
+    # never arrived. Cost 2026-09-21: the target replied to "Watchdog brief builder" rather than
+    # the uds: socket, its reply was invisible here, and the send gate stayed shut on an item it
+    # had already answered -- one step from re-sending it.
+    if call.get('name') != 'SendMessage': return False
     value = message_success(call.get('result'))
     if not value or call.get('is_error', False) is not False: return False
     mid = value.get('msg_id')
