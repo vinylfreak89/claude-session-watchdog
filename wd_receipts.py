@@ -193,6 +193,44 @@ def text_blocks(content):
     raise EvidenceError('delivery content is not exclusively text')
 
 
+_TOOL_USE_INDEX = {}
+
+
+def _tool_use_index(path, records):
+    """tool_use id -> [(record, block), ...], built once per record set.
+
+    `socket_sender_matches` found its result via _msg_id_results and then RE-WALKED every
+    assistant record to locate the call that produced it. Measured 2026-09-21: 140 socket
+    checks costing 10.7 s, of which 6.55 s was that rescan -- an index over results sitting
+    next to a linear scan for the matching use.
+
+    EVERY use of an id is kept, deliberately. The caller requires exactly one and refuses
+    otherwise, and the evaluation's warning is the reason a dict-of-one would be wrong:
+    "do not let a later duplicated use disappear behind an earlier cached success". A
+    duplicated id must still be visible as a duplicate, so the list is the value.
+
+    Keyed on the identity of the records, never a stat of the path -- the same rule the
+    append race forced on every other index here.
+    """
+    key = (os.path.realpath(path), len(records))
+    cached = _TOOL_USE_INDEX.get(key)
+    if cached is not None and (not records or (cached[0] is records[0] and cached[1] is records[-1])):
+        return cached[2]
+    index = {}
+    for rec in records:
+        if rec.get('type') != 'assistant' or not isinstance(rec.get('message'), dict):
+            continue
+        for block in W._blocks(rec['message'].get('content'), 'tool_use'):
+            ident = block.get('id')
+            if ident:
+                index.setdefault(ident, []).append((rec, block))
+    for stale in [k for k in _TOOL_USE_INDEX if k[0] == key[0]]:
+        del _TOOL_USE_INDEX[stale]
+    _TOOL_USE_INDEX[key] = (records[0] if records else None,
+                            records[-1] if records else None, index)
+    return index
+
+
 def socket_sender_matches(record, sender, body):
     """Attribute a socket delivery using the sender's existing SendMessage result.
 
@@ -213,9 +251,7 @@ def socket_sender_matches(record, sender, body):
     except (EvidenceError, OSError, SystemExit):
         return False
     if len(results) != 1 or not results[0].get('tool_use_id'): return False
-    uses = [(rec, block) for rec in records if rec.get('type') == 'assistant' and isinstance(rec.get('message'), dict)
-            for block in W._blocks(rec['message'].get('content'), 'tool_use')
-            if block.get('id') == results[0]['tool_use_id']]
+    uses = _tool_use_index(path, records).get(results[0]['tool_use_id'], [])
     if len(uses) != 1: return False
     source, use = uses[0]
     if not isinstance(use.get('input'), dict): return False

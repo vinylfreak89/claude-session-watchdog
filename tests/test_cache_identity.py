@@ -239,6 +239,30 @@ def main():
                 misses += 1
         ok &= check('a failed session lookup is never cached', misses == 2)
 
+        # 8. THE TOOL-USE INDEX. socket_sender_matches located its result via the msg-id
+        #    index and then RE-WALKED every assistant record to find the call behind it --
+        #    140 checks, 6.55 s of rescan. The index keeps EVERY use of an id, because the
+        #    caller demands exactly one and refuses otherwise. This is not hypothetical:
+        #    the live transcript has 432 ids used more than once, so a dict-of-one would
+        #    silently credit a duplicate instead of refusing it.
+        def use(ident, name='SendMessage'):
+            return dict(type='assistant', timestamp='2026-09-21T00:00:00.000Z',
+                        message=dict(role='assistant', content=[dict(
+                            type='tool_use', id=ident, name=name, input=dict(message='m'))]))
+        # NOTE: this case runs after the temp dir is removed, and does not need it --
+        # _tool_use_index reads only the RECORDS; the path is a cache key, never opened.
+        # An earlier draft called write() here and died on the deleted directory.
+        singles = [use('U-1'), use('U-2')]
+        idx1 = D._tool_use_index(p, singles)
+        ok &= check('the tool-use index finds a unique call', len(idx1.get('U-1', [])) == 1)
+        dupes = [use('U-1'), use('U-1'), use('U-2')]
+        idx2 = D._tool_use_index(p, dupes)
+        ok &= check('a DUPLICATED tool_use id keeps both uses, so the caller can refuse',
+                    len(idx2.get('U-1', [])) == 2)
+        ok &= check('  and an unknown id yields nothing', idx2.get('U-nope') is None)
+        ok &= check('  and the same list is served from the index',
+                    D._tool_use_index(p, dupes) is idx2)
+
     print('\n%s' % ('ALL PASS' if ok else 'FAILURES ABOVE'))
     return 0 if ok else 1
 
