@@ -133,6 +133,44 @@ def baseline(a, sess, spec):
     return snap
 
 
+_TOOL_RECORDS_CACHE = {}
+
+
+def _tool_records(path, records):
+    """Every record carrying tool blocks, parsed once per transcript version.
+
+    `target_calls` is called once per archived item on every `owed` poll, and each
+    call used to walk the WHOLE transcript and re-parse every record's content blocks.
+    That is O(archived items x transcript length), and both only grow: measured
+    2026-09-21, 28 archived items against ~71,000 records, and `owed` stopped
+    completing at all -- over 400 s with no output, which also stalled the settle path,
+    so a delivered item whose acceptance had come true could not close.
+
+    The scan is hoisted here and keyed by transcript version. It changes nothing about
+    what is inspected: the same records, the same block parsing, in the same order.
+    The per-call work that REMAINS is the part that depends on the boundary -- the
+    window filter, the duplicate-id check and the success tests -- which is why those
+    stay in `target_calls` rather than being precomputed into this index.
+    """
+    key = (path, len(records))
+    hit = _TOOL_RECORDS_CACHE.get(key)
+    if hit is not None and hit[0] is records:
+        return hit[1]
+    parsed = []
+    for record in records:
+        role = record.get('type')
+        block_kind = {'assistant': 'tool_use', 'user': 'tool_result'}.get(role)
+        if not block_kind:
+            continue
+        blocks = W._blocks((record.get('message') or {}).get('content'), block_kind)
+        if not blocks:
+            continue
+        parsed.append((role, record.get('timestamp'), blocks))
+    _TOOL_RECORDS_CACHE.clear()
+    _TOOL_RECORDS_CACHE[key] = (records, parsed)
+    return parsed
+
+
 def target_calls(sess, after):
     """Successful post-receipt calls, checking duplicate IDs only in that window.
 
@@ -142,26 +180,20 @@ def target_calls(sess, after):
     credit still requires the call to be strictly later than the receipt.
     """
     boundary = D.epoch(after)
-    records = D.read_records(W.transcript_path(sess))
+    path = W.transcript_path(sess)
+    records = D.read_records(path)
     uses = {}
     complete = []
-    for record in records:
-        content = (record.get('message') or {}).get('content')
-        role = record.get('type')
-        block_kind = {'assistant': 'tool_use', 'user': 'tool_result'}.get(role)
-        blocks = W._blocks(content, block_kind) if block_kind else []
-        if not blocks:
-            continue
-        stamp = record.get('timestamp')
+    for role, stamp, blocks in _tool_records(path, records):
         if D.epoch(stamp) < boundary:
             continue
-        if record.get('type') == 'assistant':
+        if role == 'assistant':
             for b in blocks:
                 ident = b.get('id')
                 if ident in uses:
                     raise D.EvidenceError('duplicate target tool-use id %r in receipt window at or after %s' % (ident, after))
                 uses[ident] = dict(id=ident, name=b.get('name'), input=b.get('input') or {}, ts=stamp)
-        elif record.get('type') == 'user':
+        elif role == 'user':
             for b in blocks:
                 use = uses.get(b.get('tool_use_id'))
                 if not use: continue
