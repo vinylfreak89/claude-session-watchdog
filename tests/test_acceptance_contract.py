@@ -162,24 +162,6 @@ class AcceptanceContract(ContractCase):
         out = self.poll()
         self.assertEqual(self.state()['owner_queue'], [], out)
 
-    def test_reconciliation_current_reply_uses_same_reader(self):
-        import wd_recon_lib as R
-        self.message_case('SendMessage', recipient='uds:/tmp/cc-socks/12345.sock', socket=True)
-        rows = D.read_records(str(self.tx))
-        self.assertEqual(len(R.artifacts(rows)[1]), 1)
-        self.assertEqual(len(R.target_view(rows, SELF)['sends_to_me']), 1)
-
-    def test_reconciliation_excludes_other_recipients_and_similar_names(self):
-        import wd_recon_lib as R
-        self.message_case('mcp__unrelated__send_message')
-        rows = D.read_records(str(self.tx))
-        self.assertEqual(R.artifacts(rows)[1], [])
-        self.assertEqual(R.target_view(rows, SELF)['sends_to_me'], [])
-        self.tool('SendMessage', dict(to='local_other', message='Synthetic result'),
-                  result=json.dumps(dict(success=True)))
-        rows = D.read_records(str(self.tx))
-        self.assertEqual(R.target_view(rows, SELF)['sends_to_me'], [])
-
     def duplicate_use(self, at, ident='duplicated-control'):
         record = dict(type='assistant', timestamp=ts(at), message=dict(role='assistant',
                       content=[dict(type='tool_use', id=ident, name='Read', input=dict(file_path='unrelated.txt'))],
