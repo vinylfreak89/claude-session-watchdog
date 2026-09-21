@@ -59,6 +59,19 @@ CHECK_ARGS=(--target "$TARGET" --state-dir "$S" --quiet-min "$(cfg quiet_min 10)
 [ -n "$(cfg repo)" ] && CHECK_ARGS+=(--repo "$(cfg repo)")
 [ -n "$(cfg ledger)" ] && CHECK_ARGS+=(--ledger "$(cfg ledger)")
 [ -n "$SELF" ] && [ "${SELF#<}" = "$SELF" ] && WAIT_ARGS+=(--self "$SELF")
+# These three take NO arguments, and USED TO DISCARD any silently. Found 2026-09-21 by an
+# independent evaluation: `wd.sh owed --state-dir <copy>` ran against the LIVE state and said
+# nothing, so an isolation guard written that way was decorative. A flag that is accepted and
+# ignored is worse than one that is rejected, because the caller believes it took effect.
+# The state dir is overridden by the WD_STATE environment variable, never by a flag here.
+no_args() {
+  [ "$#" -eq 0 ] && return 0
+  echo "wd.sh $NO_ARGS_CMD takes no arguments; got: $*" >&2
+  echo "  the state directory is set with the WD_STATE environment variable, not a flag:" >&2
+  echo "  WD_STATE=/path/to/state-copy wd.sh $NO_ARGS_CMD" >&2
+  exit 2
+}
+
 cmd=$1; shift
 case "$cmd" in
   boot)   exec $PY "$D/wd_wake.py" "${WAKE_ARGS[@]}" --bootstrap "$@" ;;
@@ -67,13 +80,13 @@ case "$cmd" in
   sent)   ids=$1; mid=$2; exec $PY "$D/wd_wake.py" "${WAKE_ARGS[@]}" --sent "$ids" --message-id "${mid:-}" ;;
   veto)   id=$1; shift; exec $PY "$D/wd_wake.py" "${WAKE_ARGS[@]}" --veto "$id" --reason "$*" ;;
   cost)   [ -n "$SELF" ] || { echo "config.json: 'self' is not set" >&2; exit 2; }; exec $PY "$D/wd_cost.py" --self "$SELF" --state-dir "$S" "$@" ;;
-  owed)   exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" owed ;;
+  owed)    NO_ARGS_CMD=owed; no_args "$@"; exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" owed ;;
   answered) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" answered "$@" ;;
   relayed) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" relayed "$@" ;;
   ask)    exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" ask "$@" ;;
   resolved) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" resolved "$@" ;;
-  open)   exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" open ;;
-  next)   exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" next ;;
+  open)    NO_ARGS_CMD=open; no_args "$@"; exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" open ;;
+  next)    NO_ARGS_CMD=next; no_args "$@"; exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" next ;;
   sent1)  exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" sent1 "$@" ;;
   nudged) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" nudged "$@" ;;
   prodded) exec $PY "$D/wd_check.py" "${CHECK_ARGS[@]}" prodded "$@" ;;
