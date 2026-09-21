@@ -15,6 +15,12 @@ from typing import Optional
 import wd_lib as W
 import wd_receipts as D
 
+# Above this, a baseline keeps its sha256 and size but not the bytes. Chosen to cover the
+# text subjects that genuinely need content -- the ledger runs to 150 KB under the artifact
+# guard, sidecar CSVs are tens of megabytes only as renders -- while excluding media.
+CONTENT_BASELINE_MAX = 4 * 1024 * 1024
+
+
 class Status(str, Enum):
     PASS = 'pass'
     NOT_YET = 'not-yet'
@@ -61,8 +67,16 @@ def file_snapshot(path):
         with open(path, 'rb') as f:
             data = f.read()
             stat = os.fstat(f.fileno())
+        # The sha256 is what detects change. The CONTENT is kept only so a later
+        # Write/Edit call can be replayed against it, and to read as text for grep/csv/row.
+        # Neither is possible for a large binary, so storing one buys nothing and costs
+        # everything: a `file` acceptance on cap4.mp4 put 38 MB of base64 into state.json,
+        # seven such items took it to 358 MB, and every wd.sh call then loaded and rewrote
+        # that -- which is why `owed` came to take minutes. The consumers already treat an
+        # absent content as "cannot prove by replay", which is the honest answer here.
+        content = base64.b64encode(data).decode() if len(data) <= CONTENT_BASELINE_MAX else None
         return dict(path=path, exists=True, sha256=hashlib.sha256(data).hexdigest(),
-                    content=base64.b64encode(data).decode(), mtime=stat.st_mtime)
+                    content=content, size=len(data), mtime=stat.st_mtime)
     except FileNotFoundError:
         return dict(path=path, exists=False, sha256=None, content=None, mtime=None)
 
@@ -456,7 +470,20 @@ def evaluate_message(a, sess, item, args, facts, calls):
     sent = [c for c in calls if W.message_to_session(c, sender['sessionId'])
             and expected in W.message_input(c)['message'].splitlines()]
     if not sent: return Result(Status.NOT_YET, 'no successful matching target reply call after delivery')
+    # A match requires rec['ts'] >= c['ts'] for some candidate call, so a record older than
+    # the EARLIEST candidate cannot match whatever it contains. Skipping those before the
+    # expensive parse is a pure speedup: same records, same order, same result -- only the
+    # provably-hopeless ones stop paying for delivery(). Measured 2026-09-21: `owed` spent
+    # 120 s of its 171 s inside 1,280,091 delivery() calls, 27 acceptances each walking the
+    # whole 118 MB sender transcript. Records with no readable timestamp are NOT skipped;
+    # absorbed deliveries are read by delivery() itself and must still reach it.
+    earliest = min(D.epoch(c['ts']) for c in sent)
     for record in D.read_records(W.transcript_path(sender)):
+        stamp = record.get('timestamp')
+        if isinstance(stamp, str) and stamp:
+            try:
+                if D.epoch(stamp) < earliest: continue
+            except D.EvidenceError: pass
         try: rec = D.delivery(record, sess['sessionId'])
         except D.EvidenceError: continue
         matching = [c for c in sent if rec['body'] == W.message_input(c)['message'].strip()

@@ -181,20 +181,11 @@ def socket_sender_matches(record, sender, body):
         return False
     try:
         session = W.find_session(sender)
-        records = read_records(W.transcript_path(session))
+        path = W.transcript_path(session)
+        records = read_records(path)
+        results = _msg_id_results(path, records).get(origin['msg_id'], [])
     except (EvidenceError, OSError, SystemExit):
         return False
-    results = []
-    for rec in records:
-        if rec.get('type') != 'user': continue
-        message = rec.get('message')
-        if not isinstance(message, dict): continue
-        for block in W._blocks(message.get('content'), 'tool_result'):
-            if block.get('is_error', False) is not False: continue
-            try: value = json.loads(W._result_text(block))
-            except (ValueError, TypeError): continue
-            if isinstance(value, dict) and value.get('success') is True and value.get('msg_id') == origin['msg_id']:
-                results.append(block)
     if len(results) != 1 or not results[0].get('tool_use_id'): return False
     uses = [(rec, block) for rec in records if rec.get('type') == 'assistant' and isinstance(rec.get('message'), dict)
             for block in W._blocks(rec['message'].get('content'), 'tool_use')
@@ -494,3 +485,99 @@ def answered_turns(path, sender, state):
         except EvidenceError:
             continue
     return answered
+
+
+def read_records_from_landmark(path, stamp):
+    """Records from the one bearing `stamp` to EOF, read by streaming the tail.
+
+    Owner's design, 2026-09-21: "read backwards from the bottom until finding where the
+    original question was queued and stop. so don't deserialize the whole thing, stream it
+    under looking for the answer."
+
+    Why a LANDMARK and not a timestamp comparison: `target_calls` documents that replayed
+    old records can appear later in the file, so transcript order is not a time boundary
+    and stopping on "older than X" could cut off records that still matter. Stopping at the
+    delivery record itself is structural -- everything after it in FILE ORDER is the
+    candidate set, and anything replayed among them is still seen and still rejected on its
+    own timestamp by the caller.
+
+    Returns None when the landmark is not present, so the caller falls back to the full
+    read rather than guessing. Cost before this: one 340 MB parse, 122 s of CPU per `owed`.
+    """
+    if not isinstance(stamp, str) or not stamp:
+        return None
+    needle = ('"timestamp":"%s"' % stamp).encode()
+    alt = ('"timestamp": "%s"' % stamp).encode()
+    try:
+        size = os.path.getsize(path)
+        with open(path, 'rb') as fh:
+            chunk, pos, tail = 1 << 20, size, b''
+            while pos > 0:
+                step = min(chunk, pos)
+                pos -= step
+                fh.seek(pos)
+                block = fh.read(step) + tail
+                index = max(block.rfind(needle), block.rfind(alt))
+                if index >= 0:
+                    start = block.rfind(b'\n', 0, index) + 1
+                    fh.seek(pos + start)
+                    return _parse_lines(fh.read().decode('utf-8'))
+                newline = block.find(b'\n')
+                tail = block[:newline + 1] if newline >= 0 else block
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise EvidenceError('cannot read complete transcript: %s' % exc)
+    return None
+
+
+def _parse_lines(text):
+    records = []
+    for number, line in enumerate(text.splitlines(), 1):
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        if not isinstance(record, dict):
+            raise EvidenceError('record %d is not an object' % number)
+        records.append(record)
+    return records
+
+
+_MSGID_CACHE = {}
+
+
+def _msg_id_results(path, records):
+    """msg_id -> successful tool_result blocks, built once per transcript version.
+
+    `socket_sender_matches` previously walked the whole sender transcript on EVERY call to
+    find one msg_id. Measured 2026-09-21: 947 calls at ~107 ms each, 100 s of a 171 s `owed`
+    run. The scan's inputs never change within a file version, so the same answer is built
+    once and looked up thereafter. Keyed like _RECORDS_CACHE on realpath, size and mtime, so
+    an appended record invalidates it and a stale view cannot be served.
+
+    The caller's `len(results) != 1` rule is preserved exactly: every match for an id is kept,
+    so an ambiguous id still fails rather than silently picking one.
+    """
+    try:
+        st = os.stat(path)
+    except OSError as exc:
+        raise EvidenceError('cannot read complete transcript: %s' % exc)
+    key = (os.path.realpath(path), st.st_size, st.st_mtime_ns)
+    cached = _MSGID_CACHE.get(key)
+    if cached is not None:
+        return cached
+    index = {}
+    for rec in records:
+        if rec.get('type') != 'user': continue
+        message = rec.get('message')
+        if not isinstance(message, dict): continue
+        for block in W._blocks(message.get('content'), 'tool_result'):
+            if block.get('is_error', False) is not False: continue
+            try: value = json.loads(W._result_text(block))
+            except (ValueError, TypeError): continue
+            if isinstance(value, dict) and value.get('success') is True:
+                mid = value.get('msg_id')
+                if isinstance(mid, str) and mid:
+                    index.setdefault(mid, []).append(block)
+    for stale in [k for k in _MSGID_CACHE if k[0] == key[0]]:
+        del _MSGID_CACHE[stale]
+    _MSGID_CACHE[key] = index
+    return index
