@@ -672,6 +672,18 @@ def run(a, ap):
         # `zzz` would have wiped the whole backlog. The argument must BE a timestamp.
         if not re.match(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}', ts):
             print('REFUSED: relayed <turn end_ts>; %r is not an ISO timestamp' % ts); return 1
+        # OWNER-ACTIVE QUIET (owner, 2026-09-22). While he is driving the target himself, a relay
+        # reaches a channel he is already reading, so marking it discharges the obligation against
+        # nothing -- his words: "its like relaying into a /dev/null". The relay is therefore
+        # DEFERRED, not satisfied: `owed` keeps counting and the backlog is relayed in one piece
+        # when the 20-minute unconditional audit next fires. Quiet holds while the newest completed
+        # turn was owner-opened and no AUDIT wake has run since it ended.
+        stale = D.owner_active_quiet(sess, state)
+        if stale:
+            print('REFUSED: owner-active quiet -- %s. He is reading the target directly; relaying now '
+                  'would mark these read against a channel he is already in. The relay is deferred, '
+                  'not lost: `owed` keeps counting and the next AUDIT wake releases it.' % stale)
+            return 1
         state['last_relay_ts'] = max(ts, state.get('last_relay_ts') or '')
         WK.save_state(a.state_dir, state)
         print('relayed to the owner up to %s' % state['last_relay_ts']); return 0

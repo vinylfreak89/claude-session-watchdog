@@ -788,3 +788,25 @@ def _msg_id_results(path, records):
     _MSGID_CACHE[key] = (records[0] if records else None,
                          records[-1] if records else None, index)
     return index
+
+def owner_active_quiet(sess, state, path=None):
+    """Is the owner driving the target right now, with no audit release since?
+
+    Returns a reason string while quiet holds, or None. Deliberately keyed on WHO OPENED the
+    newest completed turn rather than on a decaying timer: a timer drifts and would release
+    quiet mid-exchange. An AUDIT wake sets `last_audit_ts` and is the only release.
+    """
+    try:
+        turns = [t for t in W.split_turns(read_records(path or W.transcript_path(sess))) if t.end_state != 'open']
+    except Exception:
+        return None
+    if not turns:
+        return None
+    last = max(turns, key=lambda t: t.end_ts or '')
+    if getattr(last, 'opener_kind', None) != 'human':
+        return None
+    audit = state.get('last_audit_ts') or ''
+    if audit and audit >= (last.end_ts or ''):
+        return None
+    return ('newest completed turn %s was owner-opened; last audit %s'
+            % (last.end_ts, audit or 'never'))

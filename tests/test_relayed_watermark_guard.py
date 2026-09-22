@@ -31,6 +31,12 @@ def main():
         st = os.path.join(tmp, 'state'); shutil.copytree(os.path.join(ROOT, 'state'), st)
         s = json.load(open(os.path.join(st, 'state.json')))
         s['last_relay_ts'] = MARK
+        # Release owner-active quiet for this fixture. This test is about the timestamp guard,
+        # not about quiet, and its CONTROL (a real timestamp advances the watermark) would
+        # otherwise pass or fail according to whether the live owner happens to be mid-exchange
+        # with the target right now. Pinning it here makes the case depend only on the code
+        # under test -- which it always should have.
+        s['last_audit_ts'] = '2099-01-01T00:00:00Z'
         json.dump(s, open(os.path.join(st, 'state.json'), 'w'))
 
         # Junk that sorts ABOVE the watermark is the dangerous shape: without the guard
