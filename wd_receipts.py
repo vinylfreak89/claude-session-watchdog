@@ -814,6 +814,64 @@ def mark_audit(state_dir, ts):
     return ts
 
 
+def quiet_window_start(sess, state, path=None, state_dir=None):
+    """The instant the CURRENT owner-active quiet window opened, or None if none is open.
+
+    The window opens at the earliest owner-opened target turn that the last audit did
+    not already cover, and closes at the next audit stamp. It is derived from the same
+    two facts `owner_active_quiet` uses, so the banner and the refusal cannot disagree.
+    """
+    turns = [t for t in W.split_turns(read_records(path or W.transcript_path(sess)))
+             if t.end_state != 'open']
+    audit = (last_audit_ts(state_dir) if state_dir else '') or ''
+    starts = [t.end_ts for t in turns
+              if getattr(t, 'opener_kind', None) == 'human' and (t.end_ts or '') > audit]
+    return min(starts) if starts else None
+
+
+def quiet_speech(self_sess, since_ts):
+    """(watchdog messages, owner messages) in the watchdog's OWN transcript since `since_ts`.
+
+    MEASURED FROM THE RECORD, NEVER ATTESTED, and that is the whole point. The quiet
+    rule failed on 2026-09-22 because it was built as a refusal inside `relayed` -- a
+    bookkeeping verb -- while nothing at all constrained the watchdog's user-facing
+    text. It went quiet in the store and kept narrating the target's conversation to
+    the owner every wake, which is the exact behaviour the rule exists to stop. His
+    words on why a convention cannot fix this: "hooks are bullshit. they don't have
+    teeth. at all. you will find some tool that circumvents them."
+
+    So this counts nothing the watchdog tells it. It reads the harness-written
+    transcript, where a message the watchdog emitted is a fact it cannot decline to
+    record. Owner messages are counted beside it because answering him IS allowed
+    during quiet: the signal is the two numbers together, not either alone.
+    """
+    if not since_ts:
+        return 0, 0
+    mine = theirs = 0
+    for r in read_records(W.transcript_path(self_sess)):
+        ts = r.get('timestamp') or ''
+        if not ts or ts <= since_ts or r.get('isMeta'):
+            continue
+        kind = r.get('type')
+        if kind == 'assistant':
+            blocks = ((r.get('message') or {}).get('content') or [])
+            if any(isinstance(b, dict) and b.get('type') == 'text' and (b.get('text') or '').strip()
+                   for b in blocks):
+                mine += 1
+        elif kind == 'user' and (r.get('origin') or {}).get('kind') == 'human':
+            # A RECORD TYPE IS A CHANNEL, NOT AN AUTHOR, and `type == 'user'` is a
+            # CROWDED channel: in this session it also carries tool results and
+            # task-notifications, and `queue-operation`/`attachment` carry harness
+            # traffic with no message at all. Counting the types raw read 193 owner
+            # messages in a window where he sent exactly one -- and because the
+            # narration warning is suppressed when his count is the larger, the
+            # miscount HID the 22 messages it existed to surface. `origin.kind`
+            # is the same discriminator `split_turns` uses for an owner-opened
+            # turn, so the two readers cannot drift apart.
+            theirs += 1
+    return mine, theirs
+
+
 def owner_active_quiet(sess, state, path=None, state_dir=None):
     """Is the owner driving the target right now, with no audit release since?
 

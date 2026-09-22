@@ -533,8 +533,27 @@ def print_report(a, sess, st, state, R, trigger, wall, bytes_read):
     print('quiet: owner_active=%s (last human message %s, %s min ago)  own_turn=%s' % (R['owner_active'], R['last_human'], ('%.1f' % R['last_human_age']) if R['last_human_age'] is not None else '?', R['own_turn']))
     import wd_receipts as _D
     _q = _D.owner_active_quiet(sess, state, state_dir=a.state_dir)
-    if _q: print('OWNER-ACTIVE QUIET: %s. Do NOT relay to the owner this wake; `relayed` will refuse. '
-                 'Released by the next AUDIT wake. Keep reading, keep the gate and queue correct.' % _q)
+    if _q:
+        print('OWNER-ACTIVE QUIET: %s. Released by the next AUDIT wake. '
+              'Keep reading, keep the gate and queue correct.' % _q)
+        print('QUIET MEANS SAY NOTHING TO HIM -- not merely that `relayed` refuses. It refusing is '
+              'bookkeeping; the rule is about your MOUTH. Owner, 2026-09-22: "lmao you are saying '
+              'you will be quiet because the relay is held and you still keep yapping". During quiet '
+              'you speak to him ONLY to answer something he just asked you, or for a finding, a dead '
+              'job or a failed hook. Not to narrate the target: he is reading it live.')
+        _w0 = _D.quiet_window_start(sess, state, state_dir=a.state_dir)
+        try:
+            _me = W.find_session(a.self_sel) if getattr(a, 'self_sel', None) else None
+            _mine, _theirs = _D.quiet_speech(_me, _w0) if (_w0 and _me) else (0, 0)
+        except Exception as _exc:          # never let the counter kill a wake
+            _mine, _theirs = -1, -1
+            print('QUIET COUNTER UNAVAILABLE: %s' % _exc)
+        print('SPOKEN DURING THIS QUIET WINDOW (measured from your own transcript, not self-reported): '
+              'you %d, him %d, window opened %s.%s'
+              % (_mine, _theirs, _w0 or '?',
+                 '' if _mine <= _theirs else
+                 '  <-- %d of your messages had no message of his to answer. That is narration.'
+                 % (_mine - _theirs)))
     print('--- tool digest (%d) ---' % len(R['digest']))
     for d in R['digest'][:a.max_digest]: print('  ' + d)
     if len(R['digest']) > a.max_digest: print('  ... %d more' % (len(R['digest']) - a.max_digest))
