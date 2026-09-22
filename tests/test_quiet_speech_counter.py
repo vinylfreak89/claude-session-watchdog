@@ -159,3 +159,52 @@ class QuietWindowStart(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class AuditBudget(unittest.TestCase):
+    """Re-arming the hook must not postpone the release.
+
+    THE DEFECT, SYNTHESISED: the audit used to sleep a fixed window from its own process
+    start, so a Monitor re-armed mid-window restarted the 20-minute clock. Measured
+    2026-09-22, one quiet period ran ~28 minutes against the 20 the owner agreed to.
+    Nothing here reads live state, so no later change can quietly silence it.
+    """
+    NOW = 1_000_000.0
+
+    def _stamp(self, seconds_ago):
+        import datetime as dt
+        t = dt.datetime.fromtimestamp(self.NOW - seconds_ago, dt.timezone.utc)
+        return t.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    def test_a_rearm_midwindow_does_not_restart_the_clock(self):
+        """12 minutes already elapsed leaves 8, not a fresh 20."""
+        self.assertAlmostEqual(
+            D.audit_budget(1200, self._stamp(720), self.NOW), 480.0, delta=1.0)
+
+    def test_a_stamp_older_than_the_window_fires_immediately(self):
+        self.assertEqual(D.audit_budget(1200, self._stamp(5000), self.NOW), 0.0)
+
+    def test_a_fresh_stamp_waits_the_whole_window(self):
+        self.assertAlmostEqual(
+            D.audit_budget(1200, self._stamp(0), self.NOW), 1200.0, delta=1.0)
+
+    def test_no_stamp_fails_OPEN_not_closed(self):
+        """A backstop that declines to fire is a quiet that never releases."""
+        self.assertEqual(D.audit_budget(1200, None, self.NOW), 1200)
+        self.assertEqual(D.audit_budget(1200, '', self.NOW), 1200)
+
+    def test_an_unparseable_stamp_fails_open(self):
+        self.assertEqual(D.audit_budget(1200, 'not-a-timestamp', self.NOW), 1200)
+
+    def test_a_future_stamp_cannot_extend_the_window(self):
+        """A clock that went backwards must not buy extra silence."""
+        self.assertEqual(D.audit_budget(1200, self._stamp(-9999), self.NOW), 1200.0)
+
+    def test_the_wait_loop_uses_the_budget_not_max_wait(self):
+        """Guards the wiring: the fix is worthless if the loop still sleeps max_wait."""
+        src = open(os.path.join(ROOT, 'wd_wait.py')).read()
+        i = src.index('if a.audit:')
+        block = src[i:i + 1400]
+        self.assertIn('audit_budget(', block)
+        self.assertIn('while time.time() - t0 < budget:', block)
+        self.assertNotIn('while time.time() - t0 < a.max_wait:', block)

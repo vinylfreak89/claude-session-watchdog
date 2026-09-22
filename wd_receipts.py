@@ -814,6 +814,30 @@ def mark_audit(state_dir, ts):
     return ts
 
 
+def audit_budget(max_wait, prev_stamp, now):
+    """How long the audit backstop should still wait, measured from the LAST STAMP.
+
+    A Monitor expires every 30 minutes and must be re-armed, and the audit used to sleep
+    a fixed `max_wait` from its own process start -- so a re-arm landing mid-window
+    restarted the 20-minute clock and postponed the release. Measured 2026-09-22: one
+    quiet period ran about 28 minutes against the 20 the owner agreed to ("that means
+    when I'm active it shuts you up except once every 20 minutes").
+
+    FAILS OPEN, DELIBERATELY. A missing, unparseable or future-dated stamp returns the
+    full window rather than zero or a negative: the audit is the backstop that releases
+    quiet, and a backstop that declines to fire is a quiet that never ends. Clamped to
+    [0, max_wait] so a very old stamp fires immediately and a clock that has gone
+    backwards cannot extend the window past its nominal length.
+    """
+    if not prev_stamp:
+        return max_wait
+    try:
+        prev = epoch(prev_stamp)
+    except Exception:
+        return max_wait
+    return max(0.0, min(float(max_wait), float(max_wait) - (now - prev)))
+
+
 def quiet_window_start(sess, state, path=None, state_dir=None):
     """The instant the CURRENT owner-active quiet window opened, or None if none is open.
 

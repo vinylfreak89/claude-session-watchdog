@@ -472,11 +472,23 @@ def main():
     if a.audit:
         # a slow, dumb second hook: sleep out the window, then report state unconditionally. It shares none of
         # the event logic, so a bug or a wrong assumption in that logic cannot silence it.
-        while time.time() - t0 < a.max_wait:
+        # THE WINDOW IS MEASURED FROM THE LAST STAMP, NOT FROM THIS PROCESS'S START.
+        # A Monitor expires every 30 minutes and must be re-armed, and a re-arm used to
+        # restart the 20-minute clock -- so a re-arm landing mid-window postponed the
+        # release. Measured 2026-09-22: one quiet period ran ~28 minutes against the 20
+        # the owner agreed to ("that means when I'm active it shuts you up except once
+        # every 20 minutes"). Carrying the elapsed time forward makes the cadence a
+        # property of the stamp rather than of when the hook happened to be re-armed.
+        # A missing or unparseable stamp falls back to the full window: the backstop
+        # must never fail closed, because an audit that does not fire is a quiet that
+        # never releases.
+        import wd_receipts as _Dq
+        budget = _Dq.audit_budget(a.max_wait, _Dq.last_audit_ts(a.state_dir), time.time())
+        while time.time() - t0 < budget:
             # The loop condition is checked before this call, so the remaining time can
             # reach zero in between and kqueue rejects a negative timeout with ValueError,
             # killing the backstop hook. Same clamp the poll loop above already uses.
-            try: w.kq.control(None, 1, max(0.05, min(30.0, a.max_wait - (time.time() - t0))))
+            try: w.kq.control(None, 1, max(0.05, min(30.0, budget - (time.time() - t0))))
             except OSError: pass
         st = W.read_state(sess); sj = w.state_json()
         w.last_act = st['lastActivityAt']; w.last_record_ms = w._last_record_ms()
