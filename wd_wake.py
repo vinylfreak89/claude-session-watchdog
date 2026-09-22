@@ -532,7 +532,7 @@ def print_report(a, sess, st, state, R, trigger, wall, bytes_read):
         print('NOTE: a newer turn is OPEN (opener=%s, started %s) -- the target is mid-turn' % (R['open_turn'].opener_kind, R['open_turn'].start_ts))
     print('quiet: owner_active=%s (last human message %s, %s min ago)  own_turn=%s' % (R['owner_active'], R['last_human'], ('%.1f' % R['last_human_age']) if R['last_human_age'] is not None else '?', R['own_turn']))
     import wd_receipts as _D
-    _q = _D.owner_active_quiet(sess, state)
+    _q = _D.owner_active_quiet(sess, state, state_dir=a.state_dir)
     if _q: print('OWNER-ACTIVE QUIET: %s. Do NOT relay to the owner this wake; `relayed` will refuse. '
                  'Released by the next AUDIT wake. Keep reading, keep the gate and queue correct.' % _q)
     print('--- tool digest (%d) ---' % len(R['digest']))
@@ -889,9 +889,6 @@ def run(a):
         state['wake_count'] = wake_no
         state['seen_pids'] = (state['seen_pids'] + R['new_pids'])[-40:]
         state['ledger'] = R['new_ledger']; state['in_flight'] = R['inflight']; state['notified'] = R['notified']
-        # The AUDIT wake is the sole release for owner-active quiet (owner, 2026-09-22): while he is
-        # driving the target, `relayed` refuses and the backlog accumulates until this fires.
-        if (a.trigger or '').startswith('AUDIT'): state['last_audit_ts'] = W.now_iso()
         state['for_owner_seen'] = sorted(set(state.get('for_owner_seen') or []) | set(W.h(t) for _, t in (R.get('for_owner_all') or [])))[-400:]
         state['last_ct'] = st['ct']; state['last_cec'] = st['cec']; state['last_wake_ts'] = W.now_iso()
         state['dispatch_log'] = (state.get('dispatch_log') or [])[-300:] + [dict(ts=r['ts'], ct=st['ct'], verb=r['verb'], thread=r['thread'], brief_path=r['brief_path'], inline=r['inline']) for r in R['disp_records']]

@@ -789,7 +789,32 @@ def _msg_id_results(path, records):
                          records[-1] if records else None, index)
     return index
 
-def owner_active_quiet(sess, state, path=None):
+AUDIT_STAMP = 'last_audit.json'
+
+def last_audit_ts(state_dir):
+    """When the unconditional audit timer last fired.
+
+    Deliberately its own file rather than a key in state.json: the audit hook and a wake can run
+    at the same moment, and a read-modify-write of the shared state would silently drop whichever
+    finished first. Nothing else writes this file.
+    """
+    try:
+        with open(os.path.join(state_dir, AUDIT_STAMP)) as fh:
+            return (json.load(fh) or {}).get('ts') or ''
+    except Exception:
+        return ''
+
+def mark_audit(state_dir, ts):
+    """Called by the audit timer itself -- the sole release for owner-active quiet."""
+    os.makedirs(state_dir, exist_ok=True)
+    tmp = os.path.join(state_dir, AUDIT_STAMP + '.tmp')
+    with open(tmp, 'w') as fh:
+        json.dump(dict(ts=ts), fh)
+    os.replace(tmp, os.path.join(state_dir, AUDIT_STAMP))
+    return ts
+
+
+def owner_active_quiet(sess, state, path=None, state_dir=None):
     """Is the owner driving the target right now, with no audit release since?
 
     Returns a reason string while quiet holds, or None. Deliberately keyed on WHO OPENED the
@@ -805,7 +830,7 @@ def owner_active_quiet(sess, state, path=None):
     last = max(turns, key=lambda t: t.end_ts or '')
     if getattr(last, 'opener_kind', None) != 'human':
         return None
-    audit = state.get('last_audit_ts') or ''
+    audit = last_audit_ts(state_dir) if state_dir else (state or {}).get('last_audit_ts') or ''
     if audit and audit >= (last.end_ts or ''):
         return None
     return ('newest completed turn %s was owner-opened; last audit %s'

@@ -485,6 +485,11 @@ def main():
         try: procs = len(W.live_children(sess))
         except Exception: procs = -1
         emit('AUDIT ct=%s idle_min=%d live=%d inflight=%d cec=%s open=%d' % (st['ct'], idle, procs, len(sj.get('in_flight') or []), st['cec'], 1 if _open else 0))
+        # The audit timer is the SOLE release for owner-active quiet (owner, 2026-09-22). It is
+        # stamped here, where the line is actually emitted, rather than in wd_wake: a wake only
+        # runs if the model chooses to run one, which would make the release a convention.
+        import wd_receipts as _D
+        _D.mark_audit(a.state_dir, W.now_iso())
         for g in gate_lines(sess, a.state_dir, a.self_sel): emit(g)
         return 0
     while True:

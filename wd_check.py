@@ -678,7 +678,7 @@ def run(a, ap):
         # DEFERRED, not satisfied: `owed` keeps counting and the backlog is relayed in one piece
         # when the 20-minute unconditional audit next fires. Quiet holds while the newest completed
         # turn was owner-opened and no AUDIT wake has run since it ended.
-        stale = D.owner_active_quiet(sess, state)
+        stale = D.owner_active_quiet(sess, state, state_dir=a.state_dir)
         if stale:
             print('REFUSED: owner-active quiet -- %s. He is reading the target directly; relaying now '
                   'would mark these read against a channel he is already in. The relay is deferred, '

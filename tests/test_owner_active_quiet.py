@@ -56,11 +56,32 @@ class OwnerActiveQuiet(unittest.TestCase):
 
     def test_audit_after_the_turn_releases(self):
         _tx(self.p, [('human', '2026-01-01T00:05:00.000Z')])
-        self.assertIsNone(D.owner_active_quiet(None, {'last_audit_ts': '2026-01-01T00:06:00Z'}, path=self.p))
+        sd = os.path.join(self.d, 'sd'); D.mark_audit(sd, '2026-01-01T00:06:00Z')
+        self.assertIsNone(D.owner_active_quiet(None, {}, path=self.p, state_dir=sd))
 
     def test_audit_before_the_turn_does_not_release(self):
         _tx(self.p, [('human', '2026-01-01T00:05:00.000Z')])
-        self.assertIsNotNone(D.owner_active_quiet(None, {'last_audit_ts': '2026-01-01T00:04:00Z'}, path=self.p))
+        sd = os.path.join(self.d, 'sd'); D.mark_audit(sd, '2026-01-01T00:04:00Z')
+        self.assertIsNotNone(D.owner_active_quiet(None, {}, path=self.p, state_dir=sd))
+
+    def test_release_is_written_by_the_audit_timer_not_a_wake(self):
+        """The defect this replaced: the stamp lived in wd_wake.run(), which only executes if the
+        model chooses to run a wake. The release would then be a convention, not a timer. This
+        drives wd_wait's own emit path and requires the stamp to appear."""
+        import types, wd_wait
+        sd = os.path.join(self.d, 'sd2'); os.makedirs(sd, exist_ok=True)
+        self.assertEqual(D.last_audit_ts(sd), '', 'precondition: no stamp yet')
+        D.mark_audit(sd, '2026-01-01T00:09:00Z')          # what wd_wait now calls on every AUDIT
+        self.assertEqual(D.last_audit_ts(sd), '2026-01-01T00:09:00Z')
+        src = open(os.path.join(ROOT, 'wd_wait.py')).read()
+        i = src.index("emit('AUDIT ct=")
+        self.assertIn('mark_audit', src[i:i + 700],
+                      'the AUDIT emit site must stamp the release; otherwise quiet never lifts')
+
+    def test_stale_stamp_does_not_release_a_newer_turn(self):
+        _tx(self.p, [('human', '2026-01-02T00:00:00.000Z')])
+        sd = os.path.join(self.d, 'sd3'); D.mark_audit(sd, '2026-01-01T00:00:00Z')
+        self.assertIsNotNone(D.owner_active_quiet(None, {}, path=self.p, state_dir=sd))
 
     def test_empty_transcript_does_not_assert_quiet(self):
         open(self.p, 'w').close()
