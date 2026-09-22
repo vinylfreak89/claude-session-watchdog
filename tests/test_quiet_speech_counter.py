@@ -134,6 +134,19 @@ class QuietWindowStart(unittest.TestCase):
         self.d = tempfile.mkdtemp()
         self.p = os.path.join(self.d, 't.jsonl')
         self.sd = tempfile.mkdtemp()
+        # Pin the off switch ON -- see the note in test_owner_active_quiet: the
+        # agreement case below calls owner_active_quiet, which reads config.json.
+        cfg = os.path.join(self.d, 'config.json')
+        with open(cfg, 'w') as fh:
+            json.dump(dict(quiet_when_owner_active=True), fh)
+        self._prev_cfg = os.environ.get('WD_CONFIG')
+        os.environ['WD_CONFIG'] = cfg
+
+    def tearDown(self):
+        if self._prev_cfg is None:
+            os.environ.pop('WD_CONFIG', None)
+        else:
+            os.environ['WD_CONFIG'] = self._prev_cfg
 
     def test_window_opens_at_the_earliest_uncovered_owner_turn(self):
         _tx(self.p, [('human', '2026-01-01T00:05:00.000Z'),

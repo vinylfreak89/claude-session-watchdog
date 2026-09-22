@@ -34,6 +34,39 @@ class OwnerActiveQuiet(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp()
         self.p = os.path.join(self.d, 't.jsonl')
+        # PIN THE OFF SWITCH ON. `owner_active_quiet` consults config.json for
+        # `quiet_when_owner_active`, so without this every case here would read the
+        # operator's LIVE config and pass or fail on whatever he last set -- the same
+        # borrowed-condition defect these tests exist to avoid. Measured: turning the
+        # switch off in production silently failed four of them.
+        self._cfg = os.path.join(self.d, 'config.json')
+        with open(self._cfg, 'w') as fh:
+            json.dump(dict(quiet_when_owner_active=True), fh)
+        self._prev_cfg = os.environ.get('WD_CONFIG')
+        os.environ['WD_CONFIG'] = self._cfg
+
+    def tearDown(self):
+        if self._prev_cfg is None:
+            os.environ.pop('WD_CONFIG', None)
+        else:
+            os.environ['WD_CONFIG'] = self._prev_cfg
+
+    def test_the_off_switch_disables_quiet_entirely(self):
+        """His call, 2026-09-22: "turn off your quiet audit and start handling shit again".
+        Same transcript that holds quiet above; only the flag differs."""
+        _tx(self.p, [('task-notification', '2026-01-01T00:00:00.000Z'),
+                     ('human', '2026-01-01T00:05:00.000Z')])
+        self.assertIsNotNone(D.owner_active_quiet(None, {}, path=self.p), 'control: quiet holds when ON')
+        with open(self._cfg, 'w') as fh:
+            json.dump(dict(quiet_when_owner_active=False), fh)
+        self.assertIsNone(D.owner_active_quiet(None, {}, path=self.p))
+
+    def test_the_default_is_ON_so_disabling_is_deliberate(self):
+        _tx(self.p, [('task-notification', '2026-01-01T00:00:00.000Z'),
+                     ('human', '2026-01-01T00:05:00.000Z')])
+        with open(self._cfg, 'w') as fh:
+            json.dump({}, fh)          # key absent entirely
+        self.assertIsNotNone(D.owner_active_quiet(None, {}, path=self.p))
 
     # --- the predicate -------------------------------------------------------------
     def test_fixture_parses(self):

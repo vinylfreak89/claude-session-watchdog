@@ -903,6 +903,20 @@ def owner_active_quiet(sess, state, path=None, state_dir=None):
     newest completed turn rather than on a decaying timer: a timer drifts and would release
     quiet mid-exchange. An AUDIT wake sets `last_audit_ts` and is the only release.
     """
+    # OFF SWITCH, his call, 2026-09-22: "I'm just saying to turn off your quiet audit and start
+    # handling shit again". Quiet exists to stop the watchdog narrating the target back at him
+    # while he is reading it live; when he is away that purpose is gone and the deferral only
+    # delays work he wants handled. `quiet_when_owner_active: false` in config.json disables it
+    # outright. The default stays ON so switching it off is always a deliberate act, and the
+    # whole mechanism -- the counter, the banner, the audit release -- returns by flipping it
+    # back. This is his constraint to disable, not the watchdog's.
+    try:
+        _cfg = os.environ.get('WD_CONFIG') or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), 'config.json')
+        if not W.load_config(_cfg).get('quiet_when_owner_active', True):
+            return None
+    except Exception:
+        pass
     try:
         turns = [t for t in W.split_turns(read_records(path or W.transcript_path(sess))) if t.end_state != 'open']
     except Exception:
