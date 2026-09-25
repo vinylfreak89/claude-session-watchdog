@@ -156,16 +156,16 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
                                         'git cat-file -t %s in %s' % (sha, repo), 'no commit object %s in the repo' % sha, turn_label, end_ts))
             elif c['kind'] == 'push' and not info['remote_branches'] and drift and drift.get('remote_sha'):
                 findings.append(finding('push_not_on_remote', 'push_not_on_remote:%s' % sha, dict(sha=sha, remote=drift['remote_sha']), c['sentence'],
-                                        'git branch -r --contains %s; ls-remote origin %s' % (sha, drift['branch']),
-                                        '%s is on local %s only; origin/%s = %s (%s); local ahead %s' % (sha, info['local_branches'], drift['branch'], drift['remote_sha'], drift['source'], drift['ahead']), turn_label, end_ts))
+                                        'git branch -r --contains %s; ls-remote origin %s' % (sha, drift['push_branch']),
+                                        '%s is on local %s only; origin/%s = %s (%s); local ahead %s' % (sha, info['local_branches'], drift['push_branch'], drift['remote_sha'], drift['source'], drift['ahead']), turn_label, end_ts))
     if drift and drift.get('ahead') and not said_not_pushed:
         push_claim = next((c for c in claims if c['kind'] == 'push'), None)
         quote = push_claim['sentence'] if push_claim else ('tool call: ' + (pushes[-1]['command'] if pushes else ('git commit -> %s' % ', '.join(c['sha'] for c in commits))))
         findings.append(finding('push_drift', 'push_drift:%s:%s' % (drift['branch'], drift['head']), dict(head=drift['head'], remote=drift['remote_sha'], ahead=drift['ahead']), quote,
-                                'git ls-remote origin %s vs local HEAD (%s)' % (drift['branch'], drift['source']),
-                                'local %s at %s is %d ahead of origin (%s): %s' % (drift['branch'], drift['head'], drift['ahead'], drift['remote_sha'], '; '.join(drift['ahead_shas'][:4])), turn_label, end_ts))
+                                'git ls-remote origin %s vs local %s HEAD (%s)' % (drift['push_branch'], drift['branch'], drift['source']),
+                                'local %s at %s is %d ahead of origin/%s (%s): %s' % (drift['branch'], drift['head'], drift['ahead'], drift['push_branch'], drift['remote_sha'], '; '.join(drift['ahead_shas'][:4])), turn_label, end_ts))
     if drift and drift.get('ls_remote_error'):
-        observations.append('ls-remote failed (%s); drift measured against last-fetched origin/%s' % (drift['ls_remote_error'], drift['branch']))
+        observations.append('ls-remote failed (%s); drift measured against last-fetched origin/%s' % (drift['ls_remote_error'], drift['push_branch']))
 
     # ---- dispatches (tool facts) and dispatch claims (prose)
     procs = W.live_children(sess)

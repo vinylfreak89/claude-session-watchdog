@@ -741,16 +741,30 @@ def git_branch_drift(repo):
     _, br, _ = git(repo, 'symbolic-ref', '--short', 'HEAD')
     br = br.strip() or 'HEAD'
     _, head, _ = git(repo, 'rev-parse', 'HEAD'); head = head.strip()
-    rc, lr, err = git(repo, 'ls-remote', 'origin', 'refs/heads/' + br, timeout=25)
+    # COMPARE AGAINST WHERE THIS BRANCH PUSHES, NOT ITS OWN NAME ON THE REMOTE.
+    # A checkout can push to a differently named remote branch, and does by design
+    # when two git worktrees share one .git: git refuses the same branch in both, so
+    # each gets its own local name and both push to one remote branch. Measured
+    # 2026-09-25 after the v11 consolidation: local v11-claude pushes to origin/v11
+    # (push.default=upstream), origin/v11-claude is frozen by design, and comparing
+    # against it reported the target "54 ahead of origin" with zero unpushed commits.
+    # Every new commit would then raise a fresh finding and latch the send gate.
+    # Falls back to the local name only when git cannot resolve @{push}.
+    push_br = br
+    rcp, pr, _ = git(repo, 'rev-parse', '--abbrev-ref', br + '@{push}')
+    pr = pr.strip()
+    if rcp == 0 and pr.startswith('origin/') and len(pr) > len('origin/'):
+        push_br = pr[len('origin/'):]
+    rc, lr, err = git(repo, 'ls-remote', 'origin', 'refs/heads/' + push_br, timeout=25)
     remote_sha, source = None, None
     if rc == 0 and lr.strip():
         remote_sha, source = lr.split()[0], 'ls-remote@' + now_iso()
     else:
-        rc2, rs, _ = git(repo, 'rev-parse', 'origin/' + br)
+        rc2, rs, _ = git(repo, 'rev-parse', 'origin/' + push_br)
         if rc2 == 0:
             remote_sha = rs.strip()
-            _, rl, _ = git(repo, 'reflog', 'show', '--date=iso', '-n1', 'refs/remotes/origin/' + br)
-            source = 'origin/%s as last fetched (%s)' % (br, short(rl, 80))
+            _, rl, _ = git(repo, 'reflog', 'show', '--date=iso', '-n1', 'refs/remotes/origin/' + push_br)
+            source = 'origin/%s as last fetched (%s)' % (push_br, short(rl, 80))
     ahead = behind = None
     if remote_sha:
         rc3, cnt, _ = git(repo, 'rev-list', '--left-right', '--count', remote_sha + '...' + head)
@@ -764,7 +778,7 @@ def git_branch_drift(repo):
         _, sh, _ = git(repo, 'log', '--format=%h %s', remote_sha + '..' + head)
         ahead_shas = [short(x, 70) for x in sh.splitlines()]
     _, st, _ = git(repo, 'status', '--porcelain')
-    return dict(branch=br, head=head[:10], remote_sha=(remote_sha or '')[:10], source=source, ahead=ahead, behind=behind,
+    return dict(branch=br, push_branch=push_br, head=head[:10], remote_sha=(remote_sha or '')[:10], source=source, ahead=ahead, behind=behind,
                 ahead_shas=ahead_shas, dirty=[short(x, 80) for x in st.splitlines()][:12], ls_remote_error=(None if rc == 0 else short(err, 100)))
 
 def git_log_paths_since(repo, since_iso, paths, ref='HEAD'):

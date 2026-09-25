@@ -51,9 +51,9 @@ def check(a, sess, kind, args, state):
         return checked, result, dict(procs=len(procs), inflight=len(infl), turn_open=bool(_open))
     if kind == 'commit':
         info = W.git_sha_info(repo, args[0]); d = W.git_branch_drift(repo)
-        checked = 'git cat-file/branch --contains %s; git ls-remote origin %s vs local HEAD' % (args[0], d['branch'])
+        checked = 'git cat-file/branch --contains %s; git ls-remote origin %s vs local %s HEAD' % (args[0], d['push_branch'], d['branch'])
         if not info['exists']: return checked, 'no commit object %s in %s' % (args[0], repo), dict(exists=False)
-        result = '%s exists (%s, %s); local branches %s; remote branches %s; %s at %s, origin %s, ahead %s behind %s' % (args[0], info['date'], W.short(info['subject'], 60), info['local_branches'], info['remote_branches'], d['branch'], d['head'], d['remote_sha'], d['ahead'], d['behind'])
+        result = '%s exists (%s, %s); local branches %s; remote branches %s; %s at %s, origin/%s %s, ahead %s behind %s' % (args[0], info['date'], W.short(info['subject'], 60), info['local_branches'], info['remote_branches'], d['branch'], d['head'], d['push_branch'], d['remote_sha'], d['ahead'], d['behind'])
         return checked, result, dict(exists=True, remote=info['remote_branches'], ahead=d['ahead'])
     if kind == 'file':
         rp = WK.resolve_path(args[0], repo); since = args[1] if len(args) > 1 else None
