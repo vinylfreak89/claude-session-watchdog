@@ -558,6 +558,11 @@ and the statement was false: measured 2026-09-17/18, re-arming was the single la
 Re-arm each one the moment its expiry notice arrives, in the same turn, and never end a turn with a hook down —
 a lost stream hook loses turn ends silently, which looks exactly like a quiet target.
 
+**Every Monitor call passes `timeout_ms: 1800000`.** The 30 minutes is a MAXIMUM, not the default: omit the
+argument and the monitor dies after 5 minutes, which leaves the 20-minute audit unable to ever fire. Cost,
+2026-09-27: after a compaction the Monitor schema had to be reloaded, the hooks were re-armed without it, and all
+three ran at 5 minutes until the owner noticed. A notice reading "expires in 5m" means the argument is missing.
+
 On every event line (`TURN`, `TURN_END`, `INTERRUPTED`, `API_ERROR`, `CONTEXT_EXCEEDED`, `STALL`,
 `REPLY_OVERDUE`, `TIMEOUT`):
 1. `wd.sh wake --trigger '<the line verbatim>'`. Read ALL of it, texts first, before the findings.
