@@ -1,5 +1,6 @@
 """Typed acceptance with pre-delivery baselines and target-attributed action evidence."""
 import base64
+import bisect
 import csv
 from dataclasses import dataclass
 from enum import Enum
@@ -177,6 +178,33 @@ def _tool_records(path, records):
     return parsed
 
 
+_WINDOW_INDEX = {}
+
+
+def _window(parsed, boundary):
+    """Entries of `parsed` whose stamp is at or after `boundary`, in FILE order.
+
+    The same entries the full loop keeps, found by bisecting a stamp-sorted index instead of
+    re-testing every record: measured 2026-10-01 on frozen inputs, 87 calls in one `owed`
+    each walked every tool record of the target transcript (4.4 s self time). Built once per
+    parsed list (confirmed by `is`). Returns None when any stamp is unreadable, so the caller
+    falls back to the original loop and raises exactly where and how it always did.
+    """
+    hit = _WINDOW_INDEX.get('entry')
+    if hit is None or hit[0] is not parsed:
+        try:
+            keyed = sorted((D.epoch(stamp), i) for i, (_role, stamp, _blocks) in enumerate(parsed))
+        except D.EvidenceError:
+            keyed = None
+        hit = (parsed, keyed, [k for k, _ in keyed] if keyed is not None else None)
+        _WINDOW_INDEX['entry'] = hit
+    _parsed, keyed, stamps = hit
+    if keyed is None:
+        return None
+    first = bisect.bisect_left(stamps, boundary)
+    return [parsed[i] for i in sorted(i for _, i in keyed[first:])]
+
+
 def target_calls(sess, after):
     """Successful post-receipt calls, checking duplicate IDs only in that window.
 
@@ -187,10 +215,12 @@ def target_calls(sess, after):
     """
     boundary = D.epoch(after)
     path = W.transcript_path(sess)
-    records = D.read_records(path)
+    records = D.read_records_view(path)
     uses = {}
     complete = []
-    for role, stamp, blocks in _tool_records(path, records):
+    parsed = _tool_records(path, records)
+    window = _window(parsed, boundary)
+    for role, stamp, blocks in (parsed if window is None else window):
         if D.epoch(stamp) < boundary:
             continue
         if role == 'assistant':
@@ -487,7 +517,7 @@ def unique_reply_turn(sess, calls):
     Old uses of an ID outside the call's timestamp do not identify this call.
     A still-open turn or an ambiguous end timestamp earns no turn exemption.
     """
-    turns = W.split_turns(D.read_records(W.transcript_path(sess)))
+    turns = W.split_turns(D.read_records_view(W.transcript_path(sess)))
     matched = []
     for call in calls:
         candidates = [t for t in turns if any(u.get('id') == call['id'] and u.get('ts') == call['ts']
@@ -505,8 +535,15 @@ def evaluate_message(a, sess, item, args, facts, calls):
     require_count(facts, 'count')
     sender = W.find_session(a.self_sel)
     expected = args[0]
-    sent = [c for c in calls if W.message_to_session(c, sender['sessionId'])
-            and expected in W.message_input(c)['message'].splitlines()]
+    # The exact-line test runs FIRST because it is a string comparison, and the recipient test
+    # can resolve a socket through the receiver's whole transcript. The predicates are pure,
+    # so the surviving calls are the same set; only calls that cannot match stop paying for
+    # recipient resolution. Measured 2026-10-01 (Codex): 88,292 message_to_session calls and
+    # 1,073 delivery validations in the first 100 s of one `owed`, most for messages that
+    # never carried the requested line.
+    sent = [c for c in calls if W.message_input(c) is not None
+            and expected in W.message_input(c)['message'].splitlines()
+            and W.message_to_session(c, sender['sessionId'])]
     if not sent: return Result(Status.NOT_YET, 'no successful matching target reply call after delivery')
     # A match requires rec['ts'] >= c['ts'] for some candidate call, so a record older than
     # the EARLIEST candidate cannot match whatever it contains. Skipping those before the
@@ -518,7 +555,7 @@ def evaluate_message(a, sess, item, args, facts, calls):
     earliest = min(D.epoch(c['ts']) for c in sent)
     # The parse snapshot keeps raw candidates, not validated receipts. Every
     # candidate still reaches delivery(), including fresh sender-side evidence.
-    for record in D.read_records(W.transcript_path(sender), deliveries_only=True):
+    for record in D.read_records_view(W.transcript_path(sender), deliveries_only=True):
         stamp = record.get('timestamp')
         if isinstance(stamp, str) and stamp:
             try:

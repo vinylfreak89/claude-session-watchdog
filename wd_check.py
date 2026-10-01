@@ -271,8 +271,8 @@ def verified_item_receipt(sess, state, item, actor):
     ident = item.get('message_id')
     if not item.get('sent') or not ident or ident not in (state.get('send_receipts') or {}):
         raise D.EvidenceError('answered evidence requires an already registered item delivery')
-    rec, changed = D.record_delivery(W.transcript_path(sess), actor, copy.deepcopy(state),
-                                     ident, queue_id=item.get('id'))
+    rec, changed = D.record_delivery(W.transcript_path(sess), actor, state,
+                                     ident, queue_id=item.get('id'), verify_only=True)
     if changed or rec['ts'] != item['sent']:
         raise D.EvidenceError('item delivery does not match its registered receipt')
     return rec

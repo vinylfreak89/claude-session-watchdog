@@ -117,6 +117,8 @@ class _RecordSnapshot:
     digest: bytes
     lines: int
     terminated: bool
+    records_view: tuple
+    deliveries_view: tuple
 
 
 _RECORDS_CACHE = {}
@@ -142,6 +144,24 @@ def _parse_record_bytes(data, first_line=1):
 
 
 def read_records(path, *, deliveries_only=False):
+    """An independent list of the current records; see `_snapshot` for the reading rules."""
+    return list(read_records_view(path, deliveries_only=deliveries_only))
+
+
+def read_records_view(path, *, deliveries_only=False):
+    """The same records as `read_records`, as the snapshot's own immutable tuple.
+
+    For internal readers that only iterate or index. `read_records` copied the full list on
+    every call, including unchanged-file hits: measured 2026-10-01 on frozen inputs, 800
+    calls in one `owed` spent 5.9 s of self time doing it. A tuple cannot be mutated, so no
+    caller can change what another sees; the file-version and prefix checks are unchanged
+    because both functions go through the same `_snapshot`.
+    """
+    snap = _snapshot(path)
+    return snap.deliveries_view if deliveries_only else snap.records_view
+
+
+def _snapshot(path):
     """Read current evidence, reusing JSON decoding only for a verified prefix.
 
     A growing transcript used to invalidate the entire parse on every append,
@@ -164,7 +184,7 @@ def read_records(path, *, deliveries_only=False):
         version = _file_version(os.stat(path))
         previous = _RECORDS_CACHE.get(realpath)
         if previous is not None and previous.version == version:
-            return list(previous.deliveries if deliveries_only else previous.records)
+            return previous
         with open(path, 'rb') as stream:
             before = _file_version(os.fstat(stream.fileno()))
             data = stream.read()
@@ -186,10 +206,11 @@ def read_records(path, *, deliveries_only=False):
             records, lines = _parse_record_bytes(data)
             deliveries = [r for r in records if delivery_candidate(r)]
             digest = hashlib.sha256(data).digest()
-        _RECORDS_CACHE[realpath] = _RecordSnapshot(
+        snap = _RecordSnapshot(
             current if stable else None, records, deliveries, len(data), digest, lines,
-            not data or data.endswith(b'\n'))
-        return list(deliveries if deliveries_only else records)
+            not data or data.endswith(b'\n'), tuple(records), tuple(deliveries))
+        _RECORDS_CACHE[realpath] = snap
+        return snap
     except (OSError, UnicodeError, ValueError) as exc:
         raise EvidenceError('cannot read complete transcript: %s' % exc)
 
@@ -211,12 +232,27 @@ def _read_records_uncached(path):
     return records
 
 
+_STAMP = re.compile(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)')
+_VALID_EPOCH = {}
+
+
 def epoch(stamp):
-    if not isinstance(stamp, str) or not re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)', stamp):
+    """Validated seconds for an ISO stamp; raises EvidenceError for anything else.
+
+    Memoised for VALID stamps only, by exact string: the answer is a pure function of the
+    string. Measured 2026-10-01 on frozen inputs: 3.3 million calls in one `owed`, 11.5 s,
+    each re-running the regex on stamps it had already validated. Invalid stamps are not
+    cached, so every refusal is still raised by the same checks with the same message.
+    """
+    value = _VALID_EPOCH.get(stamp) if isinstance(stamp, str) else None
+    if value is not None:
+        return value
+    if not isinstance(stamp, str) or not _STAMP.fullmatch(stamp):
         raise EvidenceError('missing or invalid timestamp')
     value = W.epoch_from_iso(stamp)
     if value is None:
         raise EvidenceError('invalid timestamp')
+    _VALID_EPOCH[stamp] = value
     return value
 
 
@@ -281,7 +317,7 @@ def socket_sender_matches(record, sender, body):
     try:
         session = W.find_session(sender)
         path = W.transcript_path(session)
-        records = read_records(path)
+        records = read_records_view(path)
         results = _msg_id_results(path, records).get(origin['msg_id'], [])
     except (EvidenceError, OSError, SystemExit):
         return False
@@ -324,9 +360,32 @@ def sender_sent_text(sender, payload, not_after):
     never this session's assertion.
     """
     try:
-        records = read_records(W.transcript_path(W.find_session(sender)))
+        records = read_records_view(W.transcript_path(W.find_session(sender)))
     except (EvidenceError, OSError, SystemExit):
         return False
+    for rec in _sent_text_index(records).get(payload, ()):
+        if epoch(rec.get('timestamp')) <= epoch(not_after):
+            return True
+    return False
+
+
+_SENT_TEXT_INDEX = {}
+
+
+def _sent_text_index(records):
+    """stripped message -> [assistant record, ...] for successful sends, in file order.
+
+    Exactly the records the two full passes selected (failed results excluded, the same
+    tool names, the same exact-text test), built once per record set instead of per call:
+    measured 2026-10-01 on frozen inputs, 30 calls in one `owed` cost 7.7 s re-walking the
+    whole sender transcript twice each. The decision -- the arrival-time test, in file
+    order, raising on an unreadable stamp exactly as before -- stays per call.
+    Keyed on the identity of the records, confirmed by `is`, like every index here.
+    """
+    hit = _SENT_TEXT_INDEX.get('entry')
+    if hit is not None and hit[0] == len(records) and (
+            not records or (hit[1] is records[0] and hit[2] is records[-1])):
+        return hit[3]
     failed = set()
     for rec in records:
         if rec.get('type') != 'user' or not isinstance(rec.get('message'), dict):
@@ -334,6 +393,7 @@ def sender_sent_text(sender, payload, not_after):
         for block in W._blocks(rec['message'].get('content'), 'tool_result'):
             if block.get('is_error', False) is not False and block.get('tool_use_id'):
                 failed.add(block['tool_use_id'])
+    index = {}
     for rec in records:
         if rec.get('type') != 'assistant' or not isinstance(rec.get('message'), dict):
             continue
@@ -341,11 +401,12 @@ def sender_sent_text(sender, payload, not_after):
             if use.get('name') not in ('SendMessage', 'send_message') or use.get('id') in failed:
                 continue
             message = (use.get('input') or {}).get('message')
-            if not isinstance(message, str) or message.strip() != payload:
+            if not isinstance(message, str):
                 continue
-            if epoch(rec.get('timestamp')) <= epoch(not_after):
-                return True
-    return False
+            index.setdefault(message.strip(), []).append(rec)
+    _SENT_TEXT_INDEX['entry'] = (len(records), records[0] if records else None,
+                                 records[-1] if records else None, index)
+    return index
 
 
 def delivered_text(record):
@@ -530,7 +591,7 @@ def receipt(path, sender, ident):
     """
     if not ident:
         raise EvidenceError('a target transcript delivery uuid is required')
-    records = read_records(path)
+    records = read_records_view(path)
     hits = _receipt_index(path, records).get(ident, [])
     if len(hits) != 1:
         raise EvidenceError('delivery uuid must identify exactly one transcript record')
@@ -545,7 +606,7 @@ def receipt(path, sender, ident):
 
 def possibly_delivered(path, sender, item):
     """Withdrawal needs a conclusive negative, including unmarked/legacy deliveries."""
-    for record in read_records(path):
+    for record in read_records_view(path):
         if record.get('type') not in ('user', 'attachment', 'queue-operation'):
             continue
         stamp = record.get('timestamp')
@@ -600,8 +661,14 @@ def components(state, rec):
     return q, fids, findings
 
 
-def record_delivery(path, sender, state, ident, queue_id=None, finding_ids=None):
-    """Validate every component before mutating; either mark order records the same receipt."""
+def record_delivery(path, sender, state, ident, queue_id=None, finding_ids=None, verify_only=False):
+    """Validate every component before mutating; either mark order records the same receipt.
+
+    verify_only: confirm an EXISTING binding and never mutate. Every validation still runs,
+    then it returns (rec, True) where it would first write -- the caller treats that as no binding.
+    It replaces a deepcopy of the whole state per call (95 copies of 1.7 MB in one `owed`,
+    4.2 s, measured 2026-10-01) that existed only to absorb a mutation that cannot happen.
+    """
     rec = receipt(path, sender, ident)
     history = state.get('acknowledged_turns', [])
     if not isinstance(history, list) or any(not isinstance(e, dict) for e in history):
@@ -647,6 +714,10 @@ def record_delivery(path, sender, state, ident, queue_id=None, finding_ids=None)
             deadline = W.iso_from_epoch(epoch(rec['ts']) + 60 * delay)
             if not waiting or epoch(deadline) < epoch(waiting.get('deadline')):
                 waiting = dict(message_id=ident, sent_ts=rec['ts'], deadline=deadline, findings=[fid], poked=False)
+    if verify_only:
+        # Every check above has run, so a refusal still names the same reason; nothing
+        # below this line is reached, so nothing is written.
+        return rec, True
     if q is not None:
         q['sent'] = rec['ts']
         q['message_id'] = ident

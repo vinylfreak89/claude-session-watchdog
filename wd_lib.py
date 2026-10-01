@@ -1048,7 +1048,7 @@ def message_to_session(call, session_id):
     import wd_receipts as D
     receiver = find_session(session_id)
     path = transcript_path(receiver)
-    records = D.read_records(path)
+    records = D.read_records_view(path)
     # Indexed rather than scanned. Measured 2026-09-21: 18,235 calls each walking all 70,812
     # records for one msg_id -- 1.3 billion iterations, 31 s of a 36 s `owed` run. The index
     # is built once per transcript version and holds exactly the records this scan selected,
