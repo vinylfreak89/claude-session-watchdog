@@ -17,7 +17,7 @@
         runs the check, builds the fixed-form message from ITS output (the model supplies class and quote only),
         applies dedupe and the quiet rule, logs it to findings.md and proposes it. Then: wd.sh sent Fn <message_id>.
 The model does the reading; this does the measuring and the wording. It cannot emit a result it did not compute."""
-import os, sys, json, argparse, glob, re, time, collections, copy
+import os, sys, io, json, argparse, glob, re, time, collections, contextlib, copy
 from types import SimpleNamespace
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wd_lib as W
@@ -560,8 +560,65 @@ def main():
     ap.add_argument('--row-pattern', default=W.DEFAULT_ROW_PATTERN)
     ap.add_argument('mode', choices=['check', 'finding', 'owed', 'relayed', 'hold', 'answered', 'ask', 'resolved', 'open', 'next', 'sent1', 'nudged', 'prodded', 'conditional', 'fired', 'closed', 'promise']); ap.add_argument('rest', nargs=argparse.REMAINDER)
     a = ap.parse_args()
+    if a.mode in READ_FIRST_MODES:
+        rc = run_read_first(lambda: run(a, ap))
+        if rc is not NEEDS_LOCK:
+            return rc
     with S.transaction(a.state_dir):
         return run(a, ap)
+
+
+# Modes that usually only READ state. Measured 2026-10-01 (Codex, /tmp/wd-perf-oct01): `owed`
+# held the exclusive state lock for minutes while it parsed transcripts and evaluated
+# acceptances, and a `relayed` costing 0.38 s of CPU sat 828/828 stack samples in flock behind
+# it. These modes now run first WITHOUT the lock, against one atomic snapshot of state.json
+# (save_state writes by os.replace, so a read never sees a torn file). If the run completes
+# without trying to save, its output is exactly what it would have printed under the lock at
+# the moment of that snapshot -- a valid serial order -- and it is released. The first attempt
+# to save aborts the unlocked run, discards everything it printed, and the WHOLE mode re-runs
+# from scratch under the lock against fresh state, as before. So a write is never decided on
+# state that another writer may have changed in the meantime.
+READ_FIRST_MODES = ('owed', 'next', 'check')
+NEEDS_LOCK = object()
+# Every function that writes the state directory. A read-first run replaces each with a refusal,
+# so the first write aborts it. Adding a writer to wd_wake without listing it here would let a
+# read-first run write unlocked; tests/test_read_first_lock.py fails if that happens.
+STATE_WRITERS = ('save_state', 'append_findings_md', 'rewrite_status', 'log_line')
+
+
+class _WriteAttempted(BaseException):
+    """BaseException so `except Exception` inside acceptance evaluation cannot swallow it."""
+
+
+def run_read_first(body, *modules):
+    """Run `body` without the state lock; NEEDS_LOCK if it tried to write (its output discarded).
+
+    `modules` are any extra module objects whose globals the body calls the writers through.
+    wd_wake run as a script is `__main__`, a different module object from the `wd_wake` that
+    this file imports, so its own calls to save_state would not see a patch on WK alone.
+    """
+    targets = [WK] + [m for m in modules if m is not WK]
+    saved = [(m, name, getattr(m, name)) for m in targets for name in STATE_WRITERS if hasattr(m, name)]
+
+    def refuse(*_args, **_kwargs):
+        raise _WriteAttempted()
+
+    out = io.StringIO()
+    for m, name, _fn in saved:
+        setattr(m, name, refuse)
+    try:
+        with contextlib.redirect_stdout(out):
+            rc = body()
+    except _WriteAttempted:
+        return NEEDS_LOCK
+    except BaseException:
+        sys.stdout.write(out.getvalue())
+        raise
+    finally:
+        for m, name, fn in saved:
+            setattr(m, name, fn)
+    sys.stdout.write(out.getvalue())
+    return rc
 
 
 def run(a, ap):

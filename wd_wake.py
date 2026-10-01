@@ -630,6 +630,12 @@ def main():
     ap.add_argument('--owe-add'); ap.add_argument('--gated-on', default=''); ap.add_argument('--owe-list', action='store_true')
     ap.add_argument('--owe-clear'); ap.add_argument('--owe-ungate')
     a = ap.parse_args()
+    if a.due or a.queue_list or a.owe_list or a.no_state:
+        # Read-first, as wd_check's owed/next/check: no lock unless the run tries to write.
+        import wd_check as C
+        rc = C.run_read_first(lambda: run(a), sys.modules[__name__])
+        if rc is not C.NEEDS_LOCK:
+            return rc
     with S.transaction(a.state_dir):
         return run(a)
 
