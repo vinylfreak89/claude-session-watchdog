@@ -68,10 +68,50 @@ def fingerprint(turn):
     drift refuses a good disposition, collapse accepts a wrong one. So when the filter
     finds nothing, hash the whole span, which is unstable but never ambiguous.
     """
+    content = _content(turn)
+    return _digest(content[:_end(content)])
+
+
+def _content(turn):
     content = [r for r in turn.records if r.get('type') in TURN_CONTENT_TYPES]
-    if not content:
-        content = turn.records
-    return hashlib.sha256(json.dumps(content, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    return content or turn.records
+
+
+def _end(content):
+    """Length of the turn proper: through its last user or assistant record.
+
+    Anything after that is filed between turns, not said in this one. Measured 2026-10-01:
+    the NEXT message's queue-operation enqueue/dequeue records land in the finished turn's
+    span (the splitter appends every non-user record to the current turn until the next
+    opener), so a close recorded before that message arrived stopped matching the moment it
+    was queued, and the turn reappeared as owed. A turn that gains a new user or assistant
+    record still changes its fingerprint, because that record moves the end with it.
+    """
+    for i in range(len(content) - 1, -1, -1):
+        if content[i].get('type') in ('user', 'assistant'):
+            return i + 1
+    return len(content)
+
+
+def _digest(records):
+    return hashlib.sha256(json.dumps(records, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def hash_matches(turn, stored):
+    """True when `stored` fingerprints this turn as it stands, through its last reply.
+
+    New entries store the end-bounded fingerprint. Entries written before 2026-10-01 hashed
+    the whole span as it was at write time, including any trailing records present then;
+    those were all already in place before later ones were appended, so the stored hash is
+    the digest of SOME prefix of today's content at least as long as the turn proper. Every
+    such prefix is tried. A prefix shorter than the turn proper is never accepted, so a
+    change to anything the turn said still fails.
+    """
+    if not isinstance(stored, str) or not stored:
+        return False
+    content = _content(turn)
+    end = _end(content)
+    return any(_digest(content[:k]) == stored for k in range(end, len(content) + 1))
 
 
 REQUEST_RE = re.compile(r'(?im)(?:^|[.!:]\s+)(?:please\s+)?(?:who|what|when|where|why|how|which|can you|could you|would you|will you|do you|are you|is it|should I|shall I|tell me|let me know|confirm|clarify|choose|decide|advise)\b')
@@ -184,7 +224,7 @@ def record_disposition(sess, actor, state, mode, stamp, reason, reading=None):
     store = 'held_turns' if mode == 'hold' else 'closed_turns'
     previous = state.setdefault(store, {}).get(stamp)
     if previous:
-        if previous.get('turn_hash') == entry['turn_hash']:
+        if hash_matches(turn, previous.get('turn_hash')):
             # Same turn, same content: a differing reason here is a REWRITE of history, and
             # that stays refused. Identical is a no-op.
             if previous['reason'] != reason or previous['actor'] != actor:
@@ -221,7 +261,7 @@ def valid_disposition(sess, turn, entry, mode):
         legacy = D.epoch(entry['at']) < D.epoch(FINGERPRINT_SCHEME_CHANGED_AT)
     except Exception:
         legacy = False
-    if not legacy and entry.get('turn_hash') != fingerprint(turn):
+    if not legacy and not hash_matches(turn, entry.get('turn_hash')):
         return False
     candidates, hard = question_candidates(turn)
     if hard:
@@ -300,10 +340,16 @@ def acknowledged_turns(sess, actor, state):
                     legacy = D.epoch(entry.get('at')) < D.epoch(FINGERPRINT_SCHEME_CHANGED_AT)
                 except Exception:
                     legacy = False
-                compare = {k: v for k, v in expected.items()
-                           if not (legacy and k == 'turn_hash')}
+                # The hash is compared by hash_matches, as for holds and closes, so an entry
+                # stored before the end-bounded scheme still validates on its own prefix.
+                compare = {k: v for k, v in expected.items() if k != 'turn_hash'}
                 if any(entry.get(k) != v for k, v in compare.items()):
                     raise D.EvidenceError('recorded acknowledgement differs from transcript evidence or actor')
+                if not legacy:
+                    turn = [t for t in W.split_turns(records)
+                            if t.end_state != 'open' and t.end_ts == entry.get('turn_ts')][0]
+                    if not hash_matches(turn, entry.get('turn_hash')):
+                        raise D.EvidenceError('recorded acknowledgement differs from transcript evidence or actor')
                 existing = (state.get('send_receipts') or {}).get(entry['message_id'])
                 if existing is not None and existing.get('turn_ts') != entry['turn_ts']:
                     raise D.EvidenceError('delivery receipt already bound to another turn')
