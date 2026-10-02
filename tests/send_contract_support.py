@@ -88,14 +88,18 @@ class ContractCase(unittest.TestCase):
         return K.load_state(str(self.state_dir))
 
     def assert_receipt_refusal_preserves_obligations(self, before):
-        """A refusal now retains gate-health evidence, never delivery credit."""
+        """A refused recording records nothing at all: no credit and no latch."""
         after = self.state()
-        failure = after.pop('receipt_recording_failure', None)
-        self.assertIsInstance(failure, dict)
-        self.assertTrue(failure.get('reason'))
-        prior = dict(before)
-        prior.pop('receipt_recording_failure', None)
-        self.assertEqual(after, prior)
+        self.assertNotIn('receipt_recording_failure', after)
+        self.assertEqual(after, before)
+
+    def legacy_latch(self, operation, message_id, item_id=None, reason='synthetic legacy refusal'):
+        """Inject the latch a refusal wrote before 2026-10-02; nothing writes one now."""
+        state = self.state()
+        state['receipt_recording_failure'] = dict(operation=operation, reason=reason, item_id=item_id,
+                                                  message_id=message_id, at=ts(6))
+        K.save_state(str(self.state_dir), state)
+        return state['receipt_recording_failure']
 
     def cli(self, module, *args):
         base = [module.__file__, '--state-dir', str(self.state_dir), '--target', TARGET, '--self', SELF,

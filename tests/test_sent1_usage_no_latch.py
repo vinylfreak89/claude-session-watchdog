@@ -26,8 +26,10 @@ def main():
         p = run(ident)
         assert 'REFUSED' in p.stdout, p.stdout + p.stderr
         assert 'receipt_recording_failure' not in json.load(open(path)), 'empty id latched the gate'
+        before = json.load(open(path))
         p = run(ident, '00000000-0000-0000-0000-000000000000')
-        assert 'receipt_recording_failure' in json.load(open(path)), 'an unresolvable id no longer latches: ' + p.stdout
+        assert 'REFUSED' in p.stdout, 'an unresolvable id was accepted: ' + p.stdout
+        assert json.load(open(path)) == before, 'a refused recording changed state'
         print('ok')
     finally:
         shutil.rmtree(tmp)

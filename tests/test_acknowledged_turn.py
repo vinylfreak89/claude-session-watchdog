@@ -144,17 +144,30 @@ class RecordingRecoveryContract(ContractCase):
         self.clock = 30
 
     def latch(self):
-        rc, out = self.cli(C, 'answered', 'ack')
-        self.assertNotEqual(rc, 0, out)
-        self.assertIn('receipt_recording_failure', self.state())
+        """A latch written before 2026-10-02 still stops the gate until properly recovered."""
+        failure = self.legacy_latch('answered', 'ack')
         rc, out = self.cli(C, 'next')
         self.assertIn('STUCK', out)
-        return self.state()['receipt_recording_failure']
+        return failure
+
+    def test_wrong_answered_form_records_nothing_and_leaves_the_gate_open(self):
+        # 2026-10-02: a composed reply (no queued item) was recorded with `answered <uuid>`
+        # instead of `answered <turn> --acknowledged <uuid> "..."`, and the refusal latched
+        # the gate for eight hours. A refusal now records nothing.
+        before = self.state()
+        rc, out = self.cli(C, 'answered', 'ack')
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn('REFUSED', out)
+        self.assertEqual(self.state(), before)
+        self.assertNotIn('STUCK', self.cli(C, 'next')[1])
+        # and the right form still records the same delivery afterwards
+        rc, out = self.retry()
+        self.assertEqual(rc, 0, out)
 
     def retry(self):
         return self.cli(C, 'answered', ts(1), '--acknowledged', 'ack', 'Acknowledged the synthetic result')
 
-    def test_validated_retry_clears_and_archives_failure_then_can_latch_again(self):
+    def test_validated_retry_clears_and_archives_failure_and_a_new_refusal_records_nothing(self):
         failure = self.latch()
         rc, out = self.retry()
         self.assertEqual(rc, 0, out)
@@ -164,7 +177,9 @@ class RecordingRecoveryContract(ContractCase):
         self.assertTrue(episode['cleared_at'])
         self.assertEqual(episode['message_id'], 'ack')
         self.assertNotIn('STUCK', self.cli(C, 'next')[1])
-        self.latch()
+        rc, out = self.cli(C, 'answered', 'ack')
+        self.assertNotIn('receipt_recording_failure', self.state())
+        self.assertNotIn('STUCK', self.cli(C, 'next')[1])
         self.assertEqual(self.state()['receipt_recording_recoveries'][0], episode)
 
     def test_elapsed_time_owner_ack_and_other_delivery_do_not_clear(self):
@@ -179,13 +194,11 @@ class RecordingRecoveryContract(ContractCase):
         self.assertIn('STUCK', self.cli(C, 'next')[1])
 
     def test_same_delivery_different_operation_does_not_clear(self):
-        # Latch an answered refusal before the record exists. Later sent1 proves
+        # A legacy answered latch from before the record existed. Later sent1 proves
         # that delivery but is a different operation, so cannot clear answered.
         self.clock = 5
         qid = self.queue()
-        rc, out = self.cli(C, 'answered', 'queued')
-        self.assertNotEqual(rc, 0, out)
-        failure = self.state()['receipt_recording_failure']
+        failure = self.legacy_latch('answered', 'queued')
         self.deliver('Create artifact', ident='queued', at=11)
         self.clock = 30
         rc, out = self.cli(C, 'sent1', qid, 'queued')
@@ -213,6 +226,8 @@ class RecordingRecoveryContract(ContractCase):
         K.save_state(str(self.state_dir), state)
         rc, out = self.cli(K, '--sent', 'F1', '--message-id', 'finding-delivery')
         self.assertNotEqual(rc, 0, out)
+        self.assertNotIn('receipt_recording_failure', self.state())
+        self.legacy_latch('sent', 'finding-delivery')
         self.deliver('Synthetic finding', ident='finding-delivery', at=11)
         rc, out = self.cli(K, '--sent', 'F1', '--message-id', 'finding-delivery')
         self.assertEqual(rc, 0, out)

@@ -21,11 +21,14 @@ def main():
             assert 'REFUSED' in p.stdout, (bad, p.stdout, p.stderr)
             after = json.load(open(os.path.join(st, 'state.json')))
             assert 'receipt_recording_failure' not in after, 'usage error %r latched the gate' % bad
-        # control: a well-formed uuid that matches no record still latches (the strict path is intact)
+        # control: a well-formed uuid that matches no record is still REFUSED (the strict path is
+        # intact), and since 2026-10-02 the refusal records nothing either.
+        before = json.load(open(os.path.join(st, 'state.json')))
         p = subprocess.run([sys.executable, os.path.join(ROOT, 'wd_check.py')] + BASE + ['--state-dir', st, 'answered',
                             '00000000-0000-0000-0000-000000000000'], capture_output=True, text=True, cwd=ROOT)
+        assert 'REFUSED' in p.stdout, 'an unknown delivery was accepted: %s' % p.stdout
         after = json.load(open(os.path.join(st, 'state.json')))
-        assert 'receipt_recording_failure' in after, 'a real unknown delivery no longer latches: %s' % p.stdout
+        assert after == before, 'a refused recording changed state'
         print('ok')
     finally:
         shutil.rmtree(tmp)

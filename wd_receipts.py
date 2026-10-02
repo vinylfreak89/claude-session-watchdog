@@ -21,9 +21,21 @@ class AlreadyBound(EvidenceError):
 
 
 def recording_failed(state, operation, reason, item_id=None, message_id=None):
-    """Retain the first failure until that exact recording succeeds with evidence."""
-    state.setdefault('receipt_recording_failure', dict(operation=operation, reason=str(reason),
-                     item_id=item_id, message_id=message_id, at=W.now_iso()))
+    """A refused recording records NOTHING. The caller prints the refusal and that is all.
+
+    Owner, 2026-10-02: "bad usage should just record nothing and force everything to
+    reprompt. isn't that basic?" Until then a refusal wrote a latch here that stopped every
+    send until it was cleared by hand, and it fired on plain usage errors: a wrong command
+    form on 2026-10-02 (`answered <uuid>` for a composed reply that matched no queued item)
+    stopped the gate for eight hours while nothing was in an unknown state.
+
+    The protection the latch was for does not depend on it. `recording_problem` reads the
+    target's record on every gate decision and stops on any pending item or finding whose
+    text was delivered but not recorded, so an unrecorded send keeps prompting until it is
+    recorded properly, and can never be nominated twice. A latch already present in state
+    (written before this change) still stops the gate until `recording_succeeded` clears it.
+    """
+    return None
 
 
 def recording_succeeded(state, operation, receipt, actor, item_id=None):
@@ -81,28 +93,39 @@ def recording_problem(sess, state):
     peers, validated, errors = 0, 0, []
     for record in records:
         origin = record.get('origin') or {}
-        if not isinstance(origin, dict) or origin.get('kind') != 'peer' or record.get('type') not in ('user', 'attachment'):
-            continue
-        peers += 1
-        try:
-            # Health checks the observed transport format. This supplies NO sender
-            # credit: attribution to configured self still happens at recording.
-            rec = delivery(record, origin.get('from'))
-            validated += 1
-            body = rec['body']
-        except EvidenceError as exc:
-            errors.append(str(exc))
-            # Preserve multiline text even when its envelope is malformed. A
-            # possible duplicate stops the gate; it never supplies receipt credit.
+        if is_absorbed_delivery(record):
+            # A message absorbed into a running turn is a delivery with no origin block and
+            # no uuid. It must stop the gate like any other unrecorded delivery: since a
+            # refused recording no longer latches, this scan is the only thing that keeps an
+            # absorbed item from being nominated a second time.
             try:
                 body = delivered_text(record)
             except EvidenceError as unreadable:
                 return 'receipt validation unavailable: %s' % unreadable
+        elif not isinstance(origin, dict) or origin.get('kind') != 'peer' or record.get('type') not in ('user', 'attachment'):
+            continue
+        else:
+            peers += 1
+            try:
+                # Health checks the observed transport format. This supplies NO sender
+                # credit: attribution to configured self still happens at recording.
+                rec = delivery(record, origin.get('from'))
+                validated += 1
+                body = rec['body']
+            except EvidenceError as exc:
+                errors.append(str(exc))
+                # Preserve multiline text even when its envelope is malformed. A
+                # possible duplicate stops the gate; it never supplies receipt credit.
+                try:
+                    body = delivered_text(record)
+                except EvidenceError as unreadable:
+                    return 'receipt validation unavailable: %s' % unreadable
         for ident, text, stamp in pending:
             try: after = epoch(record.get('timestamp')) > epoch(stamp)
             except EvidenceError as exc: return 'receipt timing unavailable: %s' % exc
             if after and text and text in body:
-                return 'possible unrecorded delivery of %s in target record %s; do not resend or backfill' % (ident, record.get('uuid') or '(no uuid)')
+                return 'possible unrecorded delivery of %s in target record %s; do not resend or backfill' % (
+                    ident, record.get('uuid') or (absorbed_id(record) if is_absorbed_delivery(record) else '(no uuid)'))
     if peers and not validated:
         return 'receipt validation unavailable: none of %d peer deliveries validate (%s)' % (peers, '; '.join(sorted(set(errors))))
     return None

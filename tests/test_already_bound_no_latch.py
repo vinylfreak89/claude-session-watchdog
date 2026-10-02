@@ -30,8 +30,10 @@ def main():
         p = run(st, other, '--acknowledged', rid, 'test re-use')
         assert 'already bound' in p.stdout, p.stdout + p.stderr
         assert 'receipt_recording_failure' not in json.load(open(path)), 'already-bound refusal latched the gate'
+        before = json.load(open(path))
         p = run(st, other, '--acknowledged', '00000000-0000-0000-0000-000000000000', 'unknown receipt')
-        assert 'receipt_recording_failure' in json.load(open(path)), 'an unknown receipt no longer latches: ' + p.stdout
+        assert 'REFUSED' in p.stdout, 'an unknown receipt was accepted: ' + p.stdout
+        assert json.load(open(path)) == before, 'a refused recording changed state'
         print('ok')
     finally:
         shutil.rmtree(tmp)

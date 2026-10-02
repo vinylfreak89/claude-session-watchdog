@@ -89,23 +89,28 @@ class AbsorbedDelivery(ContractCase):
         with self.assertRaises(D.EvidenceError):
             D.receipt(str(self.tx), SELF, 'absorbed:' + '0' * 32)
 
-    # --- the latch this was blamed for stays exactly as strict -------------
+    # --- a wrong id records nothing; the unrecorded delivery itself holds the gate ---
 
-    def test_wrong_id_still_latches_and_a_corrected_id_does_not_clear_it(self):
-        """Being able to cite the delivery does not make the latch self-clearing.
+    def test_wrong_id_records_nothing_and_the_gate_reprompts_until_the_right_id(self):
+        """Owner, 2026-10-02: bad usage records nothing and forces a reprompt.
 
-        A refused recording leaves a send whose record is in an unknown state.
-        Recording a DIFFERENT id afterwards is a different delivery, so the gate
-        stays stopped for the owner. This is the guard a relaxation removed.
+        The item WAS delivered (absorbed mid-turn), so it must never be nominated again.
+        That is enforced by the gate reading the target's record, not by a latch: it stays
+        stopped on the unrecorded delivery until the right id is recorded, then opens.
         """
         q = self.queue()
         record = self.absorbed('Create artifact')
+        before = self.state()
         rc, out = self.cli(C, 'sent1', q, 'send-side-msg-id')
         self.assertNotEqual(rc, 0, out)
-        failure = self.state()['receipt_recording_failure']
+        self.assertEqual(self.state(), before)
+        rc, out = self.cli(C, 'next')
+        self.assertIn('STUCK', out)
+        self.assertIn('unrecorded delivery of %s' % q, out)
+        self.assertNotIn('SEND EXACTLY THIS ONE ITEM', out)
         rc, out = self.cli(C, 'sent1', q, D.absorbed_id(record))
-        self.assertEqual(self.state().get('receipt_recording_failure'), failure)
-        self.assertIn('STUCK', self.cli(C, 'next')[1])
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn('STUCK', self.cli(C, 'next')[1])
 
 
 if __name__ == '__main__':

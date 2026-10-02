@@ -22,15 +22,22 @@ class SendGate(ContractCase):
         self.assertIn(reason, out)
         self.assertIn('OWNER ITEMS SENDABLE NOW: 0', out)
 
-    def test_refused_receipt_stops_next_and_due(self):
+    def assert_reprompts(self, q):
+        rc, out = self.cli(C, 'next')
+        self.assertNotIn('STUCK', out)
+        self.assertIn('SEND EXACTLY THIS ONE ITEM', out)
+        self.assertIn('sent1 ' + q, out)
+
+    def test_refused_receipt_records_nothing_and_reprompts(self):
+        # Nothing was delivered, so a refusal to record leaves the item where it was:
+        # still queued, still nominated. Owner, 2026-10-02: "bad usage should just record
+        # nothing and force everything to reprompt."
         q = self.queue()
+        before = self.state()
         rc, out = self.cli(C, 'sent1', q, 'missing-delivery')
         self.assertNotEqual(rc, 0, out)
-        self.assert_stuck('delivery uuid')
-        # Owner urgency changes pacing, not the ability to keep an honest record.
-        rc, out = self.cli(K, '--queue-add', 'Urgent second item', '--queue-urgent', '--acted-when', 'file urgent.txt')
-        self.assertEqual(rc, 0, out)
-        self.assert_stuck('delivery uuid')
+        self.assertEqual(self.state(), before)
+        self.assert_reprompts(q)
 
     def test_unavailable_validation_stops_next_and_due(self):
         self.queue()
@@ -39,14 +46,17 @@ class SendGate(ContractCase):
         with patch.object(D, 'delivery', side_effect=D.EvidenceError('synthetic validator unavailable')):
             self.assert_stuck('synthetic validator unavailable')
 
-    def test_unknown_item_receipt_refusal_stops_gate(self):
-        self.queue()
+    def test_unknown_item_receipt_refusal_records_nothing(self):
+        q = self.queue()
+        before = self.state()
         rc, out = self.cli(C, 'sent1', 'Q999', 'unrecorded-message')
         self.assertNotEqual(rc, 0, out)
-        self.assert_stuck('no queued item Q999')
+        self.assertIn('no queued item Q999', out)
+        self.assertEqual(self.state(), before)
+        self.assert_reprompts(q)
 
-    def test_finding_and_answered_refusals_stop_gate(self):
-        self.queue()
+    def test_finding_and_answered_refusals_record_nothing(self):
+        q = self.queue()
         before = self.state()
         for module, args in ((K, ('--sent', 'F1')),
                              (K, ('--sent', 'F1', '--message-id', 'missing')),
@@ -55,7 +65,8 @@ class SendGate(ContractCase):
                 K.save_state(str(self.state_dir), before)
                 rc, out = self.cli(module, *args)
                 self.assertNotEqual(rc, 0, out)
-                self.assert_stuck('receipt recording refused')
+                self.assertEqual(self.state(), before)
+                self.assert_reprompts(q)
 
     def test_delivered_unrecorded_item_stops_without_credit_or_backfill(self):
         self.queue()
@@ -90,11 +101,10 @@ class SendGate(ContractCase):
         self.assertEqual(rc, 0, out)
         self.assertIn('sent1 ' + q, out)
 
-    def test_later_success_does_not_erase_recording_failure(self):
+    def test_later_success_does_not_erase_a_legacy_recording_failure(self):
         q = self.queue()
-        rc, out = self.cli(C, 'sent1', q, 'missing-delivery')
-        self.assertNotEqual(rc, 0, out)
-        failure = self.state()['receipt_recording_failure']
+        failure = self.legacy_latch('sent1', 'missing-delivery', item_id=q,
+                                    reason='delivery uuid must identify exactly one transcript record')
         self.deliver('Create artifact'); self.sent(q)
         self.assertEqual(self.state()['receipt_recording_failure'], failure)
         self.assert_stuck('missing-delivery')
