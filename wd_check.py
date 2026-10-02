@@ -226,6 +226,13 @@ def acceptance_satisfied(a, sess, state, item):
     return A.evaluate(a, sess, state, item)
 
 
+def open_sent_findings(state):
+    """Sent findings not yet graded. sent_findings is also the permanent receipt record, so the
+    gate must not read it whole: it never shrinks, and from the first finding ever sent the gate
+    refused every non-urgent item (2026-09-30 to 2026-10-02, held by F17, graded but still listed)."""
+    return {k: v for k, v in (state.get('sent_findings') or {}).items() if not v.get('outcome')}
+
+
 def unacted_items(a, sess, state):
     rows = []
     for item in state.get('owner_queue') or []:
@@ -234,10 +241,12 @@ def unacted_items(a, sess, state):
         decision = acceptance_satisfied(a, sess, state, item)
         rows.append(dict(id=item.get('id'), sent=item['sent'], spec=item.get('acted_when'),
                          status=decision.status.value, evidence=decision.evidence))
-    # Findings lacking a postcondition cannot silently become completed actions.
-    for ident, finding in (state.get('sent_findings') or {}).items():
+    # Findings lacking a postcondition cannot silently become completed actions: one stays
+    # here until the operator grades it with `outcome`, which is the judgement it lacks.
+    for ident, finding in open_sent_findings(state).items():
         rows.append(dict(id=ident, sent=finding.get('sent'), spec=None, status='undecided',
-                         evidence='finding has no independently verifiable action postcondition'))
+                         evidence='finding has no independently verifiable action postcondition; '
+                                  'grade it: wd.sh outcome %s accepted|partly|wrong "<why>"' % ident))
     return rows
 
 
@@ -393,7 +402,7 @@ def next_item(sess, state, self_sel=None):
         return 'none', None, 'nothing queued.', 0
     if urgent:
         return 'send', urgent[0], '** URGENT override: owner marked this send-immediately **', len(q)
-    if any(x.get('sent') for x in state.get('owner_queue') or []) or state.get('sent_findings'):
+    if any(x.get('sent') for x in state.get('owner_queue') or []) or open_sent_findings(state):
         return 'owed', None, 'SENT WORK IS NOT YET VERIFIED. SEND NOTHING.', len(q)
     _, turns = W.last_turns(sess, n=1)
     if turns and turns[-1].end_state == 'open':

@@ -732,7 +732,13 @@ def run(a):
                            wake_ts=W.now_iso(), turn_ct='', cls='outcome', status=verdict,
                            message=(a.reason or '').replace('|', '\\|'))])
         log_line(a.state_dir, '%s OUTCOME %s %s %s' % (W.now_iso(), fid, verdict, a.reason or ''))
-        print('%s graded %s' % (fid, verdict)); return 0
+        # A sent finding has no mechanical postcondition; this grade is what settles it for the
+        # send gate. The entry itself stays: it is the receipt record for that delivery.
+        sent = (state.get('sent_findings') or {}).get(fid)
+        if sent is not None:
+            sent.update(outcome=verdict, outcome_ts=W.now_iso(), outcome_reason=a.reason or '')
+            save_state(a.state_dir, state)
+        print('%s graded %s%s' % (fid, verdict, '' if sent is not None else ' (not a sent finding; gate unaffected)')); return 0
     if a.queue_hold:
         q = state.setdefault('owner_queue', [])
         hit = [it for it in q if it['id'] == a.queue_hold]
