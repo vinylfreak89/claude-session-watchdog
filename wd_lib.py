@@ -280,6 +280,38 @@ def _result_text(block):
         return '\n'.join(x.get('text', '') for x in c if isinstance(x, dict) and x.get('type') == 'text')
     return ''
 
+
+def stopped_tasks(path, ids):
+    """Background tasks in `ids` that the session itself ended with TaskStop, as id -> stop time.
+
+    A stopped task writes no exit marker and sends no completion notification, so without this
+    its in-flight row could never retire: two rows stopped on 2026-09-30 and 2026-10-01 held the
+    send gate at TARGET BUSY until 2026-10-02. Structural, like background_launches: the
+    TaskStop call must name the id in its own input AND its result must confirm that same id.
+    """
+    want = set(ids)
+    if not want or not path:
+        return {}
+    calls, out = {}, {}
+    with open(path, encoding='utf-8', errors='replace') as f:
+        for line in f:
+            if 'TaskStop' not in line and 'Successfully stopped task' not in line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            content = (rec.get('message') or {}).get('content')
+            for b in _blocks(content, 'tool_use'):
+                tid = (b.get('input') or {}).get('task_id')
+                if b.get('name') == 'TaskStop' and tid in want:
+                    calls[b.get('id')] = tid
+            for b in _blocks(content, 'tool_result'):
+                tid = calls.get(b.get('tool_use_id'))
+                if tid and not b.get('is_error') and ('Successfully stopped task: %s' % tid) in (_result_text(b) or ''):
+                    out[tid] = rec.get('timestamp')
+    return out
+
 def parse_lines(data, base_offset):
     recs, off = [], base_offset
     for line in data.split(b'\n'):

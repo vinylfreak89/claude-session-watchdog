@@ -352,11 +352,16 @@ def analyse(a, sess, st, state, turns, trigger, replay=False, self_sess=None):
         if r['accepted'] and r['thread'] and r['verb'] in ('task', 'send', 'queue', 'say') and not r['failed'] and not (r['outcome'] or '').startswith('exited'):
             if not any(i.get('kind') == 'codex' and i.get('thread') == r['thread'] and i.get('launched_ts') == r['ts'] for i in inflight):
                 inflight.append(dict(kind='codex', thread=r['thread'], task_id=r['task_id'], output_file=r['output_file'], launched_ts=r['ts'], turn_ct=ct, brief_path=r['brief_path']))
+    stopped = W.stopped_tasks(W.transcript_path(sess), [i['id'] for i in inflight if i['kind'] == 'bg'
+                                                        and not W.proc_matches(i.get('command', ''), procs)])
     still = []
     for i in inflight:
         if i['kind'] == 'bg':
             s_ = W.task_output_status(i.get('output_file'))
             done = s_.get('exit_code') is not None or i['id'] in notified
+            if not done and i['id'] in stopped:
+                print('RETIRED in-flight task %s: the target stopped it with TaskStop at %s.' % (i['id'], stopped[i['id']]))
+                done = True
             if done: continue
             hits = W.proc_matches(i.get('command', ''), procs)
             age_min = (now - (W.epoch_from_iso(i['launched_ts']) or now)) / 60.0
