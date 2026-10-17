@@ -531,6 +531,25 @@ def unique_reply_turn(sess, calls):
     return stamp
 
 
+def report_line_turn(sess, item, expected):
+    """The completed target turn, after delivery, whose own report carries the line alone.
+
+    Owner, 2026-10-17 (watchdog transcript line 136172, after Q318's line sat in the target's
+    report to him and not in a message to the watchdog, costing minutes of his bars window): "it
+    put it in the report but its the same so you should act on it the same way". So the exact
+    line, alone on its own line, in the assistant text of a completed turn that ended after the
+    delivery, is the same acceptance as sending it. Returns that turn's end_ts, or None.
+    """
+    sent_at = D.epoch(item.get('sent'))
+    for turn in W.split_turns(D.read_records_view(W.transcript_path(sess))):
+        if turn.end_state != 'end_turn' or D.epoch(turn.end_ts) <= sent_at: continue
+        for stamp, text in turn.assistant_texts:
+            if D.epoch(stamp) <= sent_at: continue
+            if expected in [ln.strip() for ln in (text or '').splitlines()]:
+                return turn.end_ts
+    return None
+
+
 def evaluate_message(a, sess, item, args, facts, calls):
     require_count(facts, 'count')
     sender = W.find_session(a.self_sel)
@@ -544,7 +563,11 @@ def evaluate_message(a, sess, item, args, facts, calls):
     sent = [c for c in calls if W.message_input(c) is not None
             and expected in W.message_input(c)['message'].splitlines()
             and W.message_to_session(c, sender['sessionId'])]
-    if not sent: return Result(Status.NOT_YET, 'no successful matching target reply call after delivery')
+    if not sent:
+        turn = report_line_turn(sess, item, expected)
+        if turn:
+            return Result(Status.PASS, 'the exact line closes the target\'s own report (turn %s)' % turn, turn)
+        return Result(Status.NOT_YET, 'no successful matching target reply call after delivery')
     # A match requires rec['ts'] >= c['ts'] for some candidate call, so a record older than
     # the EARLIEST candidate cannot match whatever it contains. Skipping those before the
     # expensive parse is a pure speedup: same records, same order, same result -- only the
@@ -570,6 +593,9 @@ def evaluate_message(a, sess, item, args, facts, calls):
             detail = ('; qualifying reply turn %s' % turn if turn else
                       '; no unique completed reply turn: relay remains blocking')
             return Result(Status.PASS, 'matching reply delivered to watchdog in record %s%s' % (rec['id'], detail), turn)
+    turn = report_line_turn(sess, item, expected)
+    if turn:
+        return Result(Status.PASS, 'the exact line closes the target\'s own report (turn %s)' % turn, turn)
     return Result(Status.NOT_YET, 'target reply has not been delivered to the watchdog')
 
 
