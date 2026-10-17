@@ -634,6 +634,7 @@ def main():
     ap.add_argument('--due', action='store_true')
     ap.add_argument('--owe-add'); ap.add_argument('--gated-on', default=''); ap.add_argument('--owe-list', action='store_true')
     ap.add_argument('--owe-clear'); ap.add_argument('--owe-ungate')
+    ap.add_argument('--owe-ask'); ap.add_argument('--owe-answer'); ap.add_argument('--quote', default='')
     a = ap.parse_args()
     if a.due or a.queue_list or a.owe_list or a.no_state:
         # Read-first, as wd_check's owed/next/check: no lock unless the run tries to write.
@@ -652,6 +653,26 @@ def run(a):
     import wd_turns as T
     if T.initialize_tracking(state):
         save_state(a.state_dir, state)
+    if a.owe_ask or a.owe_answer:
+        # The two verbs that bind an owner ANSWER to a request the target made (wd_answers.py).
+        # The script checks provenance and order; what the words mean is the model's call.
+        import wd_answers as Ans
+        import wd_receipts as D
+        if not a.target or not a.self_sel:
+            print('REFUSED: owe ask/answer need --target and --self'); return 1
+        sess = W.find_session(a.target)
+        try:
+            if a.owe_ask:
+                oid = Ans.open_ask(sess, state, a.owe_ask, a.quote, add_owner_decision)
+                save_state(a.state_dir, state)
+                print('opened %s: the target asked him (turn %s). When he answers: wd.sh owe answer %s "<his words>"' % (oid, a.owe_ask, oid))
+            else:
+                qid = Ans.queue_answer(sess, W.find_session(a.self_sel), state, a.owe_answer, a.quote, W.now_iso())
+                save_state(a.state_dir, state)
+                print('queued %s: his answer to %s; wd.sh next decides when it goes' % (qid, a.owe_answer))
+        except D.EvidenceError as exc:
+            print('REFUSED: %s' % exc); return 1
+        return 0
     if a.owe_add or a.owe_list or a.owe_clear or a.owe_ungate:
         # Decisions the OWNER owes. Each is READY or GATED behind work the target has not finished: a decision
         # he cannot sensibly make yet must never be presented to him as if it were waiting on him.

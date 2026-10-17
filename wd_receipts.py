@@ -695,12 +695,15 @@ def record_delivery(path, sender, state, ident, queue_id=None, finding_ids=None,
     if finding_ids is not None and (not finding_ids or not set(finding_ids).issubset(fids)):
         raise EvidenceError('receipt did not deliver every named finding')
     if q is not None:
-        import wd_check as C
-        ok, why = C.acceptance_valid(q.get('acted_when'))
-        if not ok:
-            raise EvidenceError(why)
-        if not isinstance(q.get('acceptance_baseline'), dict):
-            raise EvidenceError('item lacks a pre-delivery acceptance baseline')
+        # An owner ANSWER (wd_answers.py) has no acceptance of its own: delivering it is its whole
+        # job, and the work it unblocks stays owed by its own item. Every other item needs one.
+        if q.get('kind') != 'answer':
+            import wd_check as C
+            ok, why = C.acceptance_valid(q.get('acted_when'))
+            if not ok:
+                raise EvidenceError(why)
+            if not isinstance(q.get('acceptance_baseline'), dict):
+                raise EvidenceError('item lacks a pre-delivery acceptance baseline')
         if q.get('sent') and q.get('message_id') != ident:
             raise EvidenceError('item is already bound to another delivery')
     for fid in fids:

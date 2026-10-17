@@ -27,6 +27,7 @@ import wd_receipts as D
 import wd_turns as TD
 import wd_acceptance as A
 import wd_promises as PR
+import wd_answers as Ans
 
 def check(a, sess, kind, args, state):
     repo = a.repo or sess['cwd']
@@ -402,8 +403,22 @@ def next_item(sess, state, self_sel=None):
         return 'none', None, 'nothing queued.', 0
     if urgent:
         return 'send', urgent[0], '** URGENT override: owner marked this send-immediately **', len(q)
-    if any(x.get('sent') for x in state.get('owner_queue') or []) or open_sent_findings(state):
-        return 'owed', None, 'SENT WORK IS NOT YET VERIFIED. SEND NOTHING.', len(q)
+    # An owner ANSWER to a request the target is blocked on is the one thing that may pass the
+    # "sent work not yet verified" clause (owner-approved boundary, 2026-10-17; wd_answers.py).
+    # It skips ONLY that clause: mid-turn, findings, in-flight work and the relay check still apply.
+    answers, stale_answers = [], []
+    for x in q:
+        if x.get('kind') == 'answer':
+            ok, why = Ans.eligible(sess, state, x)
+            if x.get('hold_until'):
+                ok, why = False, 'held: %s' % x['hold_until']
+            (answers if ok else stale_answers).append((x, why))
+    stale_note = ''.join('\n   answer %s not eligible: %s' % (x['id'], why) for x, why in stale_answers)
+    if open_sent_findings(state):
+        return 'owed', None, 'SENT WORK IS NOT YET VERIFIED. SEND NOTHING.' + stale_note, len(q)
+    owed_block = any(x.get('sent') for x in state.get('owner_queue') or [])
+    if owed_block and not answers:
+        return 'owed', None, 'SENT WORK IS NOT YET VERIFIED. SEND NOTHING.' + stale_note, len(q)
     _, turns = W.last_turns(sess, n=1)
     if turns and turns[-1].end_state == 'open':
         silent = W.turn_unconfirmed(sess, turns[-1])
@@ -439,7 +454,16 @@ def next_item(sess, state, self_sel=None):
         return 'owed', None, ('ITS LAST REPLY IS UNRELAYED (%d turn(s), oldest %s). %d queued. '
                               'SEND NOTHING -- read it and relay to the owner first.'
                               % (len(unrelayed), unrelayed[0]['ts'], len(q))), len(q)
-    sendable = [x for x in q if not x.get('hold_until')]
+    if answers:
+        item, why = answers[0]
+        return 'send', item, ('** OWNER ANSWER: %s. It passes the OWED gate; every passthrough is logged '
+                              'and shown to him. **' % why), len(q)
+    if owed_block:
+        return 'owed', None, 'SENT WORK IS NOT YET VERIFIED. SEND NOTHING.' + stale_note, len(q)
+    if stale_answers:
+        # A stale answer is reported, never silently overtaken by ordinary items.
+        return 'held', None, 'QUEUED ANSWER NOT ELIGIBLE. SEND NOTHING; open a fresh ask or drop it.' + stale_note, len(q)
+    sendable = [x for x in q if not x.get('hold_until') and x.get('kind') != 'answer']
     if not sendable:
         held = q[0]
         return 'held', None, ('ALL %d QUEUED ITEMS ARE HELD. SEND NOTHING.\n   %s waits on: %s'
@@ -908,6 +932,29 @@ def run(a, ap):
         # Declaring what done looks like is not a claim that anything was sent, so it is deliberately
         # NOT part of this call: requirements and baselines must precede delivery.
         # Delivered legacy items lacking either remain undecided.
+        if item.get('kind') == 'answer':
+            # His answer to a request the target made: delivery IS its whole job. The work the
+            # answer unblocks is still owed by its own item and acceptance. Record the delivery,
+            # close the D entry, log the passthrough permanently, and archive the item.
+            try:
+                rec, changed = D.record_delivery(W.transcript_path(sess), a.self_sel, state, mid, queue_id=i)
+                D.recording_succeeded(state, 'sent1', rec, a.self_sel, item_id=i)
+            except D.EvidenceError as exc:
+                D.recording_failed(state, 'sent1', exc, item_id=i, message_id=mid)
+                WK.save_state(a.state_dir, state)
+                print('REFUSED: %s' % exc); return 1
+            owed_ids = [x['id'] for x in state.get('owner_queue') or [] if x.get('sent') and x is not item]
+            # The receipt's turn_ts is the turn the delivery followed. If it is not the asking
+            # turn, the answer did not go out while eligible, so the log must not say it passed.
+            ask_turn = (state.get('owner_decisions') or {}).get(item.get('decision'), {}).get('turn_ts')
+            line = Ans.record_passthrough(state, item, rec['ts'], owed_ids, W.now_iso(),
+                                          outside=(rec.get('turn_ts') != ask_turn))
+            item['acted_ts'] = W.now_iso(); item['acted_status'] = 'answer delivered'
+            state.setdefault('owner_queue_sent', []).append(item)
+            state['owner_queue'].remove(item)
+            WK.save_state(a.state_dir, state)
+            print('answer %s delivered at %s; %s closed.\nPASSTHROUGH (report this to the owner): %s'
+                  % (i, rec['ts'], item['decision'], line)); return 0
         spec = item.get('acted_when')
         ok, why = acceptance_valid(spec)
         if not ok:
@@ -987,6 +1034,12 @@ def run(a, ap):
         for u in unacted:
             print('   %s sent %s -- waiting on: %s' % (u['id'], u['sent'], u['spec']))
             print('      %s: %s' % (u['status'], W.short(u['evidence'], 300)))
+        # Every owner answer that passed the OWED gate, permanently, on every poll: the control
+        # against using it to skip the gate is that he sees each use by default.
+        passed = state.get('answer_passthroughs') or []
+        print('OWNER ANSWERS THAT PASSED THE OWED GATE: %d' % len(passed))
+        for line in passed:
+            print('   ' + line)
         reports = evidence_answers(sess, state)
         print('RECORDED ANSWER EVIDENCE (operator reports for owner judgement): %d' % len(reports))
         for item, entry, _ in reports:

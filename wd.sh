@@ -29,6 +29,8 @@
 #                                   there is no verb to close one by hand.
 #   wd.sh due                       what is undelivered (owner items + findings) and whether the target is receptive
 #   wd.sh owe add|list|ungate|done   decisions the owner owes, each READY or GATED behind unfinished target work
+#   wd.sh owe ask <turn end_ts> "<request>" | answer <D id> "<his words>"   bind his answer to a request the
+#                                   target is blocked on; the answer item alone may pass the OWED gate (logged)
 #   wd.sh status                    one-screen state summary
 #                                   rebuild state from the record hour by hour and restore what was dropped;
 #   wd.sh promise <agent> "<what you owe now>" | show [agent]
@@ -121,7 +123,9 @@ case "$cmd" in
             list)   exec $PY "$D/wd_wake.py" --state-dir "$S" --owe-list ;;
             ungate) exec $PY "$D/wd_wake.py" --state-dir "$S" --owe-ungate "$1" ;;
             done)   exec $PY "$D/wd_wake.py" --state-dir "$S" --owe-clear "$1" ;;
-            *) echo 'wd.sh owe add [--gated-on "<what must finish first>"] "<decision>" | list | ungate <id> | done <id>' >&2; exit 2 ;;
+            ask)    ts=$1; shift; exec $PY "$D/wd_wake.py" "${WAKE_ARGS[@]}" --owe-ask "$ts" --quote "$*" ;;
+            answer) id=$1; shift; exec $PY "$D/wd_wake.py" "${WAKE_ARGS[@]}" --owe-answer "$id" --quote "$*" ;;
+            *) echo 'wd.sh owe add [--gated-on "<what must finish first>"] "<decision>" | list | ungate <id> | done <id> | ask <turn end_ts> "<target request verbatim>" | answer <D id> "<his words verbatim>"' >&2; exit 2 ;;
           esac ;;
   status) $PY - "$S" <<'PYS'
 import json,sys,os
