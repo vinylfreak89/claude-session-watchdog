@@ -326,10 +326,42 @@ def parse_lines(data, base_offset):
         off += ln
     return recs
 
+def delivered(rec):
+    """False for a record the host wrote to the transcript but never gave the model.
+
+    The host marks such records `queueTranscriptOnly` (measured 2026-10-16: a subagent's
+    task-notification, written after its report had already arrived as a message). The model
+    never sees one, so it can neither open a turn nor change a turn's state. Treating it as an
+    opener held the send gate on BUSY for nine hours on a target that was idle.
+    """
+    return not rec.get('queueTranscriptOnly')
+
 def is_opener(rec, prev_pid):
     if rec.get('type') != 'user': return False
+    if not delivered(rec): return False
     if _blocks((rec.get('message') or {}).get('content'), 'tool_result'): return False
     return rec.get('promptId') != prev_pid
+
+def segment_step(cur, rec, prev_pid):
+    """THE turn segmentation rule; every reader that splits a transcript into turns calls this.
+
+    Returns (turn, prev_pid, opened). Three loops used to restate this rule separately.
+    A record that was never delivered is kept in the turn's records for audit but changes
+    no state, including prev_pid.
+    """
+    ty = rec.get('type')
+    if ty == 'user' and not delivered(rec):
+        if cur is not None: cur.records.append(rec)
+        return cur, prev_pid, False
+    if ty == 'user':
+        if is_opener(rec, prev_pid):
+            return Turn(rec), rec.get('promptId'), True
+        if cur is not None: cur.add(rec)
+        return cur, rec.get('promptId'), False
+    if cur is not None:
+        if ty == 'assistant': cur.add(rec)
+        else: cur.records.append(rec)
+    return cur, prev_pid, False
 
 def read_tail_turns(path, need_turns=3, start_bytes=2 * 1024 * 1024, max_bytes=1024 * 1024 * 1024):
     """Return (chunk_offset, records) such that the last `need_turns` turns are complete in `records`."""
@@ -343,11 +375,10 @@ def read_tail_turns(path, need_turns=3, start_bytes=2 * 1024 * 1024, max_bytes=1
             i = data.find(b'\n')
             data = data[i + 1:]; off += i + 1
         recs = parse_lines(data, off)
-        openers, prev = 0, None
+        openers, prev, cur = 0, None, None
         for r in recs:
-            if r.get('type') != 'user': continue
-            if is_opener(r, prev): openers += 1
-            prev = r.get('promptId')
+            cur, prev, opened = segment_step(cur, r, prev)
+            if opened: openers += 1
         if off == 0 or n >= size or n >= max_bytes or openers >= need_turns + 1:
             return off, recs
         n = min(n * 2, size)
@@ -535,17 +566,8 @@ def split_turns(records):
 def _split_turns_uncached(records):
     turns, prev_pid, cur = [], None, None
     for r in records:
-        ty = r.get('type')
-        if ty == 'user':
-            if is_opener(r, prev_pid):
-                cur = Turn(r); turns.append(cur)
-            elif cur is not None:
-                cur.add(r)
-            prev_pid = r.get('promptId')
-        elif cur is not None and ty in ('assistant',):
-            cur.add(r)
-        elif cur is not None:
-            cur.records.append(r)
+        cur, prev_pid, opened = segment_step(cur, r, prev_pid)
+        if opened: turns.append(cur)
     return turns
 
 LAST_TAIL_BYTES = 0

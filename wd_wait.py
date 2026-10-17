@@ -324,10 +324,12 @@ class Watch(object):
                 ms = W.ms_of_iso(ts)
                 if ms and ms > (self.last_record_ms or 0): self.last_record_ms = ms
             ty = r.get('type')
+            if ty == 'user' and not W.delivered(r):
+                continue   # never reached the model: opens nothing, changes nothing (W.segment_step)
             if ty == 'user':
                 m = r.get('message') or {}; c = m.get('content')
                 is_tr = bool(W._blocks(c, 'tool_result'))
-                if not is_tr and r.get('promptId') != self.prev_pid:
+                if W.is_opener(r, self.prev_pid):
                     self.cur_opener_kind = (r.get('origin') or {}).get('kind') or 'other'
                     self.turn_open = True; self.event_emitted_for_turn = False; ended = None
                 self.prev_pid = r.get('promptId')

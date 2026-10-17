@@ -569,19 +569,10 @@ def _receipt_index(path, records):
             keys.add(absorbed_id(r))
         for k in keys:
             index.setdefault(k, []).append((r, prior))
-        ty = r.get('type')
-        if ty == 'user':
-            if W.is_opener(r, prev_pid):
-                if cur is not None and cur.end_state != 'open':
-                    finalized = cur.end_ts
-                cur = W.Turn(r)
-            elif cur is not None:
-                cur.add(r)
-            prev_pid = r.get('promptId')
-        elif cur is not None and ty == 'assistant':
-            cur.add(r)
-        elif cur is not None:
-            cur.records.append(r)
+        before = cur
+        cur, prev_pid, opened = W.segment_step(cur, r, prev_pid)
+        if opened and before is not None and before.end_state != 'open':
+            finalized = before.end_ts
     for stale in [k for k in _RECEIPT_INDEX if k[0] == key[0]]:
         del _RECEIPT_INDEX[stale]
     _RECEIPT_INDEX[key] = (records[0] if records else None,
