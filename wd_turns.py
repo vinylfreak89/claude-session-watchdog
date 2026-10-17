@@ -73,7 +73,10 @@ def fingerprint(turn):
 
 
 def _content(turn):
-    content = [r for r in turn.records if r.get('type') in TURN_CONTENT_TYPES]
+    # A record the model never received (W.delivered) is not something the turn said: it is
+    # kept in turn.records for audit, but must not change the turn's identity, or a disposition
+    # recorded before the host appended one stops validating.
+    content = [r for r in turn.records if r.get('type') in TURN_CONTENT_TYPES and W.delivered(r)]
     return content or turn.records
 
 

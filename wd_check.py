@@ -406,6 +406,11 @@ def next_item(sess, state, self_sel=None):
         return 'owed', None, 'SENT WORK IS NOT YET VERIFIED. SEND NOTHING.', len(q)
     _, turns = W.last_turns(sess, n=1)
     if turns and turns[-1].end_state == 'open':
+        silent = W.turn_unconfirmed(sess, turns[-1])
+        if silent is not None:
+            return 'held', None, ('TARGET STATE UNKNOWN: the turn opened %s reads open, but nothing has been written for '
+                                  '%d min and nothing is running. SEND NOTHING; report it to the owner -- this is not busy.'
+                                  % (turns[-1].start_ts, silent)), len(q)
         return 'busy', None, 'TARGET BUSY (turn open). %d queued. SEND NOTHING.' % len(q), len(q)
     # Preserve due's existing work-set/receptivity checks in the one gate;
     # consolidating the readers must not make nomination more permissive.

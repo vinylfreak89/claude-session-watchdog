@@ -20,6 +20,9 @@ every wake); --follow streams.
   IDLE idle_min=<n> ct=<n>                           the target stopped: silent past --idle-after with NOTHING running,
                                                      no work in flight and no reply owed. The wake decides whether that
                                                      contradicts a standing instruction; the hook only spots the state.
+  WEDGED turn_open_since=<ts> silent_min=<n> ct=<n>   a turn reads open, but nothing has been written for 20 min, no tool
+                                                     call is outstanding and nothing runs: UNKNOWN, not busy. The gate
+                                                     says TARGET STATE UNKNOWN; report it to the owner, never wait on it.
   REPLY_OVERDUE message_id=<id> sent=<ts>            the target has not replied to the watchdog's question within its deadline
   HEARTBEAT idle_min=<n> ct=<n> inflight=<k>          --max-wait reached with nothing to report: still watching,
                                                      re-arm. Default 60s, so the loop comes back every minute
@@ -429,7 +432,16 @@ class Watch(object):
         idle = time.time() - act / 1000.0
         if idle < self.idle_after: return []
         if self.idle_reported_for == act: return []
-        if self.turn_open: return []   # working, not stopped -- whatever the app's counters say
+        if self.turn_open:
+            # Open is a claim that has to keep being earned; open with nothing behind it is UNKNOWN.
+            try:
+                _, turns = W.last_turns(self.sess, n=1)
+                silent = W.turn_unconfirmed(self.sess, turns[-1] if turns else None)
+            except Exception:
+                silent = None
+            if silent is None: return []
+            self.idle_reported_for = act
+            return ['WEDGED turn_open_since=%s silent_min=%d ct=%s' % (turns[-1].start_ts, silent, self.ct)]
         agents = self.outstanding_agents()
         if agents:
             oldest = min(W.ms_of_iso(ts) or 0 for _, ts, _ in agents)
@@ -498,7 +510,13 @@ def main():
         idle = (time.time() - (w.activity_ms() or 0) / 1000.0) / 60.0
         try: procs = len(W.live_children(sess))
         except Exception: procs = -1
-        emit('AUDIT ct=%s idle_min=%d live=%d inflight=%d cec=%s open=%d' % (st['ct'], idle, procs, len(sj.get('in_flight') or []), st['cec'], 1 if _open else 0))
+        try:
+            _, _tt = W.last_turns(sess, n=1)
+            _wedged = W.turn_unconfirmed(sess, _tt[-1] if _tt else None) is not None
+        except Exception:
+            _wedged = False
+        emit('AUDIT ct=%s idle_min=%d live=%d inflight=%d cec=%s open=%d%s' % (st['ct'], idle, procs, len(sj.get('in_flight') or []), st['cec'], 1 if _open else 0,
+                                                                              ' WEDGED=1 (open with nothing behind it: report to the owner)' if _wedged else ''))
         # The audit timer is the SOLE release for owner-active quiet (owner, 2026-09-22). It is
         # stamped here, where the line is actually emitted, rather than in wd_wake: a wake only
         # runs if the model chooses to run one, which would make the release a convention.

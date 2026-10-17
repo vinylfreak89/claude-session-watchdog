@@ -718,10 +718,14 @@ def run(a):
         for it in held: print('  %s waits on: %s' % (it['id'], it['hold_until']))
         print('UNDELIVERED findings: %d' % len(prop))
         for fid, pr in prop.items(): print('  %s (%s, proposed %s)' % (fid, pr.get('key', '').split(':')[0], pr.get('ts')))
-        if _open_turn is not None:
+        _silent = W.turn_unconfirmed(sess, _open_turn) if _open_turn is not None else None
+        if _silent is not None:
+            print('target: STATE UNKNOWN -- the turn opened %s reads open, but nothing has been written for %d min and no '
+                  'tool call is outstanding. Not busy, not idle: report it to the owner.' % (_open_turn.start_ts, _silent))
+        elif _open_turn is not None:
             print('target: A TURN IS OPEN since %s -- it is working, do not read the process count as idle' % _open_turn.start_ts)
         print('target: %d live process(es), %d in flight, idle %.1f min -> %s' % (len(procs), len(infl), idle_min,
-              'not mid-turn' if receptive else 'BUSY: mid-work'))
+              'UNKNOWN' if _silent is not None else ('not mid-turn' if receptive else 'BUSY: mid-work')))
         # An idle target is not the gate. The gate is the CURRENT WORK SET: everything it is doing plus
         # every finding still owed to it. A queued item goes only when that set is finished.
         print('GATE: %s' % (reason or ('SEND only %s; record its target delivery uuid afterwards.' % chosen['id'])))

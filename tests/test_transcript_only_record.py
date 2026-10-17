@@ -74,5 +74,77 @@ class TranscriptOnlyRecord(unittest.TestCase):
             os.unlink(path)
 
 
+class IdentityIgnoresUndelivered(unittest.TestCase):
+    """A disposition recorded before the host appended a transcript-only record must still validate."""
+
+    def test_fingerprint_unchanged_by_undelivered_record(self):
+        import wd_turns as T
+        before = W.split_turns(transcript(True)[:-1])[-1]
+        after = W.split_turns(transcript(True))[-1]
+        self.assertEqual(len(after.records), len(before.records) + 1)
+        self.assertEqual(T.fingerprint(before), T.fingerprint(after))
+
+    def test_control_delivered_content_changes_fingerprint(self):
+        import wd_turns as T
+        recs = transcript(True)[:-1]
+        before = W.split_turns(recs)[-1]
+        after = W.split_turns(recs[:2] + [assistant('a second reply', '2026-10-16T15:44:38Z')] + recs[2:])[-1]
+        self.assertNotEqual(T.fingerprint(before), T.fingerprint(after))
+
+
+class OpenMustBeEarned(unittest.TestCase):
+    """An open turn with nothing behind it is UNKNOWN, not busy (W.turn_unconfirmed)."""
+    T0 = W.ms_of_iso('2026-10-16T15:44:40.393Z') / 1000.0
+
+    def open_turn(self, extra=()):
+        recs = transcript(False)   # delivered: a real open turn whose input was never answered
+        return W.split_turns(recs + list(extra))[-1]
+
+    @staticmethod
+    def call(ts, *ids):
+        return dict(type='assistant', timestamp=ts, uuid='a-' + ts,
+                    message=dict(role='assistant', stop_reason='tool_use',
+                                 content=[dict(type='tool_use', id=i, name='Bash', input={}) for i in ids]))
+
+    @staticmethod
+    def result(ts, tid):
+        return dict(type='user', promptId='p2', timestamp=ts, uuid='r-' + ts,
+                    message=dict(role='user', content=[dict(type='tool_result', tool_use_id=tid, content='ok')]))
+
+    def test_silent_open_turn_is_unconfirmed(self):
+        silent = W.turn_unconfirmed('s', self.open_turn(), now=self.T0 + 25 * 60)
+        self.assertIsNotNone(silent)
+        self.assertAlmostEqual(silent, 25.0, places=1)
+
+    def test_recent_record_still_counts_as_busy(self):
+        self.assertIsNone(W.turn_unconfirmed('s', self.open_turn(), now=self.T0 + 5 * 60))
+
+    def test_outstanding_tool_call_supports_the_claim(self):
+        turn = self.open_turn([self.call('2026-10-16T15:44:50Z', 't1')])
+        self.assertIsNone(W.turn_unconfirmed('s', turn, now=self.T0 + 25 * 60))
+
+    def test_parallel_call_still_running_after_first_result(self):
+        # Review finding: the first result to return must not hide the call still running.
+        turn = self.open_turn([self.call('2026-10-16T15:44:50Z', 'agent', 'bash'),
+                               self.result('2026-10-16T15:44:55Z', 'bash')])
+        self.assertIsNone(W.turn_unconfirmed('s', turn, now=self.T0 + 25 * 60))
+
+    def test_all_calls_answered_and_silent_is_unconfirmed(self):
+        turn = self.open_turn([self.call('2026-10-16T15:44:50Z', 'bash'),
+                               self.result('2026-10-16T15:44:55Z', 'bash')])
+        self.assertIsNotNone(W.turn_unconfirmed('s', turn, now=W.ms_of_iso('2026-10-16T15:44:55Z') / 1000.0 + 25 * 60))
+
+    def test_undelivered_record_does_not_refresh_the_clock(self):
+        late = user('p2', 'transcript-only', '2026-10-16T16:00:00Z', kind='task-notification',
+                    queueTranscriptOnly=True)
+        turn = self.open_turn([late])
+        self.assertEqual(turn.records[-1], late)
+        self.assertIsNotNone(W.turn_unconfirmed('s', turn, now=self.T0 + 25 * 60))
+
+    def test_ended_turn_is_not_unconfirmed(self):
+        turn = W.split_turns(transcript(True))[-1]
+        self.assertIsNone(W.turn_unconfirmed('s', turn, now=self.T0 + 600 * 60))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

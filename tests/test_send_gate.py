@@ -172,9 +172,22 @@ class SendGate(ContractCase):
     def test_open_turn_blocks_send(self):
         self.queue()
         self.records(dict(type='user', promptId='open', timestamp=ts(6), message=dict(role='user', content='More work')))
-        rc, out = self.cli(C, 'next')
+        # Busy is earned by recent evidence: the open turn's record is a minute old.
+        with patch.object(C.time, 'time', return_value=W.epoch_from_iso(ts(6)) + 60):
+            rc, out = self.cli(C, 'next')
         self.assertNotEqual(rc, 0, out)
         self.assertIn('TARGET BUSY', out)
+
+    def test_open_turn_with_nothing_behind_it_is_unknown_not_busy(self):
+        # Measured 2026-10-16: an open turn with no record, tool or process for hours held the
+        # gate on BUSY for nine hours. It still sends nothing, but it is named UNKNOWN for the owner.
+        self.queue()
+        self.records(dict(type='user', promptId='open', timestamp=ts(6), message=dict(role='user', content='More work')))
+        with patch.object(C.time, 'time', return_value=W.epoch_from_iso(ts(6)) + 3600):
+            rc, out = self.cli(C, 'next')
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn('TARGET STATE UNKNOWN', out)
+        self.assertNotIn('SEND EXACTLY', out)
 
     def test_unrelayed_turn_blocks_send(self):
         self.queue()

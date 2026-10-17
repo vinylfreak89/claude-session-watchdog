@@ -342,6 +342,33 @@ def is_opener(rec, prev_pid):
     if _blocks((rec.get('message') or {}).get('content'), 'tool_result'): return False
     return rec.get('promptId') != prev_pid
 
+UNCONFIRMED_MIN = 20.0
+
+def turn_unconfirmed(sess, turn, now=None, stall_min=UNCONFIRMED_MIN):
+    """'Open' is a claim that the model is working, and it has to keep being earned by evidence.
+
+    Returns the minutes of silence when a turn reads open yet NOTHING supports it: no delivered
+    record written for `stall_min` and no tool call still unanswered. That state is UNKNOWN --
+    neither busy nor idle -- and must be reported, never waited on. `Turn.end_state` returns
+    'open' whenever the last record is not a finished assistant reply, so an absence of evidence
+    read as busy: measured 2026-10-16, nine hours of BUSY on an idle target.
+
+    Evidence is per tool call, not the last record's kind: with parallel calls, the first result
+    to return must not hide the one still running (a foreground subagent writes nothing here).
+    A live child process is NOT evidence: background watchers run for hours under an idle,
+    turn-closed session, so treating them as proof of an open turn would bring back BUSY forever.
+    A foreground tool is already covered by its unanswered call. Records the model never
+    received (W.delivered) do not refresh the clock.
+    """
+    if turn is None or turn.end_state != 'open': return None
+    if {u['id'] for u in turn.tool_uses} - set(turn.tool_results): return None   # a tool is still running
+    stamps = [ms_of_iso(r.get('timestamp')) for r in turn.records if r.get('timestamp') and delivered(r)]
+    last = max([s for s in stamps if s] or [0])
+    if not last: return None
+    silent = ((now if now is not None else time.time()) - last / 1000.0) / 60.0
+    if silent < stall_min: return None
+    return silent
+
 def segment_step(cur, rec, prev_pid):
     """THE turn segmentation rule; every reader that splits a transcript into turns calls this.
 
